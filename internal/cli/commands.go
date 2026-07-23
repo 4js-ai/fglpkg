@@ -218,8 +218,10 @@ NOTES:
                                   (spdx is reserved for a future release)
 
 NOTES:
-  v1 emits CycloneDX 1.5 JSON, generated from fglpkg.lock. No network
-  calls — output is deterministic given the lockfile.
+  v1 emits CycloneDX 1.5 JSON, generated from fglpkg.lock. No network calls.
+  The serial number is derived from the content, so it is stable across runs
+  for the same lockfile; set SOURCE_DATE_EPOCH for a byte-reproducible
+  timestamp (otherwise the timestamp reflects the current time).
 `,
 	},
 	{
@@ -410,7 +412,7 @@ login".
 		Summary: "Manage monorepo workspaces",
 		Usage:   "fglpkg workspace <init|add|list|info>",
 		Long: `SUBCOMMANDS:
-  init [members...]        Create fglpkg-workspace.json in the current directory
+  init [members...]        Create fglpkg.workspace.json in the current directory
   add <path>               Add a member project to the workspace
   list                     List workspace members
   info                     Print a workspace summary
@@ -427,7 +429,7 @@ login".
 		Long: `SUBCOMMANDS:
   list                     Show configured repositories, priority, auth scheme, and login status
   add <name> <url>         Add a repository descriptor (defaults to type=artifactory)
-  remove <name>            Remove a configured repository
+  remove <name> (rm)       Remove a configured repository
 
 FLAGS (add):
   --type <t>               genero | artifactory (default artifactory)

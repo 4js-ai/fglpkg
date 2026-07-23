@@ -49,8 +49,8 @@ func TestBuildShape(t *testing.T) {
 	}
 	lf.JARs = []lockfile.LockedJAR{
 		{
-			Key:        "org.apache.poi:poi-ooxml",
-			GroupID:    "org.apache.poi", ArtifactID: "poi-ooxml", Version: "5.3.0",
+			Key:     "org.apache.poi:poi-ooxml",
+			GroupID: "org.apache.poi", ArtifactID: "poi-ooxml", Version: "5.3.0",
 			DownloadURL: "https://repo1.maven.org/maven2/org/apache/poi/poi-ooxml/5.3.0/poi-ooxml-5.3.0.jar",
 			Checksum:    "def456",
 		},
@@ -222,10 +222,51 @@ func TestBuildMarshalRoundTrip(t *testing.T) {
 	}
 }
 
-func TestUUIDFormat(t *testing.T) {
-	u := uuidV4()
+func TestDeterministicUUID(t *testing.T) {
+	u := deterministicUUID("seed-a")
 	if len(u) != 36 || u[8] != '-' || u[13] != '-' || u[14] != '4' || u[18] != '-' || u[23] != '-' {
 		t.Errorf("UUID v4 format wrong: %q", u)
+	}
+	if deterministicUUID("seed-a") != u {
+		t.Error("deterministicUUID not stable for the same seed")
+	}
+	if deterministicUUID("seed-b") == u {
+		t.Error("deterministicUUID collided for different seeds")
+	}
+}
+
+// TestBuildDefaultSerialIsDeterministic: with no injected NewUUID the serial
+// number is derived from content, so the same lockfile yields the same serial
+// across builds and different content yields a different one (GIS-291).
+func TestBuildDefaultSerialIsDeterministic(t *testing.T) {
+	lf := minimalLock()
+	lf.Packages = []lockfile.LockedPackage{{Name: "a", Version: "1.0.0", Checksum: "abc"}}
+
+	opts := Options{ToolVersion: "1.0.0"} // no Now/NewUUID injection
+	s1 := Build(lf, opts).SerialNumber
+	s2 := Build(lf, opts).SerialNumber
+	if s1 != s2 {
+		t.Errorf("serial not stable across builds: %q vs %q", s1, s2)
+	}
+	if !strings.HasPrefix(s1, "urn:uuid:") || len(s1) != len("urn:uuid:")+36 {
+		t.Errorf("serial not a urn:uuid value: %q", s1)
+	}
+
+	lf2 := minimalLock()
+	lf2.Packages = []lockfile.LockedPackage{{Name: "a", Version: "2.0.0", Checksum: "abc"}}
+	if Build(lf2, opts).SerialNumber == s1 {
+		t.Error("serial did not change when content changed")
+	}
+}
+
+// TestBuildSourceDateEpochTimestamp: with no injected Now, SOURCE_DATE_EPOCH
+// pins the timestamp so the document is byte-reproducible (GIS-291).
+func TestBuildSourceDateEpochTimestamp(t *testing.T) {
+	t.Setenv("SOURCE_DATE_EPOCH", "1700000000")
+	doc := Build(minimalLock(), Options{ToolVersion: "1.0.0"}) // default Now
+	want := time.Unix(1700000000, 0).UTC().Format(time.RFC3339)
+	if doc.Metadata.Timestamp != want {
+		t.Errorf("timestamp = %q, want %q from SOURCE_DATE_EPOCH", doc.Metadata.Timestamp, want)
 	}
 }
 

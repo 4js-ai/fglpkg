@@ -286,6 +286,41 @@ func (g *Generator) GenerateLocal() ([]string, error) {
 	return lines, nil
 }
 
+// GenerateGlobal returns export lines using only the global fglpkg home
+// directories (~/.fglpkg/packages, jars, webcomponents), ignoring any local
+// project .fglpkg/. This backs `fglpkg env --global`, which must emit the
+// global scope only — not merge in the current project's packages the way
+// Generate() does.
+func (g *Generator) GenerateGlobal() ([]string, error) {
+	var lines []string
+
+	fglldpath, err := g.buildPathsFrom(g.packagesDir, true)
+	if err != nil {
+		return nil, err
+	}
+	if fglldpath != "" {
+		lines = append(lines, g.prependExportLine("FGLLDPATH", fglldpath))
+	}
+
+	classpath, err := g.buildPathsFrom(g.jarsDir, false)
+	if err != nil {
+		return nil, err
+	}
+	if classpath != "" {
+		lines = append(lines, g.prependExportLine("CLASSPATH", classpath))
+	}
+
+	// FGLIMAGEPATH for direct-mode webcomponent discovery — parent of the
+	// global webcomponents/ dir.
+	if entries, err := os.ReadDir(g.webcomponentsDir); err == nil && len(entries) > 0 {
+		fglimagepath := filepath.Dir(g.webcomponentsDir)
+		lines = append(lines, g.prependExportLine("FGLIMAGEPATH", fglimagepath))
+		lines = append(lines, g.gasHintComment(fglimagepath))
+	}
+
+	return lines, nil
+}
+
 // GenerateGST returns environment variable assignments in Genero Studio
 // format. Genero Studio uses:
 //   - $(ProjectDir) for the base project directory
@@ -310,6 +345,16 @@ func (g *Generator) GenerateGST() ([]string, error) {
 	}
 	if classpath != "" {
 		lines = append(lines, fmt.Sprintf("CLASSPATH=%s;$(CLASSPATH)", classpath))
+	}
+
+	// FGLIMAGEPATH for direct-mode webcomponent discovery — point at the
+	// parent of .fglpkg/webcomponents/ ($(ProjectDir)/.fglpkg) so Genero's
+	// "<fglimagepath-dir>/webcomponents/<COMPONENTTYPE>/" search resolves.
+	// (No GAS hint here: GST output is a strict VAR=value list Genero Studio
+	// consumes, so a shell-comment line would be invalid.)
+	localWC := filepath.Join(".", ".fglpkg", "webcomponents")
+	if entries, err := os.ReadDir(localWC); err == nil && len(entries) > 0 {
+		lines = append(lines, "FGLIMAGEPATH=$(ProjectDir)/.fglpkg;$(FGLIMAGEPATH)")
 	}
 
 	return lines, nil

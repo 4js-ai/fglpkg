@@ -7,9 +7,12 @@
 package sbom
 
 import (
-	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
+	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/lockfile"
@@ -114,11 +117,7 @@ const rootRef = "root"
 func Build(lf *lockfile.LockFile, opts Options) *Document {
 	now := opts.Now
 	if now == nil {
-		now = func() time.Time { return time.Now().UTC() }
-	}
-	newUUID := opts.NewUUID
-	if newUUID == nil {
-		newUUID = uuidV4
+		now = defaultNow
 	}
 	toolName := opts.ToolName
 	if toolName == "" {
@@ -129,11 +128,25 @@ func Build(lf *lockfile.LockFile, opts Options) *Document {
 		toolVendor = defaultToolVendor
 	}
 
+	// Build BDL package components (sorted for stable output).
+	pkgs := append([]lockfile.LockedPackage(nil), lf.Packages...)
+	sort.Slice(pkgs, func(i, j int) bool { return pkgs[i].Name < pkgs[j].Name })
+	var components []Component
+	for _, p := range pkgs {
+		components = append(components, bdlComponent(p))
+	}
+
+	// Build JAR components (sorted by key for stable output).
+	jars := filterJARs(lf.JARs, opts.Production)
+	sort.Slice(jars, func(i, j int) bool { return jars[i].Key < jars[j].Key })
+	for _, j := range jars {
+		components = append(components, jarComponent(j))
+	}
+
 	doc := &Document{
-		BomFormat:    bomFormat,
-		SpecVersion:  specVersion,
-		SerialNumber: "urn:uuid:" + newUUID(),
-		Version:      1,
+		BomFormat:   bomFormat,
+		SpecVersion: specVersion,
+		Version:     1,
 		Metadata: Metadata{
 			Timestamp: now().UTC().Format(time.RFC3339),
 			Tools: []Tool{{
@@ -148,24 +161,68 @@ func Build(lf *lockfile.LockFile, opts Options) *Document {
 				Version: lf.RootManifest.Version,
 			},
 		},
+		Components:   components,
+		Dependencies: buildDependencyEdges(pkgs, jars),
 	}
 
-	// Build BDL package components (sorted for stable output).
-	pkgs := append([]lockfile.LockedPackage(nil), lf.Packages...)
-	sort.Slice(pkgs, func(i, j int) bool { return pkgs[i].Name < pkgs[j].Name })
-	for _, p := range pkgs {
-		doc.Components = append(doc.Components, bdlComponent(p))
+	// Serial number: derived from the document's content so the same lockfile
+	// yields the same serial across runs (byte-reproducible). Tests may inject
+	// a fixed UUID via opts.NewUUID.
+	if opts.NewUUID != nil {
+		doc.SerialNumber = "urn:uuid:" + opts.NewUUID()
+	} else {
+		doc.SerialNumber = "urn:uuid:" + deterministicUUID(bomSeed(doc))
 	}
-
-	// Build JAR components (sorted by key for stable output).
-	jars := filterJARs(lf.JARs, opts.Production)
-	sort.Slice(jars, func(i, j int) bool { return jars[i].Key < jars[j].Key })
-	for _, j := range jars {
-		doc.Components = append(doc.Components, jarComponent(j))
-	}
-
-	doc.Dependencies = buildDependencyEdges(pkgs, jars)
 	return doc
+}
+
+// defaultNow returns the BOM timestamp. It honors SOURCE_DATE_EPOCH (the
+// reproducible-builds convention): when set to a Unix timestamp, that instant
+// is used so the whole document is byte-reproducible; otherwise the current
+// time is used.
+func defaultNow() time.Time {
+	if s := strings.TrimSpace(os.Getenv("SOURCE_DATE_EPOCH")); s != "" {
+		if epoch, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return time.Unix(epoch, 0).UTC()
+		}
+	}
+	return time.Now().UTC()
+}
+
+// bomSeed builds a stable string capturing the document's identity and its
+// component/dependency content (already emitted in sorted order), from which a
+// deterministic serial number is derived.
+func bomSeed(doc *Document) string {
+	var b strings.Builder
+	b.WriteString(doc.BomFormat)
+	b.WriteByte('\n')
+	b.WriteString(doc.SpecVersion)
+	b.WriteByte('\n')
+	if doc.Metadata.Component != nil {
+		b.WriteString(doc.Metadata.Component.Name)
+		b.WriteByte('@')
+		b.WriteString(doc.Metadata.Component.Version)
+	}
+	b.WriteByte('\n')
+	for _, c := range doc.Components {
+		b.WriteString(c.PURL)
+		b.WriteByte('|')
+		b.WriteString(c.Version)
+		for _, h := range c.Hashes {
+			b.WriteByte('|')
+			b.WriteString(h.Alg)
+			b.WriteByte(':')
+			b.WriteString(h.Content)
+		}
+		b.WriteByte('\n')
+	}
+	for _, d := range doc.Dependencies {
+		b.WriteString(d.Ref)
+		b.WriteString("->")
+		b.WriteString(strings.Join(d.DependsOn, ","))
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // filterJARs drops dev-scoped JARs when production mode is on.
@@ -303,18 +360,15 @@ func mavenPURL(group, artifact, version string) string {
 	return "pkg:maven/" + group + "/" + artifact + "@" + version
 }
 
-// uuidV4 returns a random v4 UUID using crypto/rand. Format:
-// xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx with version bits set to 4
-// and variant bits set per RFC 4122.
-func uuidV4() string {
+// deterministicUUID derives a stable, RFC-4122-shaped (version-4 layout) UUID
+// string from seed via SHA-256. It is not random — the same seed always yields
+// the same id — but is well-formed and distinct per distinct content, which is
+// what the SBOM serial number needs (the value is not security-sensitive).
+func deterministicUUID(seed string) string {
+	h := sha256.Sum256([]byte(seed))
 	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand never fails on a real OS; if it does, return a
-		// degenerate id rather than panic. The serial number is not
-		// security-critical for the SBOM use case.
-		return "00000000-0000-4000-8000-000000000000"
-	}
-	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	copy(b[:], h[:16])
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4 layout
 	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
