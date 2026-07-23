@@ -75,11 +75,29 @@ var reader = bufio.NewReader(os.Stdin)
 // privateHint appends a login suggestion to an ErrNotFound when the user has
 // no bearer token. Private packages return 404 indistinguishably from missing
 // packages; we can only hint when auth was never attempted.
-func privateHint(err error, pkg string) error {
+//
+// reg is the registry the package is routed to. When it names a secondary
+// repository (non-empty and not GI), the hint targets that repository's
+// credentials (`fglpkg login --registry <name>`) rather than the GI login,
+// which would be the wrong remedy for an Artifactory-routed package.
+func privateHint(err error, pkg, reg string) error {
 	if !errors.Is(err, registry.ErrNotFound) || registry.Bearer() != "" {
 		return err
 	}
+	if reg != "" && reg != config.GIName {
+		return fmt.Errorf("%w\n  hint: if %q is private, run: fglpkg login --registry %s", err, pkg, reg)
+	}
 	return fmt.Errorf("%w\n  hint: if %q is a private package, run: fglpkg login", err, pkg)
+}
+
+// pinnedRegistry returns the registry a package is pinned to via a manifest
+// `{"version": ..., "registry": ...}` dependency entry, or "" if unpinned (or
+// m is nil). Used to point the not-found hint at the right credentials.
+func pinnedRegistry(m *manifest.Manifest, name string) string {
+	if m == nil {
+		return ""
+	}
+	return collectFGLPins(m)[slugutil.Canonical(name)]
 }
 
 // isValidPackageSlug reports whether a string is a well-formed canonical
@@ -158,6 +176,8 @@ func Execute() error {
 			return cmdDeprecate(args)
 		case "pack":
 			return cmdPack(args)
+		case "lint", "check":
+			return cmdLint(args)
 		case "login":
 			return cmdLogin(args)
 		case "logout":
@@ -455,7 +475,13 @@ func cmdInstall(args []string) error {
 			info, err = registry.Resolve(name, version, generoMajor)
 		}
 		if err != nil {
-			return fmt.Errorf("failed to resolve %s@%s: %w", name, version, privateHint(err, name))
+			// Prefer the explicit --registry target, else the manifest pin, so
+			// the not-found hint points at the credentials that actually matter.
+			hintReg := flags.registry
+			if hintReg == "" {
+				hintReg = pinnedRegistry(m, name)
+			}
+			return fmt.Errorf("failed to resolve %s@%s: %w", name, version, privateHint(err, name, hintReg))
 		}
 		// Older registry server versions omit `name` from the version-info
 		// response; fall back to the user-supplied name so we never write an
@@ -583,7 +609,18 @@ func resetLocalInstall(projectDir string, inst *installer.Installer) error {
 // parseFlags extracts --local/-l, --global/-g, and --force/-f flags from
 // args, returning the remaining args and the flag values. Commands that
 // do not use --force may simply ignore the returned value.
-func parseFlags(args []string) (remaining []string, local, global, force bool) {
+// parseFlags parses the shared --local/--global/--force flags and returns the
+// non-flag positional args. A token that looks like a flag (leading "-") but is
+// neither a shared flag nor one of extraAllowed is rejected as an unknown flag,
+// so e.g. `remove --registry x` errors instead of silently deleting a package
+// named "x". Callers with their own flags (e.g. env's --gst/--gwa) pass them in
+// extraAllowed; those tokens are recognized here and ignored (the caller reads
+// them separately).
+func parseFlags(args []string, extraAllowed ...string) (remaining []string, local, global, force bool, err error) {
+	allowed := make(map[string]bool, len(extraAllowed))
+	for _, e := range extraAllowed {
+		allowed[e] = true
+	}
 	for _, a := range args {
 		switch a {
 		case "--local", "-l":
@@ -593,6 +630,12 @@ func parseFlags(args []string) (remaining []string, local, global, force bool) {
 		case "--force", "-f":
 			force = true
 		default:
+			if allowed[a] {
+				continue
+			}
+			if strings.HasPrefix(a, "-") {
+				return nil, false, false, false, fmt.Errorf("unknown flag %q", a)
+			}
 			remaining = append(remaining, a)
 		}
 	}
@@ -669,7 +712,10 @@ func parseInstallFlags(args []string) (installFlags, error) {
 // ─── remove ───────────────────────────────────────────────────────────────────
 
 func cmdRemove(args []string) error {
-	pkgArgs, forceLocal, forceGlobal, _ := parseFlags(args)
+	pkgArgs, forceLocal, forceGlobal, _, err := parseFlags(args)
+	if err != nil {
+		return err
+	}
 	if len(pkgArgs) == 0 {
 		return fmt.Errorf("usage: fglpkg remove <package>")
 	}
@@ -762,7 +808,10 @@ func cmdUpdate(args []string) error {
 // ─── list ─────────────────────────────────────────────────────────────────────
 
 func cmdList(args []string) error {
-	_, forceLocal, forceGlobal, _ := parseFlags(args)
+	_, forceLocal, forceGlobal, _, err := parseFlags(args)
+	if err != nil {
+		return err
+	}
 	home, _, err := resolveHome(forceLocal, forceGlobal)
 	if err != nil {
 		return err
@@ -785,7 +834,10 @@ func cmdList(args []string) error {
 // ─── env ──────────────────────────────────────────────────────────────────────
 
 func cmdEnv(args []string) error {
-	_, forceLocal, forceGlobal, _ := parseFlags(args)
+	_, forceLocal, forceGlobal, _, err := parseFlags(args, "--gst", "--gwa")
+	if err != nil {
+		return err
+	}
 	gst := false
 	gwa := false
 	for _, a := range args {
@@ -909,34 +961,18 @@ func cmdSearch(args []string) error {
 	} else {
 		fmt.Printf("Results for %q%s:\n", term, searchVersionSuffix(target))
 	}
-	// The GENERO + verdict columns are always shown. The STATUS column only
-	// appears when at least one match is deprecated; otherwise the common
-	// all-live listing keeps its narrower layout with no blank column.
-	showStatus := false
+	rows := make([]searchRow, 0, len(results))
 	for _, r := range results {
-		if r.Deprecated {
-			showStatus = true
-			break
-		}
+		rows = append(rows, searchRow{
+			name:        r.Name,
+			version:     r.LatestVersion,
+			constraint:  r.GeneroConstraint,
+			description: r.Description,
+			deprecated:  r.Deprecated,
+			movedTo:     r.MovedTo,
+		})
 	}
-	if showStatus {
-		fmt.Printf("  %-30s %-12s %-12s %s  %-24s %s\n", "NAME", "VERSION", "GENERO", "?", "STATUS", "DESCRIPTION")
-		fmt.Printf("  %-30s %-12s %-12s %s  %-24s %s\n", "----", "-------", "------", "-", "------", "-----------")
-		for _, r := range results {
-			fmt.Printf("  %-30s %-12s %-12s %s  %-24s %s\n",
-				r.Name, r.LatestVersion, displayConstraint(r.GeneroConstraint),
-				gradeCompat(target, r.GeneroConstraint),
-				searchDeprecatedStatus(r.Deprecated, r.MovedTo), r.Description)
-		}
-	} else {
-		fmt.Printf("  %-30s %-12s %-12s %s  %s\n", "NAME", "VERSION", "GENERO", "?", "DESCRIPTION")
-		fmt.Printf("  %-30s %-12s %-12s %s  %s\n", "----", "-------", "------", "-", "-----------")
-		for _, r := range results {
-			fmt.Printf("  %-30s %-12s %-12s %s  %s\n",
-				r.Name, r.LatestVersion, displayConstraint(r.GeneroConstraint),
-				gradeCompat(target, r.GeneroConstraint), r.Description)
-		}
-	}
+	printSearchTable(rows, target, false)
 	return nil
 }
 
@@ -996,13 +1032,91 @@ func displayConstraint(constraint string) string {
 	return constraint
 }
 
+// searchRow is one line of the annotated search table. source is empty in
+// single-registry mode; movedTo is the successor slug when a deprecation is a
+// relocation.
+type searchRow struct {
+	name        string
+	version     string
+	constraint  string
+	description string
+	deprecated  bool
+	movedTo     string
+	source      string
+}
+
+// searchRowFormat builds the Printf format string for one table line. Columns
+// are NAME VERSION GENERO verdict [STATUS] [SOURCE] DESCRIPTION; the two-space
+// gap after the verdict keeps its single-char column visually distinct. The
+// GENERO width is passed in so a long constraint range (e.g. ">=3.20.00
+// <5.00.00") doesn't spill into the verdict column.
+func searchRowFormat(generoWidth int, showStatus, showSource bool) string {
+	cols := make([]string, 0, 3)
+	if showStatus {
+		cols = append(cols, "%-24s")
+	}
+	if showSource {
+		cols = append(cols, "%-24s")
+	}
+	cols = append(cols, "%s")
+	return fmt.Sprintf("  %%-28s %%-12s %%-%ds %%s  ", generoWidth) + strings.Join(cols, " ") + "\n"
+}
+
+// printSearchTable renders the annotated results table shared by the
+// single-registry and multi-provider search paths. The GENERO and verdict
+// columns grade each row against its own constraint (see gradeCompat); rows
+// whose provider supplies no constraint render "-"/"?". showSource adds the
+// SOURCE column (multi-provider mode); the STATUS column appears only when at
+// least one row is deprecated, so the common all-live listing stays narrow.
+func printSearchTable(rows []searchRow, target *genero.Version, showSource bool) {
+	showStatus := false
+	generoWidth := 12 // floor: keeps short constraint lists looking as before
+	for _, r := range rows {
+		if r.deprecated {
+			showStatus = true
+		}
+		if w := len(displayConstraint(r.constraint)); w > generoWidth {
+			generoWidth = w
+		}
+	}
+	format := searchRowFormat(generoWidth, showStatus, showSource)
+
+	header := []any{"NAME", "VERSION", "GENERO", "?"}
+	divider := []any{"----", "-------", "------", "-"}
+	if showStatus {
+		header = append(header, "STATUS")
+		divider = append(divider, "------")
+	}
+	if showSource {
+		header = append(header, "SOURCE")
+		divider = append(divider, "------")
+	}
+	header = append(header, "DESCRIPTION")
+	divider = append(divider, "-----------")
+	fmt.Printf(format, header...)
+	fmt.Printf(format, divider...)
+
+	for _, r := range rows {
+		vals := []any{r.name, r.version, displayConstraint(r.constraint), gradeCompat(target, r.constraint)}
+		if showStatus {
+			vals = append(vals, searchDeprecatedStatus(r.deprecated, r.movedTo))
+		}
+		if showSource {
+			vals = append(vals, r.source)
+		}
+		vals = append(vals, r.description)
+		fmt.Printf(format, vals...)
+	}
+}
+
 // searchAcrossProviders fans out a search to every configured provider, tags
 // each result with its source repository, and prints a source-tagged table.
 //
-// Genero compatibility grading is scoped out of this path: the provider
-// abstraction does not carry a per-package Genero constraint, so every row
-// renders "-"/"?" (unknown). The columns are still shown to keep the output
-// shape consistent with single-registry search.
+// Each row is graded against its own Genero constraint: the Genero provider
+// supplies one via registry.Search, while Artifactory leaves it empty until
+// FetchInfo, so those rows render "-"/"?" (unknown). On a name collision the
+// constraint (like the version/description) comes from the highest-priority
+// source. The columns match the single-registry search layout.
 func searchAcrossProviders(rs *provider.RepositorySet, term string, all bool, target *genero.Version) error {
 	// Gather in provider priority order so the first-seen version/description
 	// for a colliding name comes from the highest-priority repository.
@@ -1010,6 +1124,7 @@ func searchAcrossProviders(rs *provider.RepositorySet, term string, all bool, ta
 		name        string
 		version     string
 		description string
+		constraint  string
 		deprecated  bool     // package-level deprecation, from the highest-priority source
 		movedTo     string   // successor slug when the deprecation is a relocation
 		sources     []string // every repo the name appears in, priority order
@@ -1033,6 +1148,7 @@ func searchAcrossProviders(rs *provider.RepositorySet, term string, all bool, ta
 				name:        r.Name,
 				version:     r.LatestVersion,
 				description: r.Description,
+				constraint:  r.GeneroConstraint,
 				deprecated:  r.Deprecated,
 				movedTo:     r.MovedTo,
 				sources:     []string{p.Name()},
@@ -1053,40 +1169,28 @@ func searchAcrossProviders(rs *provider.RepositorySet, term string, all bool, ta
 	} else {
 		fmt.Printf("Results for %q%s:\n", term, searchVersionSuffix(target))
 	}
-	// The GENERO + verdict columns are always shown (grading is scoped out of
-	// the multi-provider path, so they render "-"/"?"); the STATUS column only
-	// appears when at least one match is deprecated.
-	showStatus := false
-	for _, name := range order {
-		if byName[name].deprecated {
-			showStatus = true
-			break
-		}
-	}
-	if showStatus {
-		fmt.Printf("  %-28s %-12s %-12s %s  %-24s %-24s %s\n", "NAME", "VERSION", "GENERO", "?", "STATUS", "SOURCE", "DESCRIPTION")
-		fmt.Printf("  %-28s %-12s %-12s %s  %-24s %-24s %s\n", "----", "-------", "------", "-", "------", "------", "-----------")
-	} else {
-		fmt.Printf("  %-28s %-12s %-12s %s  %-24s %s\n", "NAME", "VERSION", "GENERO", "?", "SOURCE", "DESCRIPTION")
-		fmt.Printf("  %-28s %-12s %-12s %s  %-24s %s\n", "----", "-------", "------", "-", "------", "-----------")
-	}
+	// The GENERO + verdict columns grade each result against its own constraint
+	// (the Genero provider supplies one; Artifactory leaves it empty until
+	// FetchInfo, so those rows render "-"/"?"). The STATUS column only appears
+	// when at least one match is deprecated.
 	collisions := 0
+	rows := make([]searchRow, 0, len(order))
 	for _, name := range order {
 		m := byName[name]
-		source := strings.Join(m.sources, ", ")
 		if len(m.sources) > 1 {
 			collisions++
 		}
-		// Constraint is unavailable through the provider layer → always "-"/"?".
-		if showStatus {
-			fmt.Printf("  %-28s %-12s %-12s %s  %-24s %-24s %s\n",
-				m.name, m.version, displayConstraint(""), gradeCompat(target, ""),
-				searchDeprecatedStatus(m.deprecated, m.movedTo), source, m.description)
-		} else {
-			fmt.Printf("  %-28s %-12s %-12s %s  %-24s %s\n",
-				m.name, m.version, displayConstraint(""), gradeCompat(target, ""), source, m.description)
-		}
+		rows = append(rows, searchRow{
+			name:        m.name,
+			version:     m.version,
+			constraint:  m.constraint,
+			description: m.description,
+			deprecated:  m.deprecated,
+			movedTo:     m.movedTo,
+			source:      strings.Join(m.sources, ", "),
+		})
 	}
+	printSearchTable(rows, target, true)
 	if collisions > 0 {
 		fmt.Printf("\nnote: %d package name(s) are available from more than one repository (shown with all sources).\n"+
 			"  Pin the source in fglpkg.json to install a colliding name.\n", collisions)
@@ -1190,15 +1294,9 @@ var binaryToSourceExt = map[string]string{
 // mistake. Binaries come from the package zip (so nested paths are covered);
 // their sources are located anywhere in the project via a one-pass index, so
 // split src/ vs build/ layouts are handled, not just compile-in-place.
-func checkForRecompile(m *manifest.Manifest) {
-	zipData, _, err := buildPackageZip(m)
-	if err != nil {
-		return
-	}
-	entries, err := listZipEntries(zipData)
-	if err != nil {
-		return
-	}
+func checkForRecompile(built *builtPackage) {
+	// Reuse the package staged during enforceLint rather than rebuilding.
+	entries := built.entries
 
 	ignore, err := loadIgnore(".")
 	if err != nil {
@@ -1466,6 +1564,10 @@ func cmdPublish(args []string) error {
 	if err := m.ValidateForPublish(); err != nil {
 		return err
 	}
+	built, err := enforceLint(m, ".")
+	if err != nil {
+		return err
+	}
 	// Detect Genero before the publish check so the latter can reject only
 	// when the SAME variant (not just the same version string) is already
 	// published. Allows adding new Genero major variants to an existing
@@ -1488,11 +1590,23 @@ func cmdPublish(args []string) error {
 	// Publishing to a secondary (Artifactory) repository takes a distinct,
 	// direct-PUT path — no GI variant pre-check, no submit/approval step.
 	if pf.registry != "" && pf.registry != config.GIName {
+		// Same recompile staleness guard as the GI path below — it is about the
+		// local build, not the target, so it applies identically here. Reuse the
+		// package already staged by enforceLint above (checkForRecompile now
+		// inspects the built entries rather than rebuilding the zip).
+		if !ci {
+			checkForRecompile(built)
+		}
+		// Note: the GI path's `--ci` → FGLPKG_TOKEN requirement intentionally does
+		// NOT apply here. Artifactory auth is per-registry (apikey/bearer/basic,
+		// resolved by credentials.AuthHeaders inside publishToArtifactory), so
+		// there is no single env-token analog to enforce; missing credentials are
+		// already rejected there.
 		projectDir, _ := os.Getwd()
 		if err := runHook(m, manifest.HookPrePublish, projectDir); err != nil {
 			return err
 		}
-		if err := publishToArtifactory(home, m, generoMajor, pf); err != nil {
+		if err := publishToArtifactory(home, m, generoMajor, pf, built); err != nil {
 			return fmt.Errorf("publish failed: %w", err)
 		}
 		return runHook(m, manifest.HookPostPublish, projectDir)
@@ -1526,7 +1640,7 @@ func cmdPublish(args []string) error {
 		fmt.Printf("DRY RUN — no network calls will be made\n\n")
 	}
 	if !ci {
-		checkForRecompile(m)
+		checkForRecompile(built)
 	}
 	variant := artifactVariant(m, generoMajor)
 	fmt.Printf("Publishing %s@%s (%s) to %s...\n", m.Name, m.Version, variantDescription(variant), registryURL)
@@ -1534,7 +1648,7 @@ func cmdPublish(args []string) error {
 	if err := runHook(m, manifest.HookPrePublish, projectDir); err != nil {
 		return err
 	}
-	if err := publishPackage(m, registryURL, generoMajor, dryRun, visibilityOverride, changelogText); err != nil {
+	if err := publishPackage(m, registryURL, generoMajor, dryRun, visibilityOverride, changelogText, built); err != nil {
 		return fmt.Errorf("publish failed: %w", err)
 	}
 	if dryRun {
@@ -1552,7 +1666,7 @@ func cmdPublish(args []string) error {
 
 // publishToArtifactory deploys the built package + sidecar manifest to a
 // configured Artifactory generic repository via direct PUTs (spec §10).
-func publishToArtifactory(home string, m *manifest.Manifest, generoMajor string, pf publishFlags) error {
+func publishToArtifactory(home string, m *manifest.Manifest, generoMajor string, pf publishFlags, built *builtPackage) error {
 	reg, err := resolveRegistry(home, pf.registry)
 	if err != nil {
 		return err
@@ -1574,10 +1688,8 @@ func publishToArtifactory(home string, m *manifest.Manifest, generoMajor string,
 	}
 	p := provider.NewArtifactoryProvider(reg, nil, headersApplier(headers))
 
-	zipData, checksum, err := buildPackageZip(m)
-	if err != nil {
-		return fmt.Errorf("cannot build package zip: %w", err)
-	}
+	// Reuse the package staged during enforceLint rather than rebuilding.
+	zipData, checksum := built.zip, built.checksum
 	sidecar, err := json.MarshalIndent(m.PublishCopy(), "", "  ")
 	if err != nil {
 		return fmt.Errorf("cannot serialize sidecar manifest: %w", err)
@@ -1628,12 +1740,9 @@ func publishToArtifactory(home string, m *manifest.Manifest, generoMajor string,
 //     streams the zip body. Server computes size + sha256 and stores in R2.
 //  5. POST /registry/packages/:slug/versions/:version/submit — marks the
 //     version pending so an admin reviews and approves.
-func publishPackage(m *manifest.Manifest, registryURL, generoMajor string, dryRun bool, visibilityOverride, changelogText string) error {
-	// 1. Build the zip.
-	zipData, checksum, err := buildPackageZip(m)
-	if err != nil {
-		return fmt.Errorf("cannot build package zip: %w", err)
-	}
+func publishPackage(m *manifest.Manifest, registryURL, generoMajor string, dryRun bool, visibilityOverride, changelogText string, built *builtPackage) error {
+	// 1. Reuse the package staged during enforceLint rather than rebuilding.
+	zipData, checksum := built.zip, built.checksum
 	fmt.Printf("  Package zip: %d bytes (SHA256: %s)\n", len(zipData), checksum)
 
 	variant := artifactVariant(m, generoMajor)
@@ -2472,6 +2581,10 @@ func cmdLogin(args []string) error {
 		if !strings.HasPrefix(pat, "gpr_") {
 			fmt.Fprintln(os.Stderr, "  Warning: PAT does not start with 'gpr_' — storing anyway.")
 		}
+		// An explicit --token login switches this registry to PAT auth. Drop any
+		// existing OAuth token so it doesn't keep winning over the new PAT at
+		// resolution time (ActiveBearer prefers OAuth ahead of the PAT).
+		creds.ClearOAuth(registryURL)
 		creds.Set(registryURL, pat, "")
 		if err := creds.Save(home); err != nil {
 			return err
