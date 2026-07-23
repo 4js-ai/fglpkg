@@ -2,6 +2,7 @@ package installer
 
 import (
 	"archive/zip"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 
@@ -746,7 +748,15 @@ func (i *Installer) installWebcomponent(info *registry.PackageInfo) error {
 	}
 	tmp.Close()
 
-	return extractWebcomponentZip(tmpName, i.webcomponentsDir)
+	// The manifest's webcomponents list names this package's own
+	// COMPONENTTYPE bundles. Those dirs may be cleanly replaced on
+	// reinstall; any other shared top-level tree (com/, examples/, docs/)
+	// must be merged rather than clobbered (GIS-298).
+	componentTypes, err := readWebcomponentsFromZip(tmpName)
+	if err != nil {
+		return fmt.Errorf("cannot read manifest from zip: %w", err)
+	}
+	return extractWebcomponentZip(tmpName, i.webcomponentsDir, componentTypes)
 }
 
 // InstallJar downloads and verifies a Java JAR into the jars directory.
@@ -1210,69 +1220,139 @@ func extractZip(zipPath, destDir string) error {
 
 // extractWebcomponentZip unpacks a webcomponent zip into destDir
 // (typically .fglpkg/webcomponents/). Entries at the zip root that are
-// not a COMPONENTTYPE/ directory are skipped — most importantly the
-// publisher's fglpkg.json, which would otherwise collide between multiple
-// installed webcomponent packages. Each top-level <COMPONENTTYPE>/ subtree
-// is first removed at destDir/<COMPONENTTYPE>/ so a reinstall replaces
-// stale files cleanly.
-func extractWebcomponentZip(zipPath, destDir string) error {
+// not inside a subdirectory are skipped — most importantly the publisher's
+// fglpkg.json, which would otherwise collide between multiple installed
+// webcomponent packages.
+//
+// componentTypes names this package's own COMPONENTTYPE bundles (from the
+// manifest's "webcomponents" list). Those top-level dirs are the package's
+// own and are cleared before extraction so a reinstall/upgrade replaces
+// stale files cleanly. Any OTHER top-level tree in the zip (e.g. a shared
+// com/, examples/ or docs/ directory) may already hold files installed by a
+// different package, so it is MERGED rather than removed:
+//
+//   - a file absent on disk is written;
+//   - a file already present with byte-identical content is left as-is (dedup);
+//   - a file already present with DIFFERENT content is a hard conflict — the
+//     install aborts naming every clash and touches nothing, instead of
+//     silently clobbering or dropping it (GIS-298).
+func extractWebcomponentZip(zipPath, destDir string, componentTypes []string) error {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return fmt.Errorf("cannot open zip %s: %w", zipPath, err)
 	}
 	defer r.Close()
 
-	// First pass: identify each top-level COMPONENTTYPE/ dir we will touch
-	// and clear any pre-existing install so a re-install does not leave
-	// stale files behind.
-	componentDirs := map[string]bool{}
-	for _, f := range r.File {
-		clean := filepath.Clean(f.Name)
-		if strings.HasPrefix(clean, "..") {
-			return fmt.Errorf("unsafe path in zip: %s", f.Name)
-		}
-		// Top-level entries that contain no slash are not part of a
-		// component bundle — typically fglpkg.json or a stray doc file
-		// (which lives at the project root). Skip them; the manifest
-		// is intentionally not extracted.
-		if !strings.ContainsRune(clean, filepath.Separator) && !strings.ContainsRune(clean, '/') {
-			continue
-		}
-		top := strings.SplitN(filepath.ToSlash(clean), "/", 2)[0]
-		componentDirs[top] = true
-	}
-	for top := range componentDirs {
-		if err := os.RemoveAll(filepath.Join(destDir, top)); err != nil {
-			return fmt.Errorf("cannot clean existing component dir %s: %w", top, err)
+	// owned = the COMPONENTTYPE dirs this package declares. Files under them
+	// belong to this package and are safe to clear-and-replace; files under
+	// any other top-level dir are potentially shared and must be merged.
+	owned := make(map[string]bool, len(componentTypes))
+	for _, c := range componentTypes {
+		if c != "" {
+			owned[c] = true
 		}
 	}
 
+	type zipEntry struct {
+		f     *zip.File
+		clean string
+		top   string
+	}
+	var entries []zipEntry
 	for _, f := range r.File {
 		clean := filepath.Clean(f.Name)
 		if strings.HasPrefix(clean, "..") {
 			return fmt.Errorf("unsafe path in zip: %s", f.Name)
 		}
-		// Skip zip-root files (manifest, root docs) — only COMPONENTTYPE
-		// subtrees install to disk.
 		slashed := filepath.ToSlash(clean)
+		// Zip-root files (manifest, stray root docs) are not extracted —
+		// only files inside a subdirectory install to disk.
 		if !strings.Contains(slashed, "/") {
 			continue
 		}
-		target := filepath.Join(destDir, clean)
-		if f.FileInfo().IsDir() {
+		entries = append(entries, zipEntry{f: f, clean: clean, top: strings.SplitN(slashed, "/", 2)[0]})
+	}
+
+	// Pass 1 — detect conflicts on shared (non-owned) files BEFORE touching
+	// disk, so a clash aborts without leaving a partial install. Files under
+	// an owned COMPONENTTYPE dir are excluded: that dir is cleared in pass 2,
+	// so its current contents are this package's own stale files, not a clash.
+	var conflicts []string
+	for _, e := range entries {
+		if e.f.FileInfo().IsDir() || owned[e.top] {
+			continue
+		}
+		target := filepath.Join(destDir, e.clean)
+		same, exists, err := fileMatchesZipEntry(target, e.f)
+		if err != nil {
+			return err
+		}
+		if exists && !same {
+			conflicts = append(conflicts, filepath.ToSlash(e.clean))
+		}
+	}
+	if len(conflicts) > 0 {
+		sort.Strings(conflicts)
+		return fmt.Errorf("webcomponent install would overwrite %d file(s) already installed by another package with different content:\n    %s\nrefusing to clobber — remove the conflicting package first, or have the packages namespace their shared files (e.g. examples/<pkg>/, docs/<pkg>/)",
+			len(conflicts), strings.Join(conflicts, "\n    "))
+	}
+
+	// Pass 2 — clear this package's own COMPONENTTYPE dirs, then extract.
+	for c := range owned {
+		if err := os.RemoveAll(filepath.Join(destDir, c)); err != nil {
+			return fmt.Errorf("cannot clean existing component dir %s: %w", c, err)
+		}
+	}
+	for _, e := range entries {
+		target := filepath.Join(destDir, e.clean)
+		if e.f.FileInfo().IsDir() {
 			if err := os.MkdirAll(target, 0755); err != nil {
 				return err
 			}
 			continue
 		}
+		// A shared file already present with identical bytes is a dedup —
+		// leave it in place (its owning package still accounts for it).
+		if !owned[e.top] {
+			same, exists, err := fileMatchesZipEntry(target, e.f)
+			if err != nil {
+				return err
+			}
+			if exists && same {
+				continue
+			}
+		}
 		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 			return err
 		}
-		if err := writeZipEntry(f, target); err != nil {
+		if err := writeZipEntry(e.f, target); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// fileMatchesZipEntry reports whether the file at target has byte-identical
+// content to the zip entry f. exists is false (and same false) when target
+// is absent; both callers treat "absent" as "safe to write".
+func fileMatchesZipEntry(target string, f *zip.File) (same, exists bool, err error) {
+	onDisk, err := os.ReadFile(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	rc, err := f.Open()
+	if err != nil {
+		return false, true, err
+	}
+	defer rc.Close()
+	inZip, err := io.ReadAll(rc)
+	if err != nil {
+		return false, true, err
+	}
+	return bytes.Equal(onDisk, inZip), true, nil
 }
 
 func writeZipEntry(f *zip.File, target string) error {
