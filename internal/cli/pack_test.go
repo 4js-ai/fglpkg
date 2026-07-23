@@ -236,3 +236,31 @@ func keys(m map[string]bool) []string {
 	}
 	return out
 }
+
+// TestPackRejectsInvalidVersion covers GIS-374: pack must apply the same strict
+// version check as publish, so a non-semver version fails up front instead of
+// being packed into a bogus artifact.
+func TestPackRejectsInvalidVersion(t *testing.T) {
+	dir := t.TempDir()
+	manifestJSON := `{"name":"demo.pkg","version":"not-a-semver","genero":">=3.20","license":"MIT","repository":"https://example.com/x/y","author":"t","files":["*.42m"]}`
+	if err := os.WriteFile(filepath.Join(dir, manifest.Filename), []byte(manifestJSON), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "mod.42m"), []byte("stub"), 0o644); err != nil {
+		t.Fatalf("write module: %v", err)
+	}
+
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	err := cmdPack([]string{"--list"})
+	if err == nil {
+		t.Fatal("expected pack to reject an invalid version, got nil")
+	}
+	if !strings.Contains(err.Error(), "not valid semver") {
+		t.Errorf("error = %q, want it to mention 'not valid semver'", err.Error())
+	}
+}

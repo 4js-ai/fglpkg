@@ -108,9 +108,10 @@ func Load(rootDir string) (*Workspace, error) {
 		return nil, fmt.Errorf("invalid %s: %w", WorkspaceFilename, err)
 	}
 
-	if len(wf.Members) == 0 {
-		return nil, fmt.Errorf("%s: members list is empty", WorkspaceFilename)
-	}
+	// An empty members list is a valid workspace state — it is exactly what
+	// `workspace init` produces. Loading returns a workspace with zero members
+	// rather than an error, so `workspace list`/`info` and the resolver treat a
+	// fresh workspace as empty-but-valid instead of failing (GIS-375).
 
 	ws := &Workspace{
 		RootDir:      abs,

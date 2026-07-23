@@ -92,6 +92,21 @@ func TestLoadMissingWorkspaceFile(t *testing.T) {
 	}
 }
 
+// TestLoadEmptyMembersIsValid covers GIS-375: a workspace with no members (what
+// `workspace init` produces) is a valid state, so Load must succeed with zero
+// members rather than erroring.
+func TestLoadEmptyMembersIsValid(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, nil) // empty members list
+	ws, err := workspace.Load(root)
+	if err != nil {
+		t.Fatalf("Load of an empty workspace should succeed, got: %v", err)
+	}
+	if len(ws.Members) != 0 {
+		t.Errorf("expected 0 members, got %d", len(ws.Members))
+	}
+}
+
 func TestLoadMissingMemberManifest(t *testing.T) {
 	root := t.TempDir()
 	// Workspace file references a member with no fglpkg.json.

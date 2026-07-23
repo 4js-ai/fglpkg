@@ -1,0 +1,38 @@
+name: Functional tests
+
+# Black-box functional test suite (tests/functional/) that drives the built
+# fglpkg CLI end to end, including a local mock registry + mock OSV service.
+#
+# No Genero runtime is required on the runner: the suite sets
+# FGLPKG_GENERO_VERSION (so genero.Detect() is bypassed) and falls back to stub
+# .42m fixtures when fglcomp is absent. It needs only Go (to build fglpkg),
+# bash, and python3 — all present on ubuntu-latest.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  functional:
+    name: Functional CLI test suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build fglpkg (the binary under test)
+        run: go build -o "$RUNNER_TEMP/fglpkg" ./cmd/fglpkg
+
+      - name: Run functional test suite
+        env:
+          FGLPKG_BIN: ${{ runner.temp }}/fglpkg
+        run: bash tests/functional/run.sh

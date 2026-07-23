@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/genero"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
+	"github.com/4js-mikefolcher/fglpkg/internal/semver"
 )
 
 // cmdPack produces the publishable zip without uploading it anywhere, so
@@ -48,6 +50,16 @@ func cmdPack(args []string) error {
 	}
 	if err := m.Validate(); err != nil {
 		return fmt.Errorf("manifest is invalid: %w", err)
+	}
+	// pack builds the same artifact publish would upload, so it applies the same
+	// strict version check publish does (ValidateForPublish) — otherwise a bogus
+	// version silently flows into a local zip and only fails later at publish
+	// (GIS-374).
+	if !semver.ValidateVersion(strings.TrimSpace(m.Version)) {
+		return fmt.Errorf(
+			`version %q is not valid semver (expected MAJOR.MINOR.PATCH[-prerelease], e.g. "1.2.3")`,
+			m.Version,
+		)
 	}
 	built, err := enforceLint(m, ".")
 	if err != nil {
