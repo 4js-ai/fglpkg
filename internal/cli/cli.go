@@ -131,6 +131,14 @@ func Execute() error {
 		return nil
 	}
 
+	// Top-level version flags: `fglpkg --version` / `-v` print the tool version
+	// (the universal CLI convention) and exit, mirroring `fglpkg version`. Handled
+	// here, before the dispatch switch, so they are not routed as subcommands.
+	if cmd == "--version" || cmd == "-v" {
+		fmt.Println(toolVersionLine())
+		return nil
+	}
+
 	// Per-command help: `fglpkg <command> --help` / `-h`. Handled here, before
 	// the dispatch switch, so every command gets consistent help without each
 	// handler re-implementing it. Passthrough commands (run, bdl) only treat a
@@ -196,6 +204,8 @@ func Execute() error {
 			return cmdDocs(args)
 		case "version":
 			return cmdVersion(args)
+		case "bump":
+			return cmdBump(args)
 		case "self-update", "upgrade":
 			return cmdSelfUpdate(args)
 		case "help", "--help", "-h":

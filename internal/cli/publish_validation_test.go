@@ -84,8 +84,8 @@ func TestCheckVariantNotPublishedSameVariantBlocks(t *testing.T) {
 	if !strings.Contains(err.Error(), "Genero 6") {
 		t.Errorf("err = %v, want one mentioning 'Genero 6'", err)
 	}
-	if !strings.Contains(err.Error(), "fglpkg version") {
-		t.Errorf("err = %v, want guidance pointing at `fglpkg version`", err)
+	if !strings.Contains(err.Error(), "fglpkg bump") {
+		t.Errorf("err = %v, want guidance pointing at `fglpkg bump`", err)
 	}
 }
 

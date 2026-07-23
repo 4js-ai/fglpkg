@@ -480,16 +480,27 @@ specific doc.
 `,
 	},
 	{
-		Name:       "version",
-		Summary:    "Print fglpkg version, or bump package version",
+		Name:    "version",
+		Summary: "Print the fglpkg tool version",
+		Usage:   "fglpkg version",
+		Long: `Prints the fglpkg tool version. Equivalent to 'fglpkg --version' and
+'fglpkg -v'. This command only reports the tool version and never touches
+fglpkg.json — to change the package version, use 'fglpkg bump'.
+`,
+	},
+	{
+		Name:       "bump",
+		Summary:    "Bump the package version in fglpkg.json",
 		ListDetail: "\n(bump = patch|minor|major|prerelease|<semver>, add --git to tag)",
-		Args:       "[bump]",
-		Usage:      "fglpkg version [<patch|minor|major|prerelease|semver>] [--git]",
+		Args:       "<bump>",
+		Usage:      "fglpkg bump <patch|minor|major|prerelease|semver> [--git]",
 		Long: `FLAGS:
   --git                    Stage, commit, and tag the new version
 
-With no arguments, prints the fglpkg tool version. With a bump kind
-(patch|minor|major|prerelease) or an explicit semver, updates fglpkg.json.
+Updates the "version" field of fglpkg.json. Accepts a bump kind
+(patch|minor|major|prerelease) or an explicit semver to set directly.
+With --git, requires a clean working tree, then stages fglpkg.json,
+commits, and creates a v<version> tag.
 `,
 	},
 	{
