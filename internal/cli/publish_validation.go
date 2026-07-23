@@ -39,9 +39,9 @@ func checkVariantNotPublished(m *manifest.Manifest, generoMajor string) error {
 			return fmt.Errorf(
 				"version %s of %s is already published for Genero %s\n"+
 					"bump the version before publishing again:\n"+
-					"    fglpkg version patch     # %s -> next patch\n"+
-					"    fglpkg version minor     # next minor\n"+
-					"    fglpkg version major     # next major",
+					"    fglpkg bump patch     # %s -> next patch\n"+
+					"    fglpkg bump minor     # next minor\n"+
+					"    fglpkg bump major     # next major",
 				m.Version, m.Name, generoMajor, m.Version)
 		}
 	}

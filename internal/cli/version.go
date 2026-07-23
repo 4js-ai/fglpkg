@@ -12,23 +12,39 @@ import (
 	"github.com/4js-mikefolcher/fglpkg/internal/semver"
 )
 
-// cmdVersion dispatches the `version` command. With no extra args it prints
-// the fglpkg tool version (legacy behaviour). With a bump kind or explicit
-// semver it mutates the current project's fglpkg.json.
-//
-//	fglpkg version                        → print fglpkg tool version
-//	fglpkg version patch                  → 1.2.3 → 1.2.4
-//	fglpkg version minor                  → 1.2.3 → 1.3.0
-//	fglpkg version major                  → 1.2.3 → 2.0.0
-//	fglpkg version prerelease             → 1.2.3 → 1.2.4-0, or bump numeric suffix
-//	fglpkg version 2.0.0-rc.1             → set to explicit semver
-//	fglpkg version <bump> --git           → also stage, commit, and tag
-func cmdVersion(args []string) error {
-	if len(args) == 0 {
-		fmt.Printf("fglpkg version %s (build %s)\n", Version, Build)
-		return nil
-	}
+// toolVersionLine is the single source of truth for the tool-version banner,
+// shared by `fglpkg version`, `fglpkg --version`, and `fglpkg -v`.
+func toolVersionLine() string {
+	return fmt.Sprintf("fglpkg version %s (build %s)", Version, Build)
+}
 
+// cmdVersion handles the `version` command: it prints the fglpkg tool version
+// and nothing else. It never touches fglpkg.json. Bumping the package version
+// moved to `fglpkg bump` (GIS-288); passing a bump kind here is rejected with a
+// redirect rather than silently mutating the manifest.
+func cmdVersion(args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf(
+			"fglpkg version only prints the tool version and takes no arguments\n" +
+				"to change the package version, use: fglpkg bump <patch|minor|major|prerelease|<semver>> [--git]",
+		)
+	}
+	fmt.Println(toolVersionLine())
+	return nil
+}
+
+// cmdBump dispatches the `bump` command. It rewrites the current project's
+// fglpkg.json to the next version, and with --git also stages, commits, and
+// tags the release. This is the mutating half of the old `version` command
+// (GIS-288).
+//
+//	fglpkg bump patch                  → 1.2.3 → 1.2.4
+//	fglpkg bump minor                  → 1.2.3 → 1.3.0
+//	fglpkg bump major                  → 1.2.3 → 2.0.0
+//	fglpkg bump prerelease             → 1.2.3 → 1.2.4-0, or bump numeric suffix
+//	fglpkg bump 2.0.0-rc.1             → set to explicit semver
+//	fglpkg bump <kind> --git           → also stage, commit, and tag
+func cmdBump(args []string) error {
 	var gitMode bool
 	var bumpArg string
 	for _, a := range args {
@@ -43,7 +59,7 @@ func cmdVersion(args []string) error {
 		}
 	}
 	if bumpArg == "" {
-		return fmt.Errorf("usage: fglpkg version <patch|minor|major|prerelease|<semver>> [--git]")
+		return fmt.Errorf("usage: fglpkg bump <patch|minor|major|prerelease|<semver>> [--git]")
 	}
 
 	m, err := manifest.Load(".")

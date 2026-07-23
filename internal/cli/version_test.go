@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
@@ -59,10 +60,10 @@ func TestBumpVersion(t *testing.T) {
 	}
 }
 
-// TestVersionBumpRoundTrip exercises the full Load → mutate → Save path
-// against a real on-disk manifest, to ensure the new version survives a
-// write/read cycle via the strict parser.
-func TestVersionBumpRoundTrip(t *testing.T) {
+// TestBumpCommandRoundTrip exercises the `bump` command end-to-end against a
+// real on-disk manifest (no --git): Load → mutate → Save, confirming the new
+// version survives a write/read cycle through the strict parser (GIS-288).
+func TestBumpCommandRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	raw := `{
   "name": "rt-test",
@@ -73,18 +74,14 @@ func TestVersionBumpRoundTrip(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 
-	m, err := manifest.Load(dir)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
 	}
-	cur := semver.MustParse(m.Version)
-	next, err := bumpVersion(cur, "minor")
-	if err != nil {
-		t.Fatalf("bumpVersion: %v", err)
-	}
-	m.Version = next.String()
-	if err := m.Save(dir); err != nil {
-		t.Fatalf("Save: %v", err)
+
+	if _, err := captureStdout(t, func() error { return cmdBump([]string{"minor"}) }); err != nil {
+		t.Fatalf("cmdBump: %v", err)
 	}
 
 	reloaded, err := manifest.Load(dir)
@@ -93,5 +90,84 @@ func TestVersionBumpRoundTrip(t *testing.T) {
 	}
 	if reloaded.Version != "1.1.0" {
 		t.Errorf("reloaded version = %q, want %q", reloaded.Version, "1.1.0")
+	}
+}
+
+// TestBumpRequiresKind: `fglpkg bump` with no bump kind is a usage error.
+func TestBumpRequiresKind(t *testing.T) {
+	err := cmdBump(nil)
+	if err == nil {
+		t.Fatal("expected usage error for bare `bump`, got nil")
+	}
+	if !strings.Contains(err.Error(), "usage: fglpkg bump") {
+		t.Errorf("error = %q, want a bump usage message", err.Error())
+	}
+}
+
+// TestVersionRejectsBumpKind: `fglpkg version patch` (and any argument) is now
+// rejected and points the user at `fglpkg bump` (GIS-288). The manifest must
+// not be touched.
+func TestVersionRejectsBumpKind(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{
+  "name": "rt-test",
+  "version": "1.0.0",
+  "dependencies": { "fgl": {} }
+}`
+	if err := os.WriteFile(filepath.Join(dir, manifest.Filename), []byte(raw), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	err := cmdVersion([]string{"patch"})
+	if err == nil {
+		t.Fatal("expected `version patch` to be rejected, got nil")
+	}
+	if !strings.Contains(err.Error(), "fglpkg bump") {
+		t.Errorf("error = %q, want it to redirect to `fglpkg bump`", err.Error())
+	}
+	// The manifest must be untouched.
+	reloaded, err := manifest.Load(dir)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Version != "1.0.0" {
+		t.Errorf("version changed to %q; `version <kind>` must not mutate the manifest", reloaded.Version)
+	}
+}
+
+// TestVersionPrintsToolVersion: bare `fglpkg version` prints the tool banner.
+func TestVersionPrintsToolVersion(t *testing.T) {
+	out, err := captureStdout(t, func() error { return cmdVersion(nil) })
+	if err != nil {
+		t.Fatalf("cmdVersion: %v", err)
+	}
+	if !strings.Contains(out, "fglpkg version") {
+		t.Errorf("output %q missing tool-version banner", out)
+	}
+}
+
+// TestVersionFlags: `fglpkg --version` and `fglpkg -v` print the tool version
+// via the top-level flag path in Execute (GIS-288).
+func TestVersionFlags(t *testing.T) {
+	origArgs := os.Args
+	t.Cleanup(func() { os.Args = origArgs })
+	for _, flag := range []string{"--version", "-v"} {
+		t.Run(flag, func(t *testing.T) {
+			out, err := captureStdout(t, func() error {
+				os.Args = []string{"fglpkg", flag}
+				return Execute()
+			})
+			if err != nil {
+				t.Fatalf("Execute(%s): %v", flag, err)
+			}
+			if !strings.Contains(out, "fglpkg version") {
+				t.Errorf("%s output %q missing tool-version banner", flag, out)
+			}
+		})
 	}
 }

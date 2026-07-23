@@ -540,11 +540,11 @@ Authentication uses the OAuth/PAT bearer from `fglpkg login` (or `FGLPKG_TOKEN` 
 To publish a new version of a package you own:
 
 ```bash
-fglpkg version patch    # or minor | major | prerelease | <semver>
+fglpkg bump patch    # or minor | major | prerelease | <semver>
 fglpkg publish
 ```
 
-`fglpkg version` bumps the `version` field in `fglpkg.json` (`patch` takes `1.2.3` → `1.2.4`, etc.) and prints a suggested `git tag` command; pass `--git` to have it create the tag for you automatically. Publishing then works exactly like a first release — the CLI picks up the new version from the manifest. This is the same two-command flow regardless of package kind (BDL, JAR-bearing, or pure webcomponent).
+`fglpkg bump` bumps the `version` field in `fglpkg.json` (`patch` takes `1.2.3` → `1.2.4`, etc.) and prints a suggested `git tag` command; pass `--git` to have it create the tag for you automatically. (`fglpkg version` is separate — it only prints the fglpkg tool version.) Publishing then works exactly like a first release — the CLI picks up the new version from the manifest. This is the same two-command flow regardless of package kind (BDL, JAR-bearing, or pure webcomponent).
 
 **Consumers do not pick up the new version automatically.** Once a project has a `fglpkg.lock`, plain `fglpkg install` is a no-op if `fglpkg.json` hasn't changed — it validates the lock against what's on disk and prints `Lock file is up to date... Nothing to install`, even when a newer version satisfying the existing constraint (e.g. `^1.0.0`) now exists on the registry. To fetch it, run:
 

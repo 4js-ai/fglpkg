@@ -36,11 +36,21 @@ var commands = []command{
 		Name:       "init",
 		Summary:    "Create a new fglpkg.json",
 		ListDetail: " (--template <library|app> to scaffold)",
-		Usage:      "fglpkg init [--template <library|app>]",
+		Usage:      "fglpkg init [--template <library|app>] [--yes]",
 		Long: `FLAGS:
   --template, -t <name>    Scaffold from a built-in template (library|app)
+  --yes, -y                Skip prompts and accept all defaults
 
-Prompts for name, version, description, and author, then writes fglpkg.json.
+Prompts for every field 'fglpkg publish' requires — name, version,
+description, author, license, and repository — then writes fglpkg.json.
+The repository is auto-detected from the git 'origin' remote when present
+(SCP-style remotes are normalised to https) and offered as the default;
+otherwise you are prompted for it. A final prompt offers the optional
+Genero version constraint, showing the detected runtime version.
+
+With --yes, or when stdin is not a terminal (CI, scaffolding), init runs
+non-interactively: it accepts the defaults (directory name, version 0.1.0,
+UNLICENSED, detected repository) without prompting.
 `,
 	},
 	{
@@ -480,16 +490,27 @@ specific doc.
 `,
 	},
 	{
-		Name:       "version",
-		Summary:    "Print fglpkg version, or bump package version",
+		Name:    "version",
+		Summary: "Print the fglpkg tool version",
+		Usage:   "fglpkg version",
+		Long: `Prints the fglpkg tool version. Equivalent to 'fglpkg --version' and
+'fglpkg -v'. This command only reports the tool version and never touches
+fglpkg.json — to change the package version, use 'fglpkg bump'.
+`,
+	},
+	{
+		Name:       "bump",
+		Summary:    "Bump the package version in fglpkg.json",
 		ListDetail: "\n(bump = patch|minor|major|prerelease|<semver>, add --git to tag)",
-		Args:       "[bump]",
-		Usage:      "fglpkg version [<patch|minor|major|prerelease|semver>] [--git]",
+		Args:       "<bump>",
+		Usage:      "fglpkg bump <patch|minor|major|prerelease|semver> [--git]",
 		Long: `FLAGS:
   --git                    Stage, commit, and tag the new version
 
-With no arguments, prints the fglpkg tool version. With a bump kind
-(patch|minor|major|prerelease) or an explicit semver, updates fglpkg.json.
+Updates the "version" field of fglpkg.json. Accepts a bump kind
+(patch|minor|major|prerelease) or an explicit semver to set directly.
+With --git, requires a clean working tree, then stages fglpkg.json,
+commits, and creates a v<version> tag.
 `,
 	},
 	{
