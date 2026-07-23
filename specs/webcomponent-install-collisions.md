@@ -1,11 +1,15 @@
-# Spec: webcomponent install — stop silently clobbering shared trees (GIS-298)
+# Spec: webcomponent install & remove — ownership-tracked artifacts (GIS-298, GIS-372)
 
-**Status:** ✅ Implemented — branch `fix/gis-298-webcomponent-collisions` (this repo).
+**Status:** ✅ Implemented — branch `fix/gis-298-webcomponent-collisions` (this repo). Two commits:
+GIS-298 (install-side clobber) then GIS-372 (remove-side orphan).
 **Date:** 2026-07-23
 **Author:** Mike Folcher
-**Ticket:** [GIS-298](https://4js.atlassian.net/browse/GIS-298) — Bug, Severity High.
-**Related:** [package-layout-materialized-root.md](package-layout-materialized-root.md) (GIS-298 is
-called out there as a *separate* failure mode — webcomponents are not on `FGLLDPATH`, so the
+**Tickets:** [GIS-298](https://4js.atlassian.net/browse/GIS-298) (install clobber) and
+[GIS-372](https://4js.atlassian.net/browse/GIS-372) (remove leaves artifacts) — both Bug, Severity
+High. Same subsystem (`internal/installer` webcomponent extraction), same underlying gap:
+webcomponent artifacts under `.fglpkg/webcomponents/` were not owned by any package.
+**Related:** [package-layout-materialized-root.md](package-layout-materialized-root.md) (both are
+called out there as *separate* failure modes — webcomponents are not on `FGLLDPATH`, so the
 merged-root mechanism does not apply).
 
 ---
@@ -91,20 +95,55 @@ Implementation: `internal/installer/installer.go` — `installWebcomponent` read
 - Byte-identical shared files dedup without error.
 - Reinstall/upgrade of a package still cleans its own stale component files.
 
+## Removal (GIS-372)
+
+`fglpkg remove` deleted a package's `.fglpkg/packages/<name>/` dir and its JARs but **never
+touched `.fglpkg/webcomponents/`**, so a removed widget's bundle was orphaned there
+(`pruneToPlan`, installer.go — its old comment even said webcomponents "are not pruned … there is
+no reliable way to know which bundle belonged to a removed package"). Root cause is the same as
+GIS-298's: the webcomponents layout is keyed by `COMPONENTTYPE`, not package name, and the resolver
+`Plan` does not carry the `COMPONENTTYPE` list (it lives in the package manifest, read only at
+install time).
+
+**Fix — a per-scope ownership sidecar** (`internal/installer/webcomponent_owners.go`):
+
+- `webcomponent-owners.json` sits **next to** each scope's `webcomponents/` dir (local
+  `.fglpkg/` and global `~/.fglpkg/`), *not inside* it — so it is never mistaken for a
+  `COMPONENTTYPE` dir by `FGLIMAGEPATH`/GWA discovery. It maps `package → [slash-relative files it
+  installed under webcomponents/]`.
+- **Written at install:** both extraction paths now return the files they wrote under
+  `webcomponents/` — `extractWebcomponentZip` (pure webcomponent packages) and `extractZipRouted`
+  (mixed BDL+webcomponent packages) — and `install*` calls `recordWCOwnership`. A file deduped at
+  install (GIS-298) is still recorded as owned by the deduping package, so shared files are
+  **co-owned**.
+- **Consumed at remove:** `pruneToPlan` computes the set of webcomponent packages that should
+  remain (`wantWC`, from `plan.Packages`) and calls `pruneWebcomponents`, which deletes every file
+  owned *only* by now-absent packages, keeps any file a remaining package still owns, prunes emptied
+  directories, and rewrites (or removes) the sidecar. Covers both pure and mixed packages.
+
+This is the file-level ownership index that GIS-298 and
+[package-layout-materialized-root.md](package-layout-materialized-root.md) flagged as needed;
+building it for removal also narrows GIS-298's same-`COMPONENTTYPE` edge (ownership is now recorded,
+even if the install-time clash guard doesn't yet consult it).
+
+**Tests** (`internal/installer/webcomponent_owners_test.go`): remove-prunes-owned (the GIS-372
+regression, incl. emptied namespace dirs), co-owned file survives until its last owner is removed,
+and no-sidecar (pre-fix install) prunes as a safe no-op.
+
 ## Known limitations / out of scope
 
-- **Same COMPONENTTYPE name from two packages.** If two packages each *declare* the same
-  COMPONENTTYPE (e.g. both ship `Map/`), the second still clears-and-replaces it — last-writer-wins,
-  as today. Detecting that needs a per-file **ownership index** (which package installed which
-  file), deliberately deferred to the merged-root work
-  ([package-layout-materialized-root.md](package-layout-materialized-root.md), "Clean removal"). It
-  is a genuine "same component from two sources" case, distinct from the shared-support-tree clobber
-  this ticket reported.
+- **Same COMPONENTTYPE name from two packages (install-time).** If two packages each *declare* the
+  same COMPONENTTYPE (e.g. both ship `Map/`), the second still clears-and-replaces it at install —
+  last-writer-wins. The ownership index now added for removal (GIS-372) *records* the clash but the
+  install-time guard does not yet consult it to refuse the second install; wiring that in is a small
+  follow-up. It is a genuine "same component from two sources" case, distinct from the
+  shared-support-tree clobber GIS-298 reported.
 - **In-place upgrade of a *shared* file for a package that declares no COMPONENTTYPEs.** With an
   empty `componentTypes`, every tree is treated as shared, so a shared file whose content changed
   between versions would report a conflict on reinstall rather than upgrading in place; the remedy
   is `fglpkg remove` then install. Packages that declare their `webcomponents` (the norm) are
-  unaffected. A full fix is the same ownership index above.
+  unaffected. A full fix would have the install guard consult the ownership index (now written for
+  GIS-372) to treat "a file I already own" as an upgrade rather than a conflict.
 - **Publisher-side guidance (ticket option b):** widgets namespacing their shared trees per package
   (`examples/<pkg>/`, `docs/<pkg>/`; `com/fourjs/<pkg>/` is already collision-free) removes the
   overlap at the source. Complementary to this client-side guard; tracked with the widget packages,

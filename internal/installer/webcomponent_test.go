@@ -48,7 +48,7 @@ func TestExtractZipRoutedMixedPackage(t *testing.T) {
 	destDir := filepath.Join(tmp, "packages", "chart-3d")
 	wcDir := filepath.Join(tmp, "webcomponents")
 
-	if err := extractZipRouted(zipPath, destDir, wcDir, []string{"3DChart"}); err != nil {
+	if _, err := extractZipRouted(zipPath, destDir, wcDir, []string{"3DChart"}); err != nil {
 		t.Fatalf("extractZipRouted: %v", err)
 	}
 
@@ -89,7 +89,7 @@ func TestExtractZipRoutedPureBDL(t *testing.T) {
 	destDir := filepath.Join(tmp, "packages", "pure-bdl")
 	wcDir := filepath.Join(tmp, "webcomponents")
 
-	if err := extractZipRouted(zipPath, destDir, wcDir, nil); err != nil {
+	if _, err := extractZipRouted(zipPath, destDir, wcDir, nil); err != nil {
 		t.Fatalf("extractZipRouted: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(destDir, "Lib.42m")); err != nil {
@@ -119,10 +119,10 @@ func TestExtractWebcomponentZipSharedTreeNoClobber(t *testing.T) {
 		"examples/grid_demo.4gl":       "MAIN END MAIN\n",
 	})
 
-	if err := extractWebcomponentZip(mapZip, wcDir, []string{"Map"}); err != nil {
+	if _, err := extractWebcomponentZip(mapZip, wcDir, []string{"Map"}); err != nil {
 		t.Fatalf("install fjs-map: %v", err)
 	}
-	if err := extractWebcomponentZip(gridZip, wcDir, []string{"DataGrid"}); err != nil {
+	if _, err := extractWebcomponentZip(gridZip, wcDir, []string{"DataGrid"}); err != nil {
 		t.Fatalf("install fjs-data-grid: %v", err)
 	}
 
@@ -151,7 +151,7 @@ func TestExtractWebcomponentZipDedupIdentical(t *testing.T) {
 			name + "/x.html":   "<" + name + "/>",
 			"docs/LICENSE.txt": shared,
 		})
-		if err := extractWebcomponentZip(z, wcDir, []string{name}); err != nil {
+		if _, err := extractWebcomponentZip(z, wcDir, []string{name}); err != nil {
 			t.Fatalf("install %s: %v", name, err)
 		}
 	}
@@ -185,10 +185,10 @@ func TestExtractWebcomponentZipConflictErrors(t *testing.T) {
 		"docs/README.md": "SECOND\n", // same path, different content → conflict
 	})
 
-	if err := extractWebcomponentZip(first, wcDir, []string{"First"}); err != nil {
+	if _, err := extractWebcomponentZip(first, wcDir, []string{"First"}); err != nil {
 		t.Fatalf("install first: %v", err)
 	}
-	err := extractWebcomponentZip(second, wcDir, []string{"Second"})
+	_, err := extractWebcomponentZip(second, wcDir, []string{"Second"})
 	if err == nil {
 		t.Fatal("expected a conflict error installing second, got nil")
 	}
@@ -225,10 +225,10 @@ func TestExtractWebcomponentZipReinstallCleansOwned(t *testing.T) {
 		"W/W.html":    "<w2/>",
 	})
 
-	if err := extractWebcomponentZip(v1, wcDir, []string{"W"}); err != nil {
+	if _, err := extractWebcomponentZip(v1, wcDir, []string{"W"}); err != nil {
 		t.Fatalf("install v1: %v", err)
 	}
-	if err := extractWebcomponentZip(v2, wcDir, []string{"W"}); err != nil {
+	if _, err := extractWebcomponentZip(v2, wcDir, []string{"W"}); err != nil {
 		t.Fatalf("reinstall v2: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(wcDir, "W", "old.html")); err == nil {
