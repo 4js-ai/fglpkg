@@ -3424,6 +3424,10 @@ func cmdWorkspaceList() error {
 		return err
 	}
 	fmt.Printf("Workspace: %s\n", wsRoot)
+	if len(ws.Members) == 0 {
+		fmt.Println("  (no members yet — add one with 'fglpkg workspace add <path>')")
+		return nil
+	}
 	for _, m := range ws.Members {
 		fmt.Printf("  %-30s v%s\n", m.Manifest.Name, m.Manifest.Version)
 	}

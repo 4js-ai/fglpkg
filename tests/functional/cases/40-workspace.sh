@@ -1,7 +1,5 @@
 suite "workspace"
 
-# NOTE: the created file is fglpkg.workspace.json (the `workspace --help` text
-# says "fglpkg-workspace.json" — a doc discrepancy in fglpkg 4.0.4).
 _ws_init() {
   run workspace init
   assert_success
@@ -32,3 +30,13 @@ _ws_add_list() {
   run workspace list; assert_success; assert_contains "member.a"
 }
 it "workspace add + list shows the member" _ws_add_list
+
+# A freshly-initialised workspace has no members — that's valid, so `list`
+# should exit 0, not treat empty-but-valid as an error (GIS-375).
+_ws_list_empty() {
+  run workspace init; assert_success
+  run workspace list
+  assert_success
+  assert_contains "Workspace:"
+}
+it "workspace list on an empty workspace exits 0" _ws_list_empty
