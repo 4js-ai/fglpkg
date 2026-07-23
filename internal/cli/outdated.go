@@ -115,11 +115,7 @@ func cmdOutdated(args []string) error {
 	}
 
 	if outdatedCount > 0 {
-		plural := ""
-		if outdatedCount > 1 {
-			plural = "s"
-		}
-		return fmt.Errorf("%d dependenc%s out of date", outdatedCount, pluralY(outdatedCount)+plural)
+		return fmt.Errorf("%d dependenc%s out of date", outdatedCount, pluralY(outdatedCount))
 	}
 	return nil
 }
@@ -328,7 +324,7 @@ func pluralY(n int) string {
 	if n == 1 {
 		return "y"
 	}
-	return "ie"
+	return "ies"
 }
 
 // firstNonEmpty returns the first non-empty string among its arguments, or "".

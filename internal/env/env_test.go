@@ -90,6 +90,81 @@ func TestGenerateLocalSkipsFGLIMAGEPATHWhenEmpty(t *testing.T) {
 	}
 }
 
+// TestGenerateGSTIncludesFGLIMAGEPATH verifies the Genero Studio env output
+// emits FGLIMAGEPATH (pointing at $(ProjectDir)/.fglpkg) when a webcomponent
+// is installed locally (GIS-293).
+func TestGenerateGSTIncludesFGLIMAGEPATH(t *testing.T) {
+	projectDir := t.TempDir()
+	mustMkdir(t, filepath.Join(projectDir, ".fglpkg", "webcomponents", "MyWidget"))
+
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	g := New(t.TempDir())
+	exports, err := g.GenerateGST()
+	if err != nil {
+		t.Fatalf("GenerateGST: %v", err)
+	}
+	joined := strings.Join(exports, "\n")
+	if !strings.Contains(joined, "FGLIMAGEPATH=$(ProjectDir)/.fglpkg;$(FGLIMAGEPATH)") {
+		t.Errorf("expected FGLIMAGEPATH GST line in:\n%s", joined)
+	}
+}
+
+// TestGenerateGSTSkipsFGLIMAGEPATHWhenEmpty verifies no FGLIMAGEPATH line is
+// emitted for GST when there are no local webcomponents.
+func TestGenerateGSTSkipsFGLIMAGEPATHWhenEmpty(t *testing.T) {
+	projectDir := t.TempDir()
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	g := New(t.TempDir())
+	exports, err := g.GenerateGST()
+	if err != nil {
+		t.Fatalf("GenerateGST: %v", err)
+	}
+	for _, line := range exports {
+		if strings.Contains(line, "FGLIMAGEPATH") {
+			t.Errorf("unexpected FGLIMAGEPATH line: %q", line)
+		}
+	}
+}
+
+// TestGenerateGlobalIsGlobalOnly verifies that --global output (GenerateGlobal)
+// emits only the global home's packages and never merges in the current
+// project's local .fglpkg/ packages (GIS-290).
+func TestGenerateGlobalIsGlobalOnly(t *testing.T) {
+	globalHome := t.TempDir()
+	mustMkdir(t, filepath.Join(globalHome, "packages", "globalpkg"))
+
+	projectDir := t.TempDir()
+	mustMkdir(t, filepath.Join(projectDir, ".fglpkg", "packages", "localpkg"))
+
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	g := New(globalHome)
+	exports, err := g.GenerateGlobal()
+	if err != nil {
+		t.Fatalf("GenerateGlobal: %v", err)
+	}
+	joined := strings.Join(exports, "\n")
+	if !strings.Contains(joined, "globalpkg") {
+		t.Errorf("expected global package on FGLLDPATH in:\n%s", joined)
+	}
+	if strings.Contains(joined, "localpkg") {
+		t.Errorf("--global must not merge local project packages, but got:\n%s", joined)
+	}
+}
+
 func mustMkdir(t *testing.T, p string) {
 	t.Helper()
 	if err := os.MkdirAll(p, 0755); err != nil {

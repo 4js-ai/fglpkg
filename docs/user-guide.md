@@ -1292,7 +1292,7 @@ Workspaces let you develop multiple related packages in a single repository. Loc
 fglpkg workspace init packages/myutils packages/dbtools
 ```
 
-This creates a `fglpkg-workspace.json` file. Each listed path should contain its own `fglpkg.json`.
+This creates a `fglpkg.workspace.json` file. Each listed path should contain its own `fglpkg.json`.
 
 ### Adding Members
 

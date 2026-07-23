@@ -43,8 +43,7 @@ type auditCounts struct {
 const bdlNotScanned = "BDL packages were not scanned (no advisory database available yet)."
 
 // cmdAudit cross-checks installed Java JAR dependencies against the
-// Sonatype OSS Index v3 advisory database and reports any known
-// vulnerabilities.
+// OSV.dev advisory database and reports any known vulnerabilities.
 //
 //	fglpkg audit                                Default: severity floor = medium
 //	fglpkg audit --json                         Machine-readable JSON output

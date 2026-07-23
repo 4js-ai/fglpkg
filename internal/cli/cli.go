@@ -880,6 +880,10 @@ func cmdEnv(args []string) error {
 	switch {
 	case gst:
 		exports, err = g.GenerateGST()
+	case forceGlobal:
+		// Explicit --global emits the global scope only, never merging in the
+		// current project's local .fglpkg/ packages (GIS-290).
+		exports, err = g.GenerateGlobal()
 	case useLocal:
 		exports, err = g.GenerateLocal()
 	default:
