@@ -26,3 +26,13 @@ _pack_reproducible() {
   assert_eq "$(sha256 a.zip)" "$(sha256 b.zip)"
 }
 it "pack is byte-reproducible (identical SHA-256 twice)" _pack_reproducible
+
+# pack applies the same strict version check publish does: a non-semver version
+# is rejected up front rather than packed into a bogus artifact (GIS-374).
+_pack_rejects_bad_version() {
+  mkpkg demo.pkg not-a-semver
+  run pack --list
+  assert_failure
+  assert_contains "not valid semver"
+}
+it "pack rejects a manifest with an invalid version" _pack_rejects_bad_version
