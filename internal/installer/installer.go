@@ -1206,13 +1206,11 @@ func extractZipRouted(zipPath, destDir, webcomponentsDir string, wcNames []strin
 		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 			return nil, err
 		}
-		if err := writeZipEntry(f, target); err != nil {
+		if err := writeZipEntry(f, target, &budget); err != nil {
 			return nil, err
 		}
 		if routedToWC {
 			wcInstalled = append(wcInstalled, slashed)
-		if err := writeZipEntry(f, target, &budget); err != nil {
-			return nil, err
 		}
 	}
 	return wcInstalled, nil
@@ -1364,7 +1362,7 @@ func extractWebcomponentZip(zipPath, destDir string, componentTypes []string) ([
 		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 			return nil, err
 		}
-		if err := writeZipEntry(f, target, &budget); err != nil {
+		if err := writeZipEntry(e.f, target, &budget); err != nil {
 			return nil, err
 		}
 	}
