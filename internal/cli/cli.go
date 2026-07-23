@@ -264,15 +264,10 @@ func semverNewer(current, latest string) bool {
 	return l.GreaterThan(c)
 }
 
-// isTerminal reports whether f is a character device (an interactive terminal),
-// used to keep the update notice out of piped or scripted output.
-func isTerminal(f *os.File) bool {
-	fi, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return fi.Mode()&os.ModeCharDevice != 0
-}
+// isTerminal reports whether f is attached to an interactive terminal. Its
+// implementation is platform-specific (see isatty_*.go) because a plain
+// character-device check cannot distinguish a tty from /dev/null; it is used to
+// keep the update notice — and the init prompts — out of piped or scripted use.
 
 // cmdSelfUpdate downloads and installs the latest release (GIS-255), verifying
 // the Ed25519 release signature and SHA-256 before atomically replacing the
@@ -329,13 +324,10 @@ func cmdInit(args []string) error {
 		// description/author have no sensible default; left empty so the manifest
 		// scaffolds cleanly, and `fglpkg publish` reports what still needs filling.
 	} else {
-		name = promptPackageSlug()
-		version = promptPackageVersion()
-		description = promptNonEmptyString("Description")
-		author = promptNonEmptyString("Author")
-		license = promptWithDefault("License", initDefaultLicense)
-		repository = promptRepository(detectedRepo)
-		generoConstraint = promptGeneroConstraint()
+		name, version, description, author, license, repository, generoConstraint, err = collectInitFieldsInteractive(detectedRepo)
+		if err != nil {
+			return err
+		}
 	}
 
 	m := manifest.New(name, version, description, author)
@@ -365,6 +357,37 @@ const (
 	initDefaultVersion = "0.1.0"
 	initDefaultLicense = "UNLICENSED"
 )
+
+// collectInitFieldsInteractive runs the `init` prompts and returns the collected
+// fields. Any prompt that reaches end-of-input (Ctrl-D at a terminal, or a
+// redirected/closed stdin) aborts with an error rather than looping, so init
+// never hangs; the error points the user at the non-interactive escape hatch.
+func collectInitFieldsInteractive(detectedRepo string) (name, version, description, author, license, repository, genero string, err error) {
+	if name, err = promptPackageSlug(); err != nil {
+		return
+	}
+	if version, err = promptPackageVersion(); err != nil {
+		return
+	}
+	if description, err = promptNonEmptyString("Description"); err != nil {
+		return
+	}
+	if author, err = promptNonEmptyString("Author"); err != nil {
+		return
+	}
+	if license, err = promptWithDefault("License", initDefaultLicense); err != nil {
+		return
+	}
+	if repository, err = promptRepository(detectedRepo); err != nil {
+		return
+	}
+	genero, err = promptGeneroConstraint()
+	return
+}
+
+// errPromptEOF is returned by the prompt helpers when standard input ends before
+// a value was read. cmdInit turns it into user-facing guidance.
+var errPromptEOF = errors.New("reached end of input before all fields were entered — re-run with --yes to accept defaults non-interactively")
 
 // stdinIsTerminal reports whether standard input is an interactive terminal.
 // It is a variable so tests can force the interactive prompt path.
@@ -430,7 +453,7 @@ func normalizeGitRemoteURL(raw string) string {
 // from git it is offered as the default (Enter accepts it); otherwise a value
 // is required, since ValidateForPublish needs it and there is nothing to
 // default to.
-func promptRepository(detected string) string {
+func promptRepository(detected string) (string, error) {
 	if detected != "" {
 		return promptWithDefault("Repository", detected)
 	}
@@ -444,7 +467,7 @@ func promptRepository(detected string) string {
 //   - any other input    → used verbatim, validated as a semver constraint
 //
 // "current" is offered only when a Genero version could be detected.
-func promptGeneroConstraint() string {
+func promptGeneroConstraint() (string, error) {
 	detected, derr := genero.Detect()
 	var label string
 	if derr == nil {
@@ -456,22 +479,26 @@ func promptGeneroConstraint() string {
 		label = "Genero constraint (none detected; Enter to skip, or type e.g. ^5.0.0)"
 	}
 	for {
-		ans := strings.TrimSpace(promptWithDefault(label, ""))
+		raw, err := promptWithDefault(label, "")
+		if err != nil {
+			return "", err
+		}
+		ans := strings.TrimSpace(raw)
 		switch {
 		case ans == "":
-			return ""
+			return "", nil
 		case strings.EqualFold(ans, "current"):
 			if derr != nil {
 				fmt.Println("error: no Genero version detected — type an explicit constraint or press Enter to skip")
 				continue
 			}
-			return fmt.Sprintf("^%d.0.0", detected.Semver().Major)
+			return fmt.Sprintf("^%d.0.0", detected.Semver().Major), nil
 		default:
 			if _, err := semver.ParseConstraint(ans); err != nil {
 				fmt.Printf("error: %q is not a valid version constraint (e.g. ^5.0.0, >=5.0.0)\n", ans)
 				continue
 			}
-			return ans
+			return ans, nil
 		}
 	}
 }
@@ -4134,24 +4161,32 @@ func matchGlob(pattern, p string) bool {
 }
 
 // promptWithDefault prints a prompt and reads a full line from stdin,
-// supporting spaces in the input. Returns def if the user presses enter
-// without typing anything.
-func promptWithDefault(label, def string) string {
+// supporting spaces in the input. A bare enter (empty line) returns def.
+//
+// When input ends with no value on the line (EOF: Ctrl-D at a terminal, or a
+// redirected/closed stdin), it returns (def, errPromptEOF) so callers that
+// re-prompt on invalid input stop instead of looping forever. A final line
+// without a trailing newline is still returned as input.
+func promptWithDefault(label, def string) (string, error) {
 	if def != "" {
 		fmt.Printf("%s (%s): ", label, def)
 	} else {
 		fmt.Printf("%s: ", label)
 	}
-	val, err := reader.ReadString('\n')
-	if err != nil && len(val) == 0 {
-		return def
-	}
+	line, err := reader.ReadString('\n')
 	// Trim CR and LF to handle both Unix (\n) and Windows (\r\n) line endings.
-	val = strings.TrimRight(val, "\r\n")
-	if val == "" {
-		return def
+	line = strings.TrimRight(line, "\r\n")
+	if line != "" {
+		// Got input, even if EOF immediately followed an unterminated final line.
+		return line, nil
 	}
-	return val
+	if err != nil {
+		// No value and the stream ended/failed: signal EOF so required prompts
+		// abort rather than re-read an empty line indefinitely.
+		return def, errPromptEOF
+	}
+	// Bare enter accepts the default.
+	return def, nil
 }
 
 // promptPackageSlug prompts for the package name and re-prompts until the entry
@@ -4161,7 +4196,7 @@ func promptWithDefault(label, def string) string {
 // The current directory name is offered as the default, but only when it
 // normalizes to a valid slug. The name is kept verbatim as the display name;
 // its canonical slug is echoed when the two differ.
-func promptPackageSlug() string {
+func promptPackageSlug() (string, error) {
 	const slugPrompt = "Package name"
 
 	defaultName := filepathBase()
@@ -4169,15 +4204,20 @@ func promptPackageSlug() string {
 		defaultName = ""
 	}
 
-	name := promptWithDefault(slugPrompt, defaultName)
+	name, err := promptWithDefault(slugPrompt, defaultName)
+	if err != nil {
+		return "", err
+	}
 	for !isValidPackageSlug(slugutil.Canonical(name)) {
 		fmt.Printf("error: %q does not normalize to a valid package slug — after lowercasing and collapsing '.'/'_'/'-' it must be 2-64 chars of letters, digits, and hyphens\n", name)
-		name = promptWithDefault(slugPrompt, defaultName)
+		if name, err = promptWithDefault(slugPrompt, defaultName); err != nil {
+			return "", err
+		}
 	}
 	if s := slugutil.Canonical(name); s != name {
 		fmt.Printf("  → will publish under slug %q\n", s)
 	}
-	return name
+	return name, nil
 }
 
 // promptPackageVersion prompts for the initial version and re-prompts until
@@ -4185,16 +4225,21 @@ func promptPackageSlug() string {
 // defaulting to 0.1.0. Validating here keeps a published package's version in
 // the ordered, comparable form the resolver and `outdated` rely on, rather
 // than letting an arbitrary string through to the registry.
-func promptPackageVersion() string {
+func promptPackageVersion() (string, error) {
 	const versionPrompt = "Version"
 	const defaultVersion = "0.1.0"
 
-	version := promptWithDefault(versionPrompt, defaultVersion)
+	version, err := promptWithDefault(versionPrompt, defaultVersion)
+	if err != nil {
+		return "", err
+	}
 	for !semver.ValidateVersion(version) {
 		fmt.Printf("error: Invalid version \"%s\" - must be MAJOR.MINOR.PATCH, e.g. 1.0.0 or 2.1.0-rc.1\n", version)
-		version = promptWithDefault(versionPrompt, defaultVersion)
+		if version, err = promptWithDefault(versionPrompt, defaultVersion); err != nil {
+			return "", err
+		}
 	}
-	return version
+	return version, nil
 }
 
 // promptNonEmptyString prompts with the given label and re-prompts until the
@@ -4202,12 +4247,17 @@ func promptPackageVersion() string {
 // no sensible default (e.g. description, author). The label is lowercased when
 // echoed back in the error line, so callers should pass it in display case
 // (e.g. "Description" yields "Invalid description - cannot be empty").
-func promptNonEmptyString(prompt string) string {
-	str := promptWithDefault(prompt, "")
+func promptNonEmptyString(prompt string) (string, error) {
+	str, err := promptWithDefault(prompt, "")
+	if err != nil {
+		return "", err
+	}
 	toLower := strings.ToLower(prompt)
 	for str == "" {
 		fmt.Printf("error: Invalid %s - cannot be empty\n", toLower)
-		str = promptWithDefault(prompt, "")
+		if str, err = promptWithDefault(prompt, ""); err != nil {
+			return "", err
+		}
 	}
-	return str
+	return str, nil
 }
