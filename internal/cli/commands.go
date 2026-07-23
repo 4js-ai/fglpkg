@@ -36,11 +36,21 @@ var commands = []command{
 		Name:       "init",
 		Summary:    "Create a new fglpkg.json",
 		ListDetail: " (--template <library|app> to scaffold)",
-		Usage:      "fglpkg init [--template <library|app>]",
+		Usage:      "fglpkg init [--template <library|app>] [--yes]",
 		Long: `FLAGS:
   --template, -t <name>    Scaffold from a built-in template (library|app)
+  --yes, -y                Skip prompts and accept all defaults
 
-Prompts for name, version, description, and author, then writes fglpkg.json.
+Prompts for every field 'fglpkg publish' requires — name, version,
+description, author, license, and repository — then writes fglpkg.json.
+The repository is auto-detected from the git 'origin' remote when present
+(SCP-style remotes are normalised to https) and offered as the default;
+otherwise you are prompted for it. A final prompt offers the optional
+Genero version constraint, showing the detected runtime version.
+
+With --yes, or when stdin is not a terminal (CI, scaffolding), init runs
+non-interactively: it accepts the defaults (directory name, version 0.1.0,
+UNLICENSED, detected repository) without prompting.
 `,
 	},
 	{

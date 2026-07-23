@@ -46,6 +46,7 @@ var completionFlags = []string{
 	"--format=",
 	"--help", "-h",
 	"--version", "-v",
+	"--yes", "-y",
 }
 
 // cmdCompletion emits a shell completion script for the selected shell.

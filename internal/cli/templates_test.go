@@ -14,18 +14,22 @@ func TestParseInitFlags(t *testing.T) {
 		name    string
 		args    []string
 		want    string
+		wantYes bool
 		wantErr bool
 	}{
-		{"none", nil, "", false},
-		{"long", []string{"--template", "library"}, "library", false},
-		{"short", []string{"-t", "app"}, "app", false},
-		{"equals", []string{"--template=library"}, "library", false},
-		{"missing value", []string{"--template"}, "", true},
-		{"unexpected arg", []string{"bogus"}, "", true},
+		{"none", nil, "", false, false},
+		{"long", []string{"--template", "library"}, "library", false, false},
+		{"short", []string{"-t", "app"}, "app", false, false},
+		{"equals", []string{"--template=library"}, "library", false, false},
+		{"yes long", []string{"--yes"}, "", true, false},
+		{"yes short", []string{"-y"}, "", true, false},
+		{"template and yes", []string{"-t", "app", "--yes"}, "app", true, false},
+		{"missing value", []string{"--template"}, "", false, true},
+		{"unexpected arg", []string{"bogus"}, "", false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseInitFlags(tc.args)
+			got, yes, err := parseInitFlags(tc.args)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error for %v", tc.args)
@@ -36,7 +40,10 @@ func TestParseInitFlags(t *testing.T) {
 				t.Fatalf("parseInitFlags(%v): %v", tc.args, err)
 			}
 			if got != tc.want {
-				t.Errorf("got %q, want %q", got, tc.want)
+				t.Errorf("template = %q, want %q", got, tc.want)
+			}
+			if yes != tc.wantYes {
+				t.Errorf("yes = %v, want %v", yes, tc.wantYes)
 			}
 		})
 	}

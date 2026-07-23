@@ -301,7 +301,7 @@ func cmdSelfUpdate(args []string) error {
 // ─── init ─────────────────────────────────────────────────────────────────────
 
 func cmdInit(args []string) error {
-	tmplName, err := parseInitFlags(args)
+	tmplName, yes, err := parseInitFlags(args)
 	if err != nil {
 		return err
 	}
@@ -315,11 +315,35 @@ func cmdInit(args []string) error {
 	if _, err := os.Stat(manifest.Filename); err == nil {
 		return fmt.Errorf("%s already exists in the current directory", manifest.Filename)
 	}
-	name := promptPackageSlug()
-	version := promptPackageVersion()
-	description := promptNonEmptyString("Description")
-	author := promptNonEmptyString("Author")
+
+	// Prompts block on a non-TTY (CI, scaffolding). --yes, or the absence of an
+	// interactive terminal, switches to a non-interactive path that accepts the
+	// defaults for every field without prompting.
+	detectedRepo := detectGitRepository()
+	var name, version, description, author, license, repository, generoConstraint string
+	if yes || !stdinIsTerminal() {
+		name = initDefaultName()
+		version = initDefaultVersion
+		license = initDefaultLicense
+		repository = detectedRepo // may be "" — publish will flag it later
+		// description/author have no sensible default; left empty so the manifest
+		// scaffolds cleanly, and `fglpkg publish` reports what still needs filling.
+	} else {
+		name = promptPackageSlug()
+		version = promptPackageVersion()
+		description = promptNonEmptyString("Description")
+		author = promptNonEmptyString("Author")
+		license = promptWithDefault("License", initDefaultLicense)
+		repository = promptRepository(detectedRepo)
+		generoConstraint = promptGeneroConstraint()
+	}
+
 	m := manifest.New(name, version, description, author)
+	m.License = license
+	m.Repository = repository
+	if generoConstraint != "" {
+		m.GeneroConstraint = generoConstraint
+	}
 	if tmpl != nil {
 		tmpl.apply(m)
 	}
@@ -335,26 +359,145 @@ func cmdInit(args []string) error {
 	return nil
 }
 
-// parseInitFlags extracts the optional --template/-t value from `init` args.
-// Returns "" when no template was requested.
-func parseInitFlags(args []string) (string, error) {
-	tmpl := ""
+// init default values shared by the interactive prompts and the
+// non-interactive (--yes / non-TTY) path.
+const (
+	initDefaultVersion = "0.1.0"
+	initDefaultLicense = "UNLICENSED"
+)
+
+// stdinIsTerminal reports whether standard input is an interactive terminal.
+// It is a variable so tests can force the interactive prompt path.
+var stdinIsTerminal = func() bool { return isTerminal(os.Stdin) }
+
+// initDefaultName returns the default package name used non-interactively: the
+// current directory's basename, which is also what promptPackageSlug offers as
+// its default in interactive mode.
+func initDefaultName() string {
+	return filepathBase()
+}
+
+// detectGitRepository reads remote.origin.url from the git repository in the
+// current directory and normalises it to an https URL. It returns "" when the
+// directory is not a git repository or has no origin remote configured — both
+// cases where init must fall back to prompting the user.
+func detectGitRepository() string {
+	out, err := exec.Command("git", "config", "--get", "remote.origin.url").Output()
+	if err != nil {
+		return ""
+	}
+	return normalizeGitRemoteURL(string(out))
+}
+
+// normalizeGitRemoteURL turns a git remote URL into a browser-usable https URL.
+// It handles SCP-style remotes (git@github.com:owner/repo.git), ssh:// and
+// git:// schemes, and plain https URLs, stripping any trailing ".git". An
+// unrecognised value is returned trimmed but otherwise unchanged.
+func normalizeGitRemoteURL(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	s = strings.TrimSuffix(s, ".git")
+
+	if !strings.Contains(s, "://") {
+		// SCP-like syntax: [user@]host:path — no scheme, path after a colon.
+		if at := strings.Index(s, "@"); at >= 0 {
+			s = s[at+1:] // drop the leading user@
+		}
+		if colon := strings.Index(s, ":"); colon >= 0 {
+			host := s[:colon]
+			path := strings.TrimPrefix(s[colon+1:], "/")
+			return "https://" + host + "/" + path
+		}
+		return s
+	}
+
+	// ssh:// or git:// → https://, dropping any embedded credentials.
+	if strings.HasPrefix(s, "ssh://") || strings.HasPrefix(s, "git://") {
+		rest := s[strings.Index(s, "://")+3:]
+		if at := strings.Index(rest, "@"); at >= 0 {
+			rest = rest[at+1:]
+		}
+		return "https://" + rest
+	}
+
+	// http(s):// is already usable.
+	return s
+}
+
+// promptRepository asks for the repository URL. When a value was auto-detected
+// from git it is offered as the default (Enter accepts it); otherwise a value
+// is required, since ValidateForPublish needs it and there is nothing to
+// default to.
+func promptRepository(detected string) string {
+	if detected != "" {
+		return promptWithDefault("Repository", detected)
+	}
+	return promptNonEmptyString("Repository")
+}
+
+// promptGeneroConstraint prompts for the optional Genero version constraint,
+// showing the detected runtime version for reference. Three outcomes:
+//   - empty (Enter)      → omit the genero field (compatible with any version)
+//   - "current"          → a caret range on the detected major (e.g. ^5.0.0)
+//   - any other input    → used verbatim, validated as a semver constraint
+//
+// "current" is offered only when a Genero version could be detected.
+func promptGeneroConstraint() string {
+	detected, derr := genero.Detect()
+	var label string
+	if derr == nil {
+		label = fmt.Sprintf(
+			"Genero constraint (detected %s; Enter to skip, 'current' for ^%d.0.0)",
+			detected.String(), detected.Semver().Major,
+		)
+	} else {
+		label = "Genero constraint (none detected; Enter to skip, or type e.g. ^5.0.0)"
+	}
+	for {
+		ans := strings.TrimSpace(promptWithDefault(label, ""))
+		switch {
+		case ans == "":
+			return ""
+		case strings.EqualFold(ans, "current"):
+			if derr != nil {
+				fmt.Println("error: no Genero version detected — type an explicit constraint or press Enter to skip")
+				continue
+			}
+			return fmt.Sprintf("^%d.0.0", detected.Semver().Major)
+		default:
+			if _, err := semver.ParseConstraint(ans); err != nil {
+				fmt.Printf("error: %q is not a valid version constraint (e.g. ^5.0.0, >=5.0.0)\n", ans)
+				continue
+			}
+			return ans
+		}
+	}
+}
+
+// parseInitFlags extracts the optional --template/-t value and the --yes/-y
+// flag from `init` args. tmpl is "" when no template was requested; yes is true
+// when the user asked to skip prompts and accept defaults.
+func parseInitFlags(args []string) (tmpl string, yes bool, err error) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "--template" || a == "-t":
 			if i+1 >= len(args) {
-				return "", fmt.Errorf("%s requires a template name\nAvailable templates:\n%s", a, templateList())
+				return "", false, fmt.Errorf("%s requires a template name\nAvailable templates:\n%s", a, templateList())
 			}
 			i++
 			tmpl = args[i]
 		case strings.HasPrefix(a, "--template="):
 			tmpl = strings.TrimPrefix(a, "--template=")
+		case a == "--yes" || a == "-y":
+			yes = true
 		default:
-			return "", fmt.Errorf("unexpected argument %q\nUsage: fglpkg init [--template <name>]", a)
+			return "", false, fmt.Errorf("unexpected argument %q\nUsage: fglpkg init [--template <name>] [--yes]", a)
 		}
 	}
-	return tmpl, nil
+	return tmpl, yes, nil
 }
 
 // ─── install ──────────────────────────────────────────────────────────────────
