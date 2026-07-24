@@ -2190,7 +2190,11 @@ func stagePackage(stageDir string, m *manifest.Manifest) error {
 	// fglpkg.json omits devDependencies and reflects the post-strip layout.
 	// This is authoritative — it overwrites any file already staged at
 	// fglpkg.json rather than colliding.
-	mfData, err := json.MarshalIndent(m.PublishCopy(), "", "  ")
+	pub := m.PublishCopy()
+	if err := recordGeneroPackages(pub, staged, m.Programs); err != nil {
+		return err
+	}
+	mfData, err := json.MarshalIndent(pub, "", "  ")
 	if err != nil {
 		return fmt.Errorf("cannot serialize publishable %s: %w", manifest.Filename, err)
 	}

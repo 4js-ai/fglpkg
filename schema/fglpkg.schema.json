@@ -109,6 +109,15 @@
       "minItems": 1,
       "uniqueItems": true
     },
+    "generoPackages": {
+      "type": "array",
+      "description": "Genero PACKAGE namespace(s) this package's library modules declare (e.g. \"com.fourjs.db\"). Normally computed automatically at pack/publish by parsing the shipped source modules; declare it explicitly only to override that (e.g. a package shipping only compiled .42m with no source to parse). Out-of-namespace modules (MAIN programs, tests, examples listed in `programs`) never contribute a namespace.",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$"
+      },
+      "uniqueItems": true
+    },
     "hooks": {
       "type": "object",
       "description": "Declarative lifecycle steps. Each event (preinstall/postinstall/prepublish/postpublish/preuninstall) maps to an ordered list of operations from a fixed vocabulary; arbitrary shell commands are not supported.",
