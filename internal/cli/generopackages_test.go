@@ -12,13 +12,16 @@ import (
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 )
 
-// TestScanGeneroPackages exercises the per-module classification directly:
-// PACKAGE-declaring library modules contribute their (deduped) namespace,
-// declared programs and no-PACKAGE flat modules do not, and a .42m with no
-// sibling .4gl is counted as a library module but not parsed.
+// TestScanGeneroPackages exercises namespace inference from the staged archive
+// layout: a library module's namespace is its archive directory; declared
+// programs, flat-root modules, and subdir modules whose ADJACENT source declares
+// no PACKAGE are excluded; a subdir module with no adjacent source is still
+// namespaced from its directory (the poiapi case — sources compiled from lib/).
 func TestScanGeneroPackages(t *testing.T) {
 	dir := t.TempDir()
-	write := func(rel, content string) string {
+	// Write an on-disk source file and return the .42m path that would sit
+	// beside it, for use as the staged map's srcDisk value.
+	src := func(rel, content string) string {
 		full := filepath.Join(dir, rel)
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", rel, err)
@@ -26,43 +29,34 @@ func TestScanGeneroPackages(t *testing.T) {
 		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
 			t.Fatalf("write %s: %v", rel, err)
 		}
-		return full
+		return strings.TrimSuffix(full, ".4gl") + ".42m"
 	}
-	// scanGeneroPackages reads the sibling .4gl of each staged .42m, so only
-	// the .4gl sources need to exist on disk.
-	lib := write("com/fourjs/db/DbConnection.4gl", "PACKAGE com.fourjs.db\nFUNCTION connect() END FUNCTION\n")
-	lib2 := write("com/fourjs/db/Query.4gl", "PACKAGE com.fourjs.db\n")          // same namespace -> dedup
-	other := write("org/util/Strings.4gl", "-- header\nPACKAGE org.util\n")      // distinct namespace
-	prog := write("test/TestConnection.4gl", "MAIN\n  DISPLAY \"hi\"\nEND MAIN") // declared program: skipped
-	flat := write("Legacy.4gl", "FUNCTION helper() END FUNCTION\n")              // library, no PACKAGE
+	// A .42m with no adjacent source on disk (poiapi shape).
+	noSrc := func(rel string) string { return filepath.Join(dir, rel) }
 
-	m42 := func(gl string) string { return strings.TrimSuffix(gl, ".4gl") + ".42m" }
 	staged := map[string]string{
-		"com/fourjs/db/DbConnection.42m": m42(lib),
-		"com/fourjs/db/Query.42m":        m42(lib2),
-		"org/util/Strings.42m":           m42(other),
-		"test/TestConnection.42m":        m42(prog),
-		"Legacy.42m":                     m42(flat),
-		"README.md":                      filepath.Join(dir, "README.md"),                // not a .42m
-		"missing/OnlyCompiled.42m":       filepath.Join(dir, "missing/OnlyCompiled.42m"), // no sibling .4gl
+		// Namespaced by directory; adjacent source confirms PACKAGE.
+		"com/fourjs/db/DbConnection.42m": src("com/fourjs/db/DbConnection.4gl", "PACKAGE com.fourjs.db\n"),
+		"com/fourjs/db/Query.42m":        src("com/fourjs/db/Query.4gl", "PACKAGE com.fourjs.db\n"), // dedup
+		// Namespaced by directory with NO adjacent source (compiled from lib/).
+		"com/fourjs/poiapi/PoiApi.42m": noSrc("com/fourjs/poiapi/PoiApi.42m"),
+		// Declared program — excluded by the programs list.
+		"test/TestConnection.42m": src("test/TestConnection.4gl", "MAIN\nEND MAIN\n"),
+		// Flat-root module — no namespace.
+		"Flat.42m": src("Flat.4gl", "FUNCTION f() END FUNCTION\n"),
+		// Subdir module whose ADJACENT source declares no PACKAGE — excluded.
+		"helpers/Util.42m": src("helpers/Util.4gl", "FUNCTION u() END FUNCTION\n"),
+		// Not a .42m.
+		"README.md": noSrc("README.md"),
 	}
 
-	scan, err := scanGeneroPackages(staged, []string{"test/TestConnection"})
+	got, err := scanGeneroPackages(staged, []string{"test/TestConnection"})
 	if err != nil {
 		t.Fatalf("scanGeneroPackages: %v", err)
 	}
-	wantNS := []string{"com.fourjs.db", "org.util"}
-	if !equalNamespaceSet(scan.namespaces, wantNS) {
-		t.Errorf("namespaces = %v, want %v", scan.namespaces, wantNS)
-	}
-	// DbConnection, Query, Strings, Legacy, OnlyCompiled — the declared program
-	// TestConnection is skipped, README.md is not a .42m.
-	if scan.libModules != 5 {
-		t.Errorf("libModules = %d, want 5", scan.libModules)
-	}
-	// All but OnlyCompiled (no sibling .4gl) have parseable source.
-	if scan.parsedSource != 4 {
-		t.Errorf("parsedSource = %d, want 4", scan.parsedSource)
+	want := []string{"com.fourjs.db", "com.fourjs.poiapi"}
+	if !equalNamespaceSet(got, want) {
+		t.Errorf("namespaces = %v, want %v", got, want)
 	}
 }
 
@@ -197,9 +191,11 @@ func TestBuildPackageZipAuthorDeclaredGeneroPackagesWins(t *testing.T) {
 	}
 }
 
-// TestBuildPackageZip42mOnlyHasNoGeneroPackages confirms a package shipping
-// only compiled .42m (no .4gl to parse) records nothing rather than guessing.
-func TestBuildPackageZip42mOnlyHasNoGeneroPackages(t *testing.T) {
+// TestBuildPackageZip42mOnlyInfersFromLayout confirms a package shipping only
+// compiled .42m with no adjacent .4gl (sources compiled from lib/ or src/ into
+// a namespace tree — the poiapi shape) still records the namespace inferred
+// from the archive directory.
+func TestBuildPackageZip42mOnlyInfersFromLayout(t *testing.T) {
 	dir := t.TempDir()
 	write := func(rel, content string) {
 		full := filepath.Join(dir, rel)
@@ -218,7 +214,8 @@ func TestBuildPackageZip42mOnlyHasNoGeneroPackages(t *testing.T) {
 	write("com/fourjs/db/DbConnection.42m", "compiled") // no sibling .4gl
 
 	got := packAndReadGeneroPackages(t, dir)
-	if len(got) != 0 {
-		t.Errorf("generoPackages = %v, want empty (no source to determine namespaces)", got)
+	want := []string{"com.fourjs.db"}
+	if !equalNamespaceSet(got, want) {
+		t.Errorf("generoPackages = %v, want %v (inferred from archive layout)", got, want)
 	}
 }

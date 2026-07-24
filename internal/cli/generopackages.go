@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -11,89 +12,88 @@ import (
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 )
 
-// generoPackageScan is the result of inspecting the staged library modules for
-// their Genero PACKAGE namespaces (see specs/package-layout-materialized-root.md,
-// Decisions §1). It is computed at pack/publish time and recorded in the shipped
-// manifest's generoPackages field.
-type generoPackageScan struct {
-	// namespaces is the sorted, deduped set of PACKAGE namespaces declared by
-	// the shipped library modules (e.g. ["com.fourjs.db"]).
-	namespaces []string
-	// libModules counts staged .42m modules that are not declared programs —
-	// i.e. candidate library modules.
-	libModules int
-	// parsedSource counts those library modules whose sibling .4gl source was
-	// found and parsed. When libModules > 0 but parsedSource == 0, no namespace
-	// could be determined from source (a .42m-only package).
-	parsedSource int
-}
-
-// scanGeneroPackages inspects the staged tree for the PACKAGE namespaces its
-// library modules declare. staged maps archive path -> source disk path, as
-// populated by the pack staging walk. programs is the manifest's program list
-// (MAIN/test/example modules); those are out-of-namespace and never contribute.
+// scanGeneroPackages computes the Genero PACKAGE namespace set for the staged
+// package (see specs/package-layout-materialized-root.md, Decisions §1). staged
+// maps archive path -> source disk path, as populated by the pack staging walk;
+// programs is the manifest's program list (MAIN/test/example modules).
 //
-// For each staged .42m that is not a declared program, it reads the sibling
-// .4gl source (same on-disk path, .42m -> .4gl) and parses its PACKAGE
-// declaration via genpkg. A module with no sibling source is counted as a
-// library module but not parsed, so callers can fall back to an author-declared
-// generoPackages for .42m-only packages.
-func scanGeneroPackages(staged map[string]string, programs []string) (generoPackageScan, error) {
+// A shipped library module's namespace is its **archive-path directory**
+// (com/fourjs/poiapi/PoiApi.42m -> com.fourjs.poiapi). This is the ground truth
+// for both Genero's own module resolution and the consumer's materialize step,
+// which key off the directory layout — and fglcomp already guarantees a
+// compiled module's directory matches its PACKAGE. It is also robust to any
+// source layout, since it never needs the .4gl to sit beside the .42m (real
+// projects compile lib/ or src/ into a namespace tree).
+//
+// A .42m is excluded from the namespace set when it is:
+//   - a declared program (matched by basename), or
+//   - a flat-root module (no archive directory — not namespaced), or
+//   - a module whose source .4gl IS adjacent and declares no PACKAGE (a flat or
+//     MAIN module merely organised into a subdirectory).
+//
+// Returns the sorted, deduped namespace set.
+func scanGeneroPackages(staged map[string]string, programs []string) ([]string, error) {
 	programBase := make(map[string]bool, len(programs))
 	for _, p := range programs {
 		programBase[filepath.Base(p)+".42m"] = true
 	}
 
 	set := make(map[string]struct{})
-	var scan generoPackageScan
 	for archivePath, srcDisk := range staged {
-		if !strings.HasSuffix(archivePath, ".42m") {
+		ap := filepath.ToSlash(archivePath)
+		if !strings.HasSuffix(ap, ".42m") {
 			continue
 		}
-		if programBase[filepath.Base(archivePath)] {
+		if programBase[path.Base(ap)] {
 			continue // declared program — out of namespace, never merged
 		}
-		scan.libModules++
-		// The compiled module ships as .42m; its namespace is declared in the
-		// sibling .4gl source that sits next to it in the project tree.
-		srcPath := strings.TrimSuffix(srcDisk, ".42m") + ".4gl"
-		data, err := os.ReadFile(srcPath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue // .42m-only module; handled by the caller's fallback
-			}
-			return generoPackageScan{}, fmt.Errorf(
-				"cannot read %s to determine PACKAGE namespace: %w", srcPath, err)
+		dir := path.Dir(ap)
+		if dir == "." || dir == "" || dir == "/" {
+			continue // flat-root module — no namespace, not merged
 		}
-		scan.parsedSource++
-		if ns, ok := genpkg.ParsePackageDecl(data); ok {
-			set[ns] = struct{}{}
+		if sourceDeclaresNoPackage(srcDisk) {
+			continue // adjacent source is a flat/MAIN module in a subdir
 		}
+		set[strings.ReplaceAll(strings.Trim(dir, "/"), "/", ".")] = struct{}{}
 	}
 
-	if len(set) > 0 {
-		scan.namespaces = make([]string, 0, len(set))
-		for ns := range set {
-			scan.namespaces = append(scan.namespaces, ns)
-		}
-		sort.Strings(scan.namespaces)
+	if len(set) == 0 {
+		return nil, nil
 	}
-	return scan, nil
+	out := make([]string, 0, len(set))
+	for ns := range set {
+		out = append(out, ns)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// sourceDeclaresNoPackage reports whether the module's source .4gl is present
+// beside its .42m (same on-disk path, .42m -> .4gl) AND declares no PACKAGE —
+// i.e. it is a flat/MAIN module and must not be treated as a namespaced library.
+// When the source is absent (a common layout: sources under lib/ or src/,
+// compiled into a namespace tree), it returns false so the directory-derived
+// namespace stands.
+func sourceDeclaresNoPackage(src42m string) bool {
+	gl := strings.TrimSuffix(src42m, ".42m") + ".4gl"
+	data, err := os.ReadFile(gl)
+	if err != nil {
+		return false // no adjacent source — trust the directory layout
+	}
+	_, ok := genpkg.ParsePackageDecl(data)
+	return !ok
 }
 
 // recordGeneroPackages computes the PACKAGE namespace set for the staged
 // package and records it on pub.GeneroPackages (the publish-safe manifest
 // written into the artifact). staged/programs come from the pack staging walk.
 //
-// Precedence:
-//   - When the author declared generoPackages explicitly, that set is kept
-//     (it survives on pub via PublishCopy). If source is available and the
-//     computed set differs, a drift warning is emitted — the declared set wins.
-//   - Otherwise the computed set is recorded. A package with library modules
-//     but no parseable .4gl source (a .42m-only package) records nothing and is
-//     warned that it will be treated as flat; declare generoPackages to override.
+// When the author declared generoPackages explicitly, that set is kept (it
+// survives on pub via PublishCopy); a computed set that differs triggers a
+// drift warning, and the declared set still wins. Otherwise the computed set is
+// recorded (empty for a flat package, which omits the field via omitempty).
 func recordGeneroPackages(pub *manifest.Manifest, staged map[string]string, programs []string) error {
-	scan, err := scanGeneroPackages(staged, programs)
+	computed, err := scanGeneroPackages(staged, programs)
 	if err != nil {
 		return err
 	}
@@ -101,21 +101,15 @@ func recordGeneroPackages(pub *manifest.Manifest, staged map[string]string, prog
 	declared := normalizeNamespaceSet(pub.GeneroPackages)
 	if len(declared) > 0 {
 		pub.GeneroPackages = declared
-		if scan.parsedSource > 0 && !equalNamespaceSet(declared, scan.namespaces) {
+		if len(computed) > 0 && !equalNamespaceSet(declared, computed) {
 			fmt.Fprintf(os.Stderr,
-				"warning: declared generoPackages %v differ from those parsed from source %v; using the declared set\n",
-				declared, scan.namespaces)
+				"warning: declared generoPackages %v differ from the package layout %v; using the declared set\n",
+				declared, computed)
 		}
 		return nil
 	}
 
-	pub.GeneroPackages = scan.namespaces
-	if scan.libModules > 0 && scan.parsedSource == 0 {
-		fmt.Fprintf(os.Stderr,
-			"warning: no .4gl source found to determine PACKAGE namespaces; %s will be treated as flat "+
-				"(no merged FGLLDPATH root). Declare \"generoPackages\" in %s to override.\n",
-			pub.Name, manifest.Filename)
-	}
+	pub.GeneroPackages = computed
 	return nil
 }
 

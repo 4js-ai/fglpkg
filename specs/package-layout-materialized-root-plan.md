@@ -50,18 +50,21 @@ func ParsePackageDecl(src []byte) (namespace string, ok bool)
 - **pack/publish** ([`stagePackage`/`stageBDLFiles`](../internal/cli/cli.go#L2149),
   [`buildPackageZip`](../internal/cli/cli.go#L2129), reached from both
   [`cmdPack`](../internal/cli/pack.go#L21) and the publish path
-  [cli.go:1751](../internal/cli/cli.go#L1751)): while staging, for every shipped **library** module
-  (a source/`.42m` not in the manifest `programs` set), read the corresponding `.4gl` and collect its
-  `PACKAGE` namespace via Phase 0. Set the deduped, sorted namespace set on the manifest copy written
-  into the staged zip.
-  - If the author declared `generoPackages`, validate the computed set matches (warn on drift) rather
-    than silently overriding.
-  - **Source-absent fallback** (a project shipping only `.42m`): if no `.4gl` is present to parse, fall
-    back to the author-declared `generoPackages`; if that is also empty, warn that the package will be
-    treated as flat (no merge) and proceed. (Namespace-from-`.42m` extraction is a possible later
-    enhancement; out of scope here.)
+  [cli.go:1751](../internal/cli/cli.go#L1751)): while staging, derive each shipped **library** module's
+  namespace from its **staged archive-path directory** (`com/fourjs/poiapi/PoiApi.42m` →
+  `com.fourjs.poiapi`). This is the ground truth for both Genero's own resolution and the consumer's
+  materialize step — fglcomp already guarantees a compiled module's directory matches its `PACKAGE` — and
+  is robust to source layout (real projects compile `lib/`/`src/` into a namespace tree, so the `.4gl`
+  rarely sits beside the shipped `.42m`). Set the deduped, sorted namespace set on the manifest copy
+  written into the staged zip. Excluded: declared `programs` (by basename), flat-root `.42m` (no
+  directory), and a `.42m` whose **adjacent** source `.4gl` declares no `PACKAGE` (a flat/MAIN module
+  merely organised in a subdir — this is the one refinement Phase 0's parser still provides).
+  - If the author declared `generoPackages`, it wins; the computed set is compared and a drift warning
+    is emitted on mismatch (rather than silently overriding).
 - Tests: packing the PackageB shape (namespaced `com.fourjs.db` lib + `programs: ["test/TestConnection"]`)
-  yields a staged `fglpkg.json` with `generoPackages: ["com.fourjs.db"]` and the test program excluded.
+  yields a staged `fglpkg.json` with `generoPackages: ["com.fourjs.db"]` and the test program excluded;
+  the poiapi shape (`.42m` under `com/fourjs/poiapi`, source in `lib/`) yields `["com.fourjs.poiapi"]`
+  with no spurious "flat" warning.
 
 ### Phase 2 — lockfile schema (ownership record)
 

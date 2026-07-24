@@ -56,3 +56,23 @@ _gp_flat_records_none() {
   assert_not_contains "generoPackages" "$body"
 }
 it "pack records no generoPackages for a flat package" _gp_flat_records_none
+
+# The poiapi shape: sources live in lib/, compiled .42m ship under a namespace
+# tree with NO adjacent .4gl. The namespace must still be inferred from the
+# shipped layout (root scopes the pack to the compiled tree).
+_gp_infers_without_adjacent_source() {
+  cat > fglpkg.json <<'EOF'
+{ "name":"poiapi","version":"1.0.0","description":"layout-inferred demo",
+  "genero":">=3.20","license":"MIT","repository":"https://github.com/example/poi",
+  "author":"fglpkg tests","root":"com/fourjs/poiapi" }
+EOF
+  mkdir -p com/fourjs/poiapi lib
+  printf 'PACKAGE com.fourjs.poiapi\nFUNCTION e() END FUNCTION\n' > lib/fgl_excel.4gl   # source elsewhere
+  printf 'stub-pcode' > com/fourjs/poiapi/fgl_excel.42m                                 # shipped, no adjacent .4gl
+  run pack -o out.zip
+  assert_success
+  assert_not_contains "treated as flat"          # the removed spurious warning must not return
+  _gp_extract out.zip fglpkg.json mf.json
+  assert_json_field mf.json generoPackages.0 com.fourjs.poiapi
+}
+it "pack infers generoPackages from layout when source is not adjacent" _gp_infers_without_adjacent_source

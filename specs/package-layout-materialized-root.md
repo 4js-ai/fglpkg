@@ -55,16 +55,24 @@ The open decisions previously flagged below are now resolved (Mike Folcher; Leo'
 folded in). The rest of the document should be read in light of these:
 
 1. **Namespace determination — recorded at publish, classified per module.** `fglpkg pack`/`publish`
-   derives each package's `PACKAGE` namespace set by parsing the `PACKAGE` declaration from the
-   shipped source modules, and records it (dots→slashes, e.g. `com/fourjs/db`) so the consumer knows
-   the namespaces **without** re-reading source or guessing from directory shape. Classification is
-   **per module, not per package**: a module declaring `PACKAGE x.y.z` is a namespaced library module
-   (materialized into the merged root); a module with **no** `PACKAGE` — a `MAIN` program, test, or
-   example (the manifest `programs` set) — is out-of-namespace and is **never merged** (it stays in
-   the per-package store, runnable via `run`/`bdl`, which read the store directly, not `FGLLDPATH`).
-   A single package may contain both (see the PackageB example under "Worked example"). Because
-   materialization is driven by the recorded namespace **path** rather than the store-dir name, the
-   GIS-358 `name == PACKAGE root` case resolves correctly with no special-casing.
+   derives each package's namespace set from the **shipped modules' archive-path directories** (a
+   compiled module at `com/fourjs/poiapi/PoiApi.42m` → namespace `com.fourjs.poiapi`), and records it
+   (`generoPackages`) so the consumer knows the namespaces **without** re-reading source or guessing
+   from the store shape. The directory *is* the ground truth: fglcomp already requires a compiled
+   module's directory to match its `PACKAGE`, and both Genero's resolver and the consumer's materialize
+   step key off the directory — so this is more robust than parsing the `PACKAGE` token, which fails for
+   the common layout where sources live under `lib/`/`src/` and are compiled into a namespace tree
+   (the `.4gl` does not sit beside the shipped `.42m`). *(Original decision text: "by parsing the
+   `PACKAGE` declaration from the shipped source modules" — revised to layout-inference after the poiapi
+   test surfaced that source is often not adjacent; the adjacent `.4gl`, when present, is still used to
+   exclude a no-`PACKAGE` module sitting in a subdirectory.)* Classification is **per module, not per
+   package**: a module in a namespace directory is a namespaced library module (materialized into the
+   merged root); a `MAIN` program, test, or example (the manifest `programs` set) and a flat-root module
+   are out-of-namespace and **never merged** (they stay in the per-package store, runnable via
+   `run`/`bdl`, which read the store directly, not `FGLLDPATH`). A single package may contain both (see
+   the PackageB example under "Worked example"). Because materialization is driven by the recorded
+   namespace **path** rather than the store-dir name, the GIS-358 `name == PACKAGE root` case resolves
+   correctly with no special-casing.
 2. **Automatic.** Materialization is default-on and transparent — no opt-in flag. The per-package
    store is untouched, so the change stays non-breaking and reversible (delete `.fglpkg/merged/`).
 3. **One package per namespace (strict).** Within a scope, two distinct packages that declare the
