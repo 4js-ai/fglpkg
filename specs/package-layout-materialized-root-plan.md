@@ -147,16 +147,24 @@ recovers.
 
 ### Phase 5 — `internal/env` rewrite
 
-Rewrite [`buildFGLLDPATH`](../internal/env/env.go#L166) (the `addPackagesFrom` closure at
-[L178](../internal/env/env.go#L178)); `GenerateGlobal`/`GenerateGST`/`GenerateLocal` inherit it:
+Rewrite `buildFGLLDPATH` (replacing its one-dir-per-package `addPackagesFrom` closure); `GenerateLocal`,
+`GenerateGlobal`, and `GenerateGST` all route through the same per-scope logic:
 
-- Per scope, **local first**: if the scope's `.fglpkg/merged` exists and is non-empty, emit **it**
-  (one entry) instead of one-per-package.
-- Additionally emit a per-package entry for each **legacy flat** package (no `generoPackages`, no merge)
-  — preserving today's behavior for that shape only.
-- Workspace member source dirs unchanged (step 1).
-- Consequences: GIS-358 (`name == PACKAGE`) resolves because the merged path is namespace-correct;
-  GIS-359 silent shadowing becomes the Phase 3 hard error.
+- A shared `scopeFGLLDPATHDirs(packagesDir)` returns, **per scope**: the scope's `<home>/merged` root
+  (one entry) when it exists and is non-empty, followed by a per-package store entry for every package
+  the merged root does **not** cover. `GenerateGST` uses a `$(ProjectDir)`-templated twin,
+  `gstFGLLDPATHParts`.
+- "Covered" is decided by `packageIsMaterialized(pkgDir)` = the installed package's manifest records ≥1
+  `generoPackages` namespace. So a **legacy/flat** package (no recorded namespaces) keeps its historical
+  per-package entry; a manifest that fails to load falls back to a per-package entry too (never dropped).
+- Scope order is unchanged: workspace member source dirs, then local scope (merged + its flat packages),
+  then global scope. Within a scope the merged root is emitted first.
+- Consequences: GIS-358 (`name == PACKAGE`) resolves because the emitted path is the namespace-correct
+  merged tree, not the store-dir name; GIS-359 silent shadowing became the Phase 3 install-time hard
+  error. Verified via `fglpkg env` / `env --gst` on a mixed project (materialized + legacy).
+- **Known limitation (deferred):** only `.42m` are materialized, so a *namespaced* package's non-`.42m`
+  content is not on the merged FGLLDPATH entry. This is not a regression for module resolution
+  (FGLLDPATH resolves `.42m`), and non-`.42m` artifacts via the merged root stay parked (see Deferred).
 
 ### Phase 6 — `relink` command, gitignore, docs
 
