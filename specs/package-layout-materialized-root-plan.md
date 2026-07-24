@@ -79,25 +79,42 @@ func ParsePackageDecl(src []byte) (namespace string, ok bool)
 ```go
 type Scope struct { PackagesDir, MergedDir string } // local or global
 
-// Rebuild (re)materializes MergedDir from every package under PackagesDir whose
-// manifest declares generoPackages. Returns each package's owned file list and a
-// clash error (naming both packages) if two declare the same namespace.
-func Rebuild(scope Scope, locked []lockfile.LockedPackage) (owned map[string][]string, err error)
+type Result struct {
+    Owned      map[string][]string // pkg -> merged-relative .42m paths it materialized
+    Namespaces map[string][]string // pkg -> namespaces it contributed
+    Inferred   []string            // pkgs whose namespaces were inferred (to log)
+}
 
-func linkOrCopy(src, dst string) error // os.Link; on EXDEV/unsupported → copy
+// Rebuild (re)materializes MergedDir from every package under PackagesDir,
+// reading each store's own fglpkg.json for its generoPackages (so materialize
+// stays decoupled from the lockfile). Returns per-package ownership and a clash
+// error (naming both packages) if two declare the same namespace.
+func Rebuild(scope Scope) (*Result, error)
+
+func linkOrCopy(src, dst string) error // os.Link; on any link failure → copy
 ```
 
+- **Signature note:** Rebuild takes no `locked` argument (the earlier sketch's
+  `locked []lockfile.LockedPackage` was dropped) — each store carries its own manifest, so materialize
+  reads namespaces there and does not import `internal/lockfile`. It returns a richer `*Result` instead
+  of a bare `owned` map; the installer maps `Owned`/`Namespaces` onto each `LockedPackage`.
 - **Clash detection** at namespace-ownership granularity: build `namespace → package`; a second distinct
-  package claiming a namespace → hard error naming both, mirroring the registry guard
-  ([`collisionError`](../internal/provider/repositoryset.go#L285) /
-  [`resolver.ErrCollision`](../internal/provider/repositoryset.go#L313)).
-- Materialize only `.42m` under each declared namespace path; hard-link, copy on failure; idempotent
-  (safe to re-run; unlink stale entries not owned by any current package).
-- Prune empty namespace dirs.
-- **Consume-side fallback for pre-`generoPackages` packages:** when a package's manifest lacks
-  `generoPackages`, infer namespace subtrees from the extracted tree = top-level dirs containing `.42m`
-  that are **not** under a `programs` path (flat root `.42m` → legacy flat, not merged). Log what was
-  inferred (no silent guessing). The recorded field is authoritative when present.
+  package claiming a namespace → hard error (`*NamespaceClashError`) naming both, mirroring the registry
+  guard ([`collisionError`](../internal/provider/repositoryset.go#L285) /
+  [`resolver.ErrCollision`](../internal/provider/repositoryset.go#L313)). Planning happens before any
+  filesystem mutation, so a clash leaves the existing merged root untouched.
+- **Authoritative path:** for each recorded namespace, materialize the `.42m` files sitting **directly**
+  in that namespace's directory (non-recursive — a deeper directory is a distinct, separately-recorded
+  namespace, which keeps parent/child namespaces owned by different packages from overlapping on disk).
+- **Rebuild strategy:** the merged root is a derived cache, so Rebuild clears and re-links it wholesale.
+  This makes it idempotent, guarantees no stale entry from a since-removed package survives, and never
+  leaves empty namespace directories behind (no separate prune step needed). Hard-link, copy on any link
+  failure (cross-FS EXDEV, unsupported FS, restrictive Windows config).
+- **Consume-side fallback for pre-`generoPackages` packages:** when a manifest lacks `generoPackages`,
+  a `.42m`'s namespace is inferred from its **directory path** (the Genero convention that a module's
+  package path mirrors its directory). Flat root `.42m` (legacy, no namespace) and declared `programs`
+  are excluded. The package is reported in `Result.Inferred` for the caller to log (no silent guessing).
+  The recorded field is authoritative when present.
 
 ### Phase 4 — installer integration
 
