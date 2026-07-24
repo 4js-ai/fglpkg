@@ -168,12 +168,18 @@ Rewrite `buildFGLLDPATH` (replacing its one-dir-per-package `addPackagesFrom` cl
 
 ### Phase 6 — `relink` command, gitignore, docs
 
-- **`fglpkg relink`** — rebuild the merged root(s) for the current/both scopes; idempotent; add to the
-  command registry + dispatch + completion (and `TestRegistryMatchesDispatch` stays green).
-- **`.gitignore` templates** ([internal/cli/templates.go](../internal/cli/templates.go)): add
-  `.fglpkg/merged/`.
-- **Docs**: README cheat-sheet (`relink`) + user-guide note on the merged root and the
-  hard-link/copy/disk trade-off.
+- **`fglpkg relink`** — rebuilds the merged root(s) from the installed stores; idempotent; local (when
+  in a project) + global by default, `--local`/`--global` to target one scope. Wired into dispatch +
+  the command registry (`TestRegistryMatchesDispatch` stays green) and, via the registry, completion.
+  Backed by a bare `installer.New(home, "", "", "")` and the new `Installer.Relink` (which shares
+  `materializeAndRecord` with the install-path `syncMergedRoot`) — so relink is fully offline, surfaces
+  a namespace clash as a hard error, and records ownership into the project lock for the local scope.
+- **`.gitignore` templates** ([internal/cli/templates.go](../internal/cli/templates.go)): added an
+  explicit, commented `.fglpkg/merged/` entry (the default `.fglpkg/` already covers it, but the entry
+  documents that the derived cache must never be committed even when `.fglpkg/packages/` is vendored).
+- **Docs**: README cheat-sheet (`relink`) + Home-Directory-Layout note on `merged/`; user-guide
+  "The merged FGLLDPATH root" subsection (namespace layout, hard-link/copy/disk trade-off, `relink`,
+  same-namespace clash, legacy passthrough).
 
 ## Test matrix (mirrors the spec's Test plan)
 

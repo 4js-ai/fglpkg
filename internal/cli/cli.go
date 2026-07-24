@@ -166,6 +166,8 @@ func Execute() error {
 			return cmdList(args)
 		case "env":
 			return cmdEnv(args)
+		case "relink":
+			return cmdRelink(args)
 		case "search":
 			return cmdSearch(args)
 		case "info", "view":
@@ -1078,6 +1080,80 @@ func cmdEnv(args []string) error {
 	for _, line := range exports {
 		fmt.Println(line)
 	}
+	return nil
+}
+
+// cmdRelink rebuilds the derived, PACKAGE-correct merged FGLLDPATH root(s)
+// (.fglpkg/merged) from the installed per-package stores. It is the manual
+// recovery for a merged root that was deleted (it is gitignored) or left stale
+// by a hand edit of .fglpkg/packages — install/remove keep it current
+// automatically. Idempotent.
+//
+//	fglpkg relink            → local (when in a project) + global
+//	fglpkg relink --local    → local scope only
+//	fglpkg relink --global   → global scope only
+func cmdRelink(args []string) error {
+	remaining, forceLocal, forceGlobal, _, err := parseFlags(args)
+	if err != nil {
+		return err
+	}
+	if len(remaining) > 0 {
+		return fmt.Errorf("relink takes no arguments (got %q)", remaining[0])
+	}
+	if forceLocal && forceGlobal {
+		return fmt.Errorf("--local and --global are mutually exclusive")
+	}
+
+	projectDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("cannot determine working directory: %w", err)
+	}
+
+	did := false
+	// Local scope: when forced, or by default when inside a project.
+	if !forceGlobal && (forceLocal || isProjectDir()) {
+		if err := relinkScope(filepath.Join(projectDir, ".fglpkg"), projectDir, true, "local"); err != nil {
+			return err
+		}
+		did = true
+	}
+	// Global scope: when forced, or by default (always).
+	if !forceLocal {
+		globalHome, err := fglpkgHome()
+		if err != nil {
+			return err
+		}
+		if err := relinkScope(globalHome, projectDir, false, "global"); err != nil {
+			return err
+		}
+		did = true
+	}
+	if !did {
+		fmt.Println("Nothing to relink.")
+	}
+	return nil
+}
+
+// relinkScope rebuilds one scope's merged root and prints a one-line summary. A
+// bare installer (no credentials/fetchers) is enough — relink never downloads.
+func relinkScope(home, projectDir string, recordLock bool, label string) error {
+	inst := installer.New(home, "", "", "")
+	res, err := inst.Relink(projectDir, recordLock)
+	if err != nil {
+		return err
+	}
+	modules, pkgs := 0, 0
+	for _, files := range res.Owned {
+		if len(files) > 0 {
+			pkgs++
+			modules += len(files)
+		}
+	}
+	if modules == 0 {
+		fmt.Printf("%s: no namespaced packages to merge (%s)\n", label, inst.MergedDir())
+		return nil
+	}
+	fmt.Printf("%s: linked %d module(s) from %d package(s) into %s\n", label, modules, pkgs, inst.MergedDir())
 	return nil
 }
 

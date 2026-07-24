@@ -1027,8 +1027,7 @@ func (i *Installer) materializeScope() materialize.Scope {
 // (I/O) failure is non-fatal: the stores are intact, so it is reported as a
 // warning and `fglpkg relink` can recover.
 func (i *Installer) syncMergedRoot(projectDir string, recordLock bool) error {
-	res, err := materialize.Rebuild(i.materializeScope())
-	if err != nil {
+	if _, err := i.materializeAndRecord(projectDir, recordLock); err != nil {
 		var clash *materialize.NamespaceClashError
 		if errors.As(err, &clash) {
 			return err
@@ -1036,6 +1035,18 @@ func (i *Installer) syncMergedRoot(projectDir string, recordLock bool) error {
 		fmt.Fprintf(os.Stderr, "warning: could not build merged FGLLDPATH root: %v\n", err)
 		fmt.Fprintf(os.Stderr, "  the packages are installed; run 'fglpkg relink' to retry.\n")
 		return nil
+	}
+	return nil
+}
+
+// materializeAndRecord rebuilds this scope's merged root, logs any inferred
+// packages, and — when recordLock is true — records ownership into the project
+// lock. It returns the result and any error verbatim (a namespace clash
+// included), leaving each caller to decide how to treat a failure.
+func (i *Installer) materializeAndRecord(projectDir string, recordLock bool) (*materialize.Result, error) {
+	res, err := materialize.Rebuild(i.materializeScope())
+	if err != nil {
+		return nil, err
 	}
 	for _, name := range res.Inferred {
 		fmt.Fprintf(os.Stderr,
@@ -1048,14 +1059,21 @@ func (i *Installer) syncMergedRoot(projectDir string, recordLock bool) error {
 				lockfile.Filename, err)
 		}
 	}
-	return nil
+	return res, nil
 }
 
 // RebuildMergedRoot rebuilds this scope's merged FGLLDPATH root from the
 // installed stores on a best-effort basis, without touching the lock file. Used
-// by the offline remove-fallback (and, later, `fglpkg relink`); it never fails
-// the caller.
+// by the offline remove-fallback; it never fails the caller.
 func (i *Installer) RebuildMergedRoot() { _ = i.syncMergedRoot("", false) }
+
+// Relink rebuilds this scope's merged FGLLDPATH root for `fglpkg relink`,
+// returning the materialize result and any error (a namespace clash included)
+// so the command can report what it linked and fail loudly on a clash. When
+// recordLock is true it also records ownership into the project lock.
+func (i *Installer) Relink(projectDir string, recordLock bool) (*materialize.Result, error) {
+	return i.materializeAndRecord(projectDir, recordLock)
+}
 
 // applyMaterializationToLock patches each LockedPackage in the project lock with
 // the PACKAGE namespaces it owns and the merged-root files it materialized, then

@@ -142,6 +142,21 @@ Prints shell export lines. Evaluate the output to load them, e.g.
 `,
 	},
 	{
+		Name:    "relink",
+		Summary: "Rebuild the merged FGLLDPATH root from installed packages",
+		Usage:   "fglpkg relink [--local|--global]",
+		Long: `FLAGS:
+  --local, -l              Rebuild the local project root (.fglpkg/merged) only
+  --global, -g             Rebuild the global root (~/.fglpkg/merged) only
+
+Rebuilds the derived, PACKAGE-correct merged FGLLDPATH root(s) from the
+installed per-package stores. install/remove keep this current automatically;
+run relink to recover a merged root that was deleted (it is gitignored) or left
+stale by a manual edit of .fglpkg/packages. Idempotent. With no flag it rebuilds
+the local root (when run inside a project) and the global root.
+`,
+	},
+	{
 		Name:       "search",
 		Summary:    "Search the registry",
 		ListDetail: " (use --all to list every package)",
