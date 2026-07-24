@@ -939,6 +939,9 @@ func cmdRemove(args []string) error {
 			for _, pkg := range pkgArgs {
 				_ = inst.Remove(pkg)
 			}
+			// The stores changed but the lock wasn't reconciled (offline) — at
+			// least rebuild the merged root so the removed modules stop resolving.
+			inst.RebuildMergedRoot()
 		}
 		return nil
 	}

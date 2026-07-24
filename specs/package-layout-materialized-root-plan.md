@@ -118,15 +118,32 @@ func linkOrCopy(src, dst string) error // os.Link; on any link failure → copy
 
 ### Phase 4 — installer integration
 
-- **Install** ([`installBDL`](../internal/installer/installer.go#L667)): after extraction +
-  `manifest.Load(destDir)` ([L717](../internal/installer/installer.go#L717)), read `generoPackages`,
-  write them into the package's `LockedPackage.Packages`, then trigger `materialize.Rebuild` for the
-  affected scope; record the returned owned file list into `LockedPackage.Files`.
-- **Remove**: unlink the package's `Files` from the scope merged root and prune empty namespace dirs
-  (fall back to a store-subtree walk if `Files` is absent — old lock), then remove the store dir as
-  today. Re-run `Rebuild` is the safety net.
-- Materialization failure is non-fatal to the store (store already written) but surfaces a clear error;
-  `fglpkg relink` recovers.
+Rather than materialize per package (which would race the parallel install and rebuild N times), the
+installer materializes **once per scope** after the batch, via a single choke point
+`syncMergedRoot(projectDir, recordLock)`:
+
+- Calls `materialize.Rebuild(scope)` for the installer's home
+  (`Scope{PackagesDir: home/packages, MergedDir: home/merged}` — `Installer.MergedDir()`), which reads
+  each store's own `generoPackages` (so the installer no longer reads namespaces itself).
+- When `recordLock` is true, patches every `LockedPackage` with `GeneroPackages` (from
+  `Result.Namespaces`) and `Materialized` (from `Result.Owned`) and saves — change-detected, and a no-op
+  when the project has no lock (a `--production` or lockless install), so it never conjures one.
+- A **namespace clash is returned** so the caller decides; other (I/O) failures are non-fatal (stores are
+  intact) — warned, with a pointer to `fglpkg relink`.
+
+Wired into:
+- **`installFromPlan` / `installFromLock`** (after the BDL pass): `syncMergedRoot(projectDir, !Production)`
+  — a clash **aborts** the install (strict one-package-per-namespace).
+- **The "lock up to date / nothing to install" fast path**: also calls it, so upgrading fglpkg on an
+  already-installed project materializes the merged root (and records namespaces) without a reinstall.
+- **`ReconcileAfterRemove`** (after prune/lock reconcile): `syncMergedRoot(projectDir, true)` with the
+  clash **ignored** — a merged-root issue must never block a remove.
+- **The offline remove-fallback** (CLI): `Installer.RebuildMergedRoot()` (best-effort, no lock write).
+
+Removal relies on the wholesale `Rebuild` (the removed store is gone, so its files simply are not
+re-linked) rather than `Materialized`-driven unlinking; `Materialized` is kept as the ownership record
+and a future fast-path. Materialization failure is non-fatal to the store; `fglpkg relink` (Phase 6)
+recovers.
 
 ### Phase 5 — `internal/env` rewrite
 
