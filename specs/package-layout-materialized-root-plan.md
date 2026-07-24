@@ -137,11 +137,19 @@ installer materializes **once per scope** after the batch, via a single choke po
 Wired into:
 - **`installFromPlan` / `installFromLock`** (after the BDL pass): `syncMergedRoot(projectDir, !Production)`
   — a clash **aborts** the install (strict one-package-per-namespace).
-- **The "lock up to date / nothing to install" fast path**: also calls it, so upgrading fglpkg on an
-  already-installed project materializes the merged root (and records namespaces) without a reinstall.
+- **The "lock up to date / nothing to install" fast path**: calls it **only when the merged root is
+  missing** (`mergedRootExists` guard) — the migration case (fglpkg upgraded on an already-installed
+  project, or `.fglpkg/merged` deleted). When it already exists, install/remove have kept it current, so
+  a no-op install neither rebuilds nor re-scans.
 - **`ReconcileAfterRemove`** (after prune/lock reconcile): `syncMergedRoot(projectDir, true)` with the
   clash **ignored** — a merged-root issue must never block a remove.
 - **The offline remove-fallback** (CLI): `Installer.RebuildMergedRoot()` (best-effort, no lock write).
+
+**Inference notes are surfaced by `relink` only.** Inference is correct and expected for packages
+published before namespaces were recorded, so `materializeAndRecord` does **not** print a note on
+automatic syncs (install/remove/env) — that would reprint on every command while any legacy package is
+installed. `Result.Inferred` is still returned and recorded into the lock; `fglpkg relink` reports it
+(with the inferred namespaces and a "republish to record them" hint) as the one explicit diagnostic.
 
 Removal relies on the wholesale `Rebuild` (the removed store is gone, so its files simply are not
 re-linked) rather than `Materialized`-driven unlinking; `Materialized` is kept as the ownership record

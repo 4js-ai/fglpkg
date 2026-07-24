@@ -45,3 +45,22 @@ _rl_rejects_args() {
   assert_failure
 }
 it "relink rejects positional arguments" _rl_rejects_args
+
+# A legacy store (manifest without generoPackages, e.g. published before the
+# feature) still materializes — namespaces inferred from layout — and relink is
+# the one place that surfaces the inference (install/env stay quiet about it).
+_rl_legacy_inferred_note() {
+  local base=".fglpkg/packages/fgl-log4j/com/fourjs/log4j"
+  mkdir -p "$base"
+  cat > ".fglpkg/packages/fgl-log4j/fglpkg.json" <<'EOF'
+{ "name":"fgl-log4j","version":"1.0.0","dependencies":{"fgl":{}} }
+EOF
+  printf 'PCODE' > "$base/Log4j.42m"
+  run relink --local
+  assert_success
+  assert_file ".fglpkg/merged/com/fourjs/log4j/Log4j.42m"     # inferred + materialized
+  assert_contains "fgl-log4j"
+  assert_contains "com.fourjs.log4j"
+  assert_contains "inferred"
+}
+it "relink surfaces inferred namespaces for a legacy package" _rl_legacy_inferred_note

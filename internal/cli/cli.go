@@ -1151,9 +1151,17 @@ func relinkScope(home, projectDir string, recordLock bool, label string) error {
 	}
 	if modules == 0 {
 		fmt.Printf("%s: no namespaced packages to merge (%s)\n", label, inst.MergedDir())
-		return nil
+	} else {
+		fmt.Printf("%s: linked %d module(s) from %d package(s) into %s\n", label, modules, pkgs, inst.MergedDir())
 	}
-	fmt.Printf("%s: linked %d module(s) from %d package(s) into %s\n", label, modules, pkgs, inst.MergedDir())
+	// relink is the diagnostic command, so it's the right place to surface which
+	// packages had their namespaces inferred from layout (published before
+	// namespaces were recorded). Republishing them with a current fglpkg records
+	// the namespaces and removes the guesswork.
+	for _, name := range res.Inferred {
+		fmt.Printf("  note: %q has no recorded namespaces; inferred %v from its layout — "+
+			"republish it with a current fglpkg to record them\n", name, res.Namespaces[name])
+	}
 	return nil
 }
 

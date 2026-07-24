@@ -339,12 +339,15 @@ func (i *Installer) InstallAllWithOptions(m *manifest.Manifest, projectDir strin
 					fmt.Printf("warning: %v\n", vr.GeneroMismatch)
 				}
 				if vr.IsClean() {
-					// Everything is already on disk. Still (re)build the merged
-					// root so upgrading fglpkg on an already-installed project
-					// materializes it — and records namespaces into the lock —
-					// without needing a forced reinstall.
-					if err := i.syncMergedRoot(projectDir, !opts.Production); err != nil {
-						return err
+					// Everything is already on disk. Build the merged root only
+					// when it is MISSING — the migration case (fglpkg upgraded on
+					// an already-installed project, or .fglpkg/merged deleted).
+					// When it already exists, install/remove have kept it current,
+					// so skip the redundant rebuild (and its inference re-scan).
+					if !i.mergedRootExists() {
+						if err := i.syncMergedRoot(projectDir, !opts.Production); err != nil {
+							return err
+						}
 					}
 					fmt.Printf("Lock file is up to date (Genero %s). Nothing to install.\n", gv)
 					return nil
@@ -1039,19 +1042,20 @@ func (i *Installer) syncMergedRoot(projectDir string, recordLock bool) error {
 	return nil
 }
 
-// materializeAndRecord rebuilds this scope's merged root, logs any inferred
-// packages, and — when recordLock is true — records ownership into the project
-// lock. It returns the result and any error verbatim (a namespace clash
-// included), leaving each caller to decide how to treat a failure.
+// materializeAndRecord rebuilds this scope's merged root and — when recordLock
+// is true — records ownership into the project lock. It returns the result
+// (including the list of packages whose namespaces were inferred from layout)
+// and any error verbatim (a namespace clash included), leaving each caller to
+// decide how to treat a failure and whether to surface the inferred list.
+//
+// Inference notes are intentionally NOT printed here: inference is correct and
+// expected for packages published before namespaces were recorded, so emitting
+// a note on every automatic install/remove/env sync would be pure noise. Only
+// the explicit `fglpkg relink` surfaces the inferred list (see cmdRelink).
 func (i *Installer) materializeAndRecord(projectDir string, recordLock bool) (*materialize.Result, error) {
 	res, err := materialize.Rebuild(i.materializeScope())
 	if err != nil {
 		return nil, err
-	}
-	for _, name := range res.Inferred {
-		fmt.Fprintf(os.Stderr,
-			"note: inferred PACKAGE namespaces for %q from its file layout "+
-				"(it was published before namespaces were recorded)\n", name)
 	}
 	if recordLock {
 		if err := applyMaterializationToLock(projectDir, res); err != nil {
@@ -1060,6 +1064,13 @@ func (i *Installer) materializeAndRecord(projectDir string, recordLock bool) (*m
 		}
 	}
 	return res, nil
+}
+
+// mergedRootExists reports whether this scope's merged root is present and
+// non-empty (so a fast-path install can skip a redundant rebuild).
+func (i *Installer) mergedRootExists() bool {
+	entries, err := os.ReadDir(i.MergedDir())
+	return err == nil && len(entries) > 0
 }
 
 // RebuildMergedRoot rebuilds this scope's merged FGLLDPATH root from the
