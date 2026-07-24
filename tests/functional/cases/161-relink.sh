@@ -1,0 +1,47 @@
+suite "relink (rebuild merged FGLLDPATH root)"
+
+# _rl_store <pkg> <namespace> <relpath.42m> — write an installed store under the
+# local .fglpkg/packages with a manifest that records generoPackages plus one
+# module at the given namespace path.
+_rl_store() {
+  local pkg="$1" ns="$2" rel="$3" base
+  base=".fglpkg/packages/$pkg"
+  mkdir -p "$base/$(dirname "$rel")"
+  cat > "$base/fglpkg.json" <<EOF
+{ "name":"$pkg","version":"1.0.0","generoPackages":["$ns"],"dependencies":{"fgl":{}} }
+EOF
+  printf 'PCODE' > "$base/$rel"
+}
+
+_rl_builds() {
+  _rl_store dbconnection com.fourjs.db com/fourjs/db/DbConnection.42m
+  run relink --local
+  assert_success
+  assert_file ".fglpkg/merged/com/fourjs/db/DbConnection.42m"
+}
+it "relink materializes the merged root from installed stores" _rl_builds
+
+_rl_idempotent() {
+  _rl_store strutils org.util org/util/Strings.42m
+  run relink --local; assert_success
+  run relink --local; assert_success
+  assert_file ".fglpkg/merged/org/util/Strings.42m"
+}
+it "relink is idempotent" _rl_idempotent
+
+_rl_clash() {
+  _rl_store alpha com.dup com/dup/A.42m
+  _rl_store beta com.dup com/dup/B.42m
+  run relink --local
+  assert_failure
+  assert_contains "com.dup"     # the error names the clashing namespace
+  assert_contains "alpha"
+  assert_contains "beta"
+}
+it "relink fails when two packages claim the same namespace" _rl_clash
+
+_rl_rejects_args() {
+  run relink bogus
+  assert_failure
+}
+it "relink rejects positional arguments" _rl_rejects_args
