@@ -230,19 +230,23 @@ cd myproject
 fglpkg init
 ```
 
-This interactively prompts for the package name, version, description, and author, then creates a `fglpkg.json` file:
+This interactively prompts for the fields a publishable package needs — name, version, description, author, license (default `UNLICENSED`), and repository — then writes a `fglpkg.json`. The repository is **auto-detected from the project's git `origin` remote** when present (SCP-style remotes like `git@github.com:acme/myproject.git` are normalised to `https://github.com/acme/myproject`) and offered as the default; if there is no git repo or no `origin`, you are prompted for it. A final prompt offers the optional Genero version constraint, showing the detected runtime version — press Enter to skip it, type `current` to pin the current major (e.g. `^6.0.0`), or enter your own constraint.
+
+Pass `--yes` (or run with a non-interactive stdin, e.g. in CI or scaffolding) to skip the prompts and accept the defaults instead of blocking:
+
+```bash
+fglpkg init --yes
+```
+
+A freshly created manifest looks like this (with `repository` filled in from the git remote):
 
 ```json
 {
   "name": "myproject",
   "version": "0.1.0",
-  "description": "",
-  "author": "",
   "license": "UNLICENSED",
-  "dependencies": {
-    "fgl": {},
-    "java": []
-  }
+  "repository": "https://github.com/acme/myproject",
+  "dependencies": {}
 }
 ```
 

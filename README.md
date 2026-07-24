@@ -318,7 +318,9 @@ fails to verify — suitable as a CI gate.
 
 ```bash
 # Package management
-fglpkg init                              # Initialise fglpkg.json interactively
+fglpkg init                              # Initialise fglpkg.json interactively (name, version,
+                                         #   description, author, license, repository, genero)
+fglpkg init --yes                        # Non-interactive: accept defaults (CI / scaffolding)
 fglpkg init --template library           # Scaffold a publishable package
 fglpkg init --template app               # Scaffold a consuming application
 fglpkg install                           # Install deps (auto-detects local vs global)
@@ -395,10 +397,14 @@ fglpkg run <command> [-- args...]        # Run a script from an installed packag
 fglpkg docs <package>                    # List documentation files
 fglpkg docs <package> <file>             # Display a documentation file
 
+# Releasing a package version
+fglpkg bump patch                        # Bump fglpkg.json version (patch|minor|major|prerelease|<semver>)
+fglpkg bump minor --git                  # Bump, then commit and tag v<version> (clean tree required)
+
 # Misc
 fglpkg self-update                       # Update fglpkg to the latest release
 fglpkg self-update --check               # Report whether an update is available
-fglpkg version                           # Print version and build info
+fglpkg version                           # Print the fglpkg tool version (also: fglpkg --version, -v)
 fglpkg help                              # Show help
 ```
 
