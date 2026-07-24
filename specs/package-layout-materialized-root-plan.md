@@ -67,9 +67,11 @@ func ParsePackageDecl(src []byte) (namespace string, ok bool)
 
 - **`LockedPackage`** ([internal/lockfile/lockfile.go](../internal/lockfile/lockfile.go)) gains, both
   additive/`omitempty` (no `lockfileVersion` bump — pre-existing locks parse unchanged):
-  - `Packages []string` (`json:"packages,omitempty"`) — the `PACKAGE` namespace(s) this package owns.
-  - `Files []string` (`json:"materialized,omitempty"`) — the merged-root-relative `.42m` paths this
-    package materialized, for O(manifest) removal/rebuild.
+  - `GeneroPackages []string` (`json:"generoPackages,omitempty"`) — the `PACKAGE` namespace(s) this
+    package owns. Named to mirror the manifest's `generoPackages` field (clearer than a bare
+    `packages`, which would collide with `LockFile.Packages`).
+  - `Materialized []string` (`json:"materialized,omitempty"`) — the merged-root-relative `.42m` paths
+    this package materialized, for O(manifest) removal/rebuild.
 - Populated by the installer (Phase 4).
 
 ### Phase 3 — `internal/materialize`
