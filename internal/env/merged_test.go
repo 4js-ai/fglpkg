@@ -185,3 +185,86 @@ func TestGenerateGlobalEmitsMergedRoot(t *testing.T) {
 		t.Errorf("global FGLLDPATH should not contain a materialized package store:\n%s", joined)
 	}
 }
+
+// TestBuildFGLLDPATHKeepsStoreForMixedPackage: a materialized package that ALSO
+// ships a flat-root, non-namespaced module keeps its per-package store entry —
+// the namespaced module resolves via the merged root, and the flat module keeps
+// resolving via the retained store dir (its pre-merged-root behaviour). The
+// merged root is emitted first so namespaced resolution stays namespace-correct.
+func TestBuildFGLLDPATHKeepsStoreForMixedPackage(t *testing.T) {
+	chdirTemp(t)
+	envTestWrite(t, ".fglpkg/merged/com/fourjs/db/DbConnection.42m", "DB")
+	envTestWrite(t, ".fglpkg/packages/dbkit/fglpkg.json",
+		`{ "name": "dbkit", "version": "1.0.0", "generoPackages": ["com.fourjs.db"], "dependencies": { "fgl": {} } }`)
+	envTestWrite(t, ".fglpkg/packages/dbkit/com/fourjs/db/DbConnection.42m", "DB") // namespaced → merged
+	envTestWrite(t, ".fglpkg/packages/dbkit/Helper.42m", "HELP")                   // flat-root → NOT merged, not a program
+
+	g := New(t.TempDir())
+	got, err := g.BuildFGLLDPATH()
+	if err != nil {
+		t.Fatalf("BuildFGLLDPATH: %v", err)
+	}
+	mergedAbs, _ := filepath.Abs(filepath.Join(".fglpkg", "merged"))
+	storeAbs, _ := filepath.Abs(filepath.Join(".fglpkg", "packages", "dbkit"))
+	if !strings.Contains(got, mergedAbs) {
+		t.Errorf("FGLLDPATH %q should contain the merged root %q", got, mergedAbs)
+	}
+	if !strings.Contains(got, storeAbs) {
+		t.Errorf("FGLLDPATH %q should KEEP the store dir %q for a mixed package (flat-root Helper.42m is not merged)", got, storeAbs)
+	}
+	if iMerged, iStore := strings.Index(got, mergedAbs), strings.Index(got, storeAbs); iMerged > iStore {
+		t.Errorf("merged root should precede the retained store dir: %q", got)
+	}
+}
+
+// TestBuildFGLLDPATHDropsStoreWhenFullyCovered: a materialized package whose
+// only importable module is namespaced (present in the merged root), plus an
+// out-of-namespace program, has its store dir dropped — the program runs by
+// path and does not force the store onto FGLLDPATH.
+func TestBuildFGLLDPATHDropsStoreWhenFullyCovered(t *testing.T) {
+	chdirTemp(t)
+	envTestWrite(t, ".fglpkg/merged/com/fourjs/db/DbConnection.42m", "DB")
+	envTestWrite(t, ".fglpkg/packages/dbkit/fglpkg.json",
+		`{ "name": "dbkit", "version": "1.0.0", "generoPackages": ["com.fourjs.db"], "programs": ["test/TestConnection"], "dependencies": { "fgl": {} } }`)
+	envTestWrite(t, ".fglpkg/packages/dbkit/com/fourjs/db/DbConnection.42m", "DB") // namespaced → merged
+	envTestWrite(t, ".fglpkg/packages/dbkit/test/TestConnection.42m", "PROG")      // program → run by path
+
+	g := New(t.TempDir())
+	got, err := g.BuildFGLLDPATH()
+	if err != nil {
+		t.Fatalf("BuildFGLLDPATH: %v", err)
+	}
+	mergedAbs, _ := filepath.Abs(filepath.Join(".fglpkg", "merged"))
+	storeAbs, _ := filepath.Abs(filepath.Join(".fglpkg", "packages", "dbkit"))
+	if !strings.Contains(got, mergedAbs) {
+		t.Errorf("FGLLDPATH %q should contain the merged root", got)
+	}
+	if strings.Contains(got, storeAbs) {
+		t.Errorf("FGLLDPATH %q should DROP the store dir when every importable module is merged (program excluded)", got)
+	}
+}
+
+// TestGenerateGSTKeepsStoreForMixedPackage: the GST twin of the mixed-package
+// case — the $(ProjectDir)-relative store entry is retained alongside the
+// merged root.
+func TestGenerateGSTKeepsStoreForMixedPackage(t *testing.T) {
+	chdirTemp(t)
+	envTestWrite(t, ".fglpkg/merged/com/fourjs/db/DbConnection.42m", "DB")
+	envTestWrite(t, ".fglpkg/packages/dbkit/fglpkg.json",
+		`{ "name": "dbkit", "version": "1.0.0", "generoPackages": ["com.fourjs.db"], "dependencies": { "fgl": {} } }`)
+	envTestWrite(t, ".fglpkg/packages/dbkit/com/fourjs/db/DbConnection.42m", "DB")
+	envTestWrite(t, ".fglpkg/packages/dbkit/Helper.42m", "HELP")
+
+	g := New(t.TempDir())
+	lines, err := g.GenerateGST()
+	if err != nil {
+		t.Fatalf("GenerateGST: %v", err)
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "$(ProjectDir)/.fglpkg/merged") {
+		t.Errorf("GST FGLLDPATH should reference the merged root:\n%s", joined)
+	}
+	if !strings.Contains(joined, "$(ProjectDir)/.fglpkg/packages/dbkit") {
+		t.Errorf("GST FGLLDPATH should KEEP the mixed package's store dir:\n%s", joined)
+	}
+}

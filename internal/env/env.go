@@ -2,7 +2,9 @@ package env
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -218,13 +220,16 @@ func (g *Generator) buildFGLLDPATH() (string, error) {
 // correct entry) when it exists and is non-empty, followed by a per-package
 // store dir for every package the merged root does not cover.
 //
-// A package is "covered" when its manifest records ≥1 generoPackages namespace
-// (it was materialized into the merged root). Legacy packages (no recorded
-// namespaces) and pure-flat packages keep their historical per-package entry.
+// A package is "covered" (store dir dropped) only when it is materialized AND
+// every importable .42m it ships is present in the merged root (see
+// storeDirCovered). Legacy/flat packages keep their historical per-package
+// entry, and so does a materialized package that still ships an un-merged
+// flat-root / non-namespaced module — so that module keeps resolving.
 func scopeFGLLDPATHDirs(packagesDir string) []string {
 	var out []string
 	mergedDir := filepath.Join(filepath.Dir(packagesDir), "merged")
-	if isNonEmptyDir(mergedDir) {
+	mergedActive := isNonEmptyDir(mergedDir)
+	if mergedActive {
 		out = append(out, mergedDir)
 	}
 	entries, err := os.ReadDir(packagesDir)
@@ -236,25 +241,88 @@ func scopeFGLLDPATHDirs(packagesDir string) []string {
 			continue
 		}
 		pkgDir := filepath.Join(packagesDir, e.Name())
-		if packageIsMaterialized(pkgDir) {
-			continue // covered by the merged root
+		// Drop the per-package store dir only when the merged root is active
+		// AND fully covers this package's importable modules. A materialized
+		// package that still ships an un-merged .42m — a flat-root or otherwise
+		// non-namespaced library module — keeps its store entry so that module
+		// resolves as it did before the merged root existed. The merged root is
+		// emitted first, so namespaced modules still resolve namespace-correctly
+		// (GIS-358) and the retained store entry only backstops the leftovers.
+		if mergedActive && storeDirCovered(pkgDir, mergedDir) {
+			continue
 		}
 		out = append(out, pkgDir)
 	}
 	return out
 }
 
-// packageIsMaterialized reports whether an installed package is represented in
-// the merged root — i.e. its manifest records at least one generoPackages
-// namespace. A missing/unreadable manifest returns false, so the caller falls
-// back to a per-package entry (the historical behaviour), never dropping a
-// package from FGLLDPATH on a manifest read error.
-func packageIsMaterialized(pkgDir string) bool {
+// storeDirCovered reports whether an installed package's per-package store dir
+// is fully represented in the merged root, so it can be dropped from FGLLDPATH.
+// It is covered only when the package is materialized (its manifest records ≥1
+// generoPackages namespace) AND every importable .42m it ships is present in
+// the merged root. A legacy/flat package (no recorded namespaces), an
+// unreadable manifest, or a package that still ships an un-merged importable
+// module (a flat-root / non-namespaced .42m) is NOT covered — its store dir
+// stays on FGLLDPATH so those modules keep resolving (the historical
+// behaviour), never dropping a package from FGLLDPATH on a manifest read error.
+func storeDirCovered(pkgDir, mergedDir string) bool {
 	m, err := manifest.Load(pkgDir)
-	if err != nil {
+	if err != nil || len(m.GeneroPackages) == 0 {
 		return false
 	}
-	return len(m.GeneroPackages) > 0
+	return storeFullyMerged(pkgDir, mergedDir, m.Programs)
+}
+
+// storeFullyMerged reports whether every importable .42m under pkgDir is
+// present in the merged root at the same relative path. It returns false as
+// soon as it finds an importable module the merged root does not cover — a
+// flat-root or otherwise non-namespaced .42m — so the caller keeps the store
+// dir on FGLLDPATH and that module keeps resolving. Declared program modules
+// (manifest `programs`) run by path and are never resolved via FGLLDPATH, so
+// they never force the store dir to be kept (mirrors materialize's exclusion).
+func storeFullyMerged(pkgDir, mergedDir string, programs []string) bool {
+	isProgram := programMatcher(programs)
+	fullyMerged := true
+	_ = filepath.WalkDir(pkgDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".42m") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(pkgDir, p)
+		if relErr != nil {
+			return nil
+		}
+		relSlash := filepath.ToSlash(rel)
+		if isProgram(relSlash) {
+			return nil // out-of-namespace program — never on FGLLDPATH
+		}
+		if _, statErr := os.Stat(filepath.Join(mergedDir, filepath.FromSlash(relSlash))); statErr != nil {
+			fullyMerged = false
+			return fs.SkipAll // one uncovered module is enough
+		}
+		return nil
+	})
+	return fullyMerged
+}
+
+// programMatcher returns a predicate that reports whether a store-relative .42m
+// path (slash form) is a declared program module — matched by full path or by
+// basename, tolerating a trailing .42m — mirroring materialize's programSets so
+// env and materialize agree on which modules are out-of-namespace.
+func programMatcher(programs []string) func(relSlash string) bool {
+	full := make(map[string]bool, len(programs))
+	base := make(map[string]bool, len(programs))
+	for _, pr := range programs {
+		pr = strings.TrimSuffix(filepath.ToSlash(strings.TrimSpace(pr)), ".42m")
+		if pr == "" {
+			continue
+		}
+		full[pr] = true
+		base[path.Base(pr)] = true
+	}
+	return func(relSlash string) bool {
+		modFull := strings.TrimSuffix(relSlash, ".42m")
+		return full[modFull] || base[path.Base(modFull)]
+	}
 }
 
 // isNonEmptyDir reports whether dir exists and contains at least one entry.
@@ -409,7 +477,9 @@ func (g *Generator) GenerateGST() ([]string, error) {
 // scopeFGLLDPATHDirs, but emitted as $(ProjectDir)-relative templates).
 func (g *Generator) gstFGLLDPATHParts() []string {
 	var parts []string
-	if isNonEmptyDir(filepath.Join(".", ".fglpkg", "merged")) {
+	mergedDir := filepath.Join(".", ".fglpkg", "merged")
+	mergedActive := isNonEmptyDir(mergedDir)
+	if mergedActive {
 		parts = append(parts, "$(ProjectDir)/.fglpkg/merged")
 	}
 	localPkgs := filepath.Join(".", ".fglpkg", "packages")
@@ -421,7 +491,8 @@ func (g *Generator) gstFGLLDPATHParts() []string {
 		if !e.IsDir() {
 			continue
 		}
-		if packageIsMaterialized(filepath.Join(localPkgs, e.Name())) {
+		pkgDir := filepath.Join(localPkgs, e.Name())
+		if mergedActive && storeDirCovered(pkgDir, mergedDir) {
 			continue
 		}
 		parts = append(parts, "$(ProjectDir)/.fglpkg/packages/"+e.Name())
