@@ -244,6 +244,33 @@ func TestBuildFGLLDPATHDropsStoreWhenFullyCovered(t *testing.T) {
 	}
 }
 
+// TestBuildFGLLDPATHKeepsMaterializedStoreWhenNoMergedRoot: a package that
+// records generoPackages but whose merged root is absent (deleted, or not yet
+// built) MUST keep its per-package store dir — with no merged entry to cover
+// it, dropping the store dir would remove the package from FGLLDPATH entirely.
+// `fglpkg relink` (or the next install) rebuilds the merged root.
+func TestBuildFGLLDPATHKeepsMaterializedStoreWhenNoMergedRoot(t *testing.T) {
+	chdirTemp(t)
+	// No .fglpkg/merged at all — only the installed store, with recorded namespaces.
+	envTestWrite(t, ".fglpkg/packages/dbkit/fglpkg.json",
+		`{ "name": "dbkit", "version": "1.0.0", "generoPackages": ["com.fourjs.db"], "dependencies": { "fgl": {} } }`)
+	envTestWrite(t, ".fglpkg/packages/dbkit/com/fourjs/db/DbConnection.42m", "DB")
+
+	g := New(t.TempDir())
+	got, err := g.BuildFGLLDPATH()
+	if err != nil {
+		t.Fatalf("BuildFGLLDPATH: %v", err)
+	}
+	mergedAbs, _ := filepath.Abs(filepath.Join(".fglpkg", "merged"))
+	storeAbs, _ := filepath.Abs(filepath.Join(".fglpkg", "packages", "dbkit"))
+	if strings.Contains(got, mergedAbs) {
+		t.Errorf("no merged root exists, so it must not appear on FGLLDPATH: %q", got)
+	}
+	if !strings.Contains(got, storeAbs) {
+		t.Errorf("FGLLDPATH %q must KEEP a materialized package's store dir when the merged root is absent", got)
+	}
+}
+
 // TestGenerateGSTKeepsStoreForMixedPackage: the GST twin of the mixed-package
 // case — the $(ProjectDir)-relative store entry is retained alongside the
 // merged root.
