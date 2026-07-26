@@ -331,43 +331,39 @@ func isNonEmptyDir(dir string) bool {
 	return err == nil && len(entries) > 0
 }
 
-// buildJavaClasspath returns the fglpkg-managed CLASSPATH entries by
-// scanning the jars directory for all .jar files.  Local project jars
-// (.fglpkg/jars/) are included with higher priority than global jars.
-// The existing CLASSPATH value is preserved at eval time via prependExportLine.
+// buildJavaClasspath returns the fglpkg-managed CLASSPATH entries: one
+// classpathAnchorPath entry per jars directory that actually has jars
+// (local project jars first, then global), rather than every individual
+// jar's own path — see classpathAnchorPath's doc comment for why. The
+// existing CLASSPATH value is preserved at eval time via prependExportLine.
 func (g *Generator) buildJavaClasspath() (string, error) {
 	sep := pathSeparator()
-	seen := make(map[string]bool)
-	var jars []string
+	var anchors []string
 
-	addJarsFrom := func(dir string) {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			return
-		}
-		for _, e := range entries {
-			if !e.IsDir() && strings.HasSuffix(e.Name(), ".jar") {
-				p := filepath.Join(dir, e.Name())
-				if !seen[p] {
-					jars = append(jars, p)
-					seen[p] = true
-				}
-			}
-		}
-	}
-
-	// Local project jars (higher priority).
 	localJars := filepath.Join(".", ".fglpkg", "jars")
-	if abs, err := filepath.Abs(localJars); err == nil {
-		if abs != g.jarsDir {
-			addJarsFrom(abs)
+	localAbs, err := filepath.Abs(localJars)
+	if err != nil {
+		return "", err
+	}
+	if localAbs != g.jarsDir {
+		anchor, err := classpathAnchorPath(localAbs)
+		if err != nil {
+			return "", err
+		}
+		if anchor != "" {
+			anchors = append(anchors, anchor)
 		}
 	}
 
-	// Global jars.
-	addJarsFrom(g.jarsDir)
+	globalAnchor, err := classpathAnchorPath(g.jarsDir)
+	if err != nil {
+		return "", err
+	}
+	if globalAnchor != "" {
+		anchors = append(anchors, globalAnchor)
+	}
 
-	return strings.Join(jars, sep), nil
+	return strings.Join(anchors, sep), nil
 }
 
 // GenerateLocal returns export lines using only the local project's
@@ -383,7 +379,7 @@ func (g *Generator) GenerateLocal() ([]string, error) {
 	}
 
 	localJars := filepath.Join(".", ".fglpkg", "jars")
-	classpath, err := g.buildPathsFrom(localJars, false)
+	classpath, err := classpathAnchorPath(localJars)
 	if err != nil {
 		return nil, err
 	}
@@ -418,7 +414,7 @@ func (g *Generator) GenerateGlobal() ([]string, error) {
 		lines = append(lines, g.prependExportLine("FGLLDPATH", strings.Join(dirs, pathSeparator())))
 	}
 
-	classpath, err := g.buildPathsFrom(g.jarsDir, false)
+	classpath, err := classpathAnchorPath(g.jarsDir)
 	if err != nil {
 		return nil, err
 	}
@@ -450,11 +446,12 @@ func (g *Generator) GenerateGST() ([]string, error) {
 	}
 
 	localJars := filepath.Join(".", ".fglpkg", "jars")
-	classpath, err := g.buildGSTPaths(localJars, false)
+	anchor, err := classpathAnchorPath(localJars)
 	if err != nil {
 		return nil, err
 	}
-	if classpath != "" {
+	if anchor != "" {
+		classpath := "$(ProjectDir)/.fglpkg/jars/" + classpathAnchorName
 		lines = append(lines, fmt.Sprintf("CLASSPATH=%s;$(CLASSPATH)", classpath))
 	}
 
