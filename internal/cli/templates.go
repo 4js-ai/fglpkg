@@ -126,6 +126,11 @@ func (t *projectTemplate) writeFiles(dir, name string) error {
 const gitignoreContent = `# fglpkg local package install
 .fglpkg/
 
+# Derived merged FGLLDPATH root — a rebuildable cache of hard links. Never
+# commit it, even if you choose to vendor .fglpkg/packages/. Rebuild it any
+# time with 'fglpkg relink'.
+.fglpkg/merged/
+
 # Compiled Genero artifacts
 *.42m
 *.42f

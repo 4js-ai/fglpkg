@@ -79,6 +79,18 @@ type Manifest struct {
 	// otherwise. Each name matches Genero's COMPONENTTYPE lexical rule and
 	// corresponds to a directory webcomponents/<NAME>/ in the source tree.
 	Webcomponents []string `json:"webcomponents,omitempty"`
+	// GeneroPackages records the Genero `PACKAGE` namespace(s) this package's
+	// library modules provide (e.g. "com.fourjs.db"), so a consumer can
+	// materialize a PACKAGE-correct merged FGLLDPATH root without re-reading
+	// source. It is normally computed at pack/publish from the shipped modules'
+	// namespace directory layout (a compiled module's directory mirrors its
+	// PACKAGE); an adjacent .4gl, when present, refines the classification (a
+	// no-PACKAGE module in a subdir is excluded — see internal/genpkg). An
+	// author may declare it as an override/escape hatch. Out-of-namespace
+	// modules (MAIN programs, tests, examples in `programs`) and flat-root
+	// modules never contribute a namespace. See
+	// specs/package-layout-materialized-root.md.
+	GeneroPackages []string `json:"generoPackages,omitempty"`
 	// Hooks declare lifecycle steps to run on well-known events. Each value
 	// is an ordered list of declarative operations from a fixed vocabulary
 	// (see HookOp). Arbitrary shell commands are intentionally not supported.

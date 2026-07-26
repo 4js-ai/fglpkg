@@ -2,11 +2,14 @@ package env
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
 
+	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 	"github.com/4js-mikefolcher/fglpkg/internal/workspace"
 )
 
@@ -158,8 +161,16 @@ func (g *Generator) GenerateGWA() ([]string, error) {
 // buildFGLLDPATH returns the fglpkg-managed FGLLDPATH entries.
 // Order of precedence (highest first):
 //  1. Workspace member source directories (local dev, no install needed)
-//  2. Local project packages (.fglpkg/packages/ in cwd)
-//  3. Global installed packages (~/.fglpkg/packages/)
+//  2. Local project scope (.fglpkg/ in cwd)
+//  3. Global installed scope (~/.fglpkg/)
+//
+// Within each scope the PACKAGE-correct merged root (.fglpkg/merged) is emitted
+// as a single entry, followed by a per-package entry for any package the merged
+// root does not cover (legacy/flat — see scopeFGLLDPATHDirs). Emitting the
+// merged root — laid out by namespace — rather than one raw store dir per
+// package is what makes `IMPORT FGL <ns>.<mod>` resolve correctly regardless of
+// the store-dir name (GIS-358) and turns a same-namespace collision into the
+// install-time hard error (GIS-359) instead of silent shadowing.
 //
 // The existing FGLLDPATH value is preserved at eval time via
 // prependExportLine, so we do not read it here.
@@ -175,16 +186,6 @@ func (g *Generator) buildFGLLDPATH() (string, error) {
 		}
 	}
 
-	addPackagesFrom := func(dir string) {
-		if entries, err := os.ReadDir(dir); err == nil {
-			for _, e := range entries {
-				if e.IsDir() {
-					add(filepath.Join(dir, e.Name()))
-				}
-			}
-		}
-	}
-
 	// 1. Workspace member paths (if we're inside a workspace).
 	if wsRoot := workspace.FindRoot("."); wsRoot != "" {
 		ws, err := workspace.Load(wsRoot)
@@ -195,18 +196,139 @@ func (g *Generator) buildFGLLDPATH() (string, error) {
 		}
 	}
 
-	// 2. Local project packages (higher priority than global).
+	// 2. Local project scope (higher priority than global).
 	localPkgs := filepath.Join(".", ".fglpkg", "packages")
 	if abs, err := filepath.Abs(localPkgs); err == nil {
 		if abs != g.packagesDir { // avoid duplicating if local == global
-			addPackagesFrom(abs)
+			for _, p := range scopeFGLLDPATHDirs(abs) {
+				add(p)
+			}
 		}
 	}
 
-	// 3. Global installed packages.
-	addPackagesFrom(g.packagesDir)
+	// 3. Global installed scope.
+	for _, p := range scopeFGLLDPATHDirs(g.packagesDir) {
+		add(p)
+	}
 
 	return strings.Join(parts, sep), nil
+}
+
+// scopeFGLLDPATHDirs returns the ordered FGLLDPATH directories for one scope
+// whose per-package stores live under packagesDir (which must be absolute). The
+// merged root — its sibling <home>/merged — is emitted first (one namespace-
+// correct entry) when it exists and is non-empty, followed by a per-package
+// store dir for every package the merged root does not cover.
+//
+// A package is "covered" (store dir dropped) only when it is materialized AND
+// every importable .42m it ships is present in the merged root (see
+// storeDirCovered). Legacy/flat packages keep their historical per-package
+// entry, and so does a materialized package that still ships an un-merged
+// flat-root / non-namespaced module — so that module keeps resolving.
+func scopeFGLLDPATHDirs(packagesDir string) []string {
+	var out []string
+	mergedDir := filepath.Join(filepath.Dir(packagesDir), "merged")
+	mergedActive := isNonEmptyDir(mergedDir)
+	if mergedActive {
+		out = append(out, mergedDir)
+	}
+	entries, err := os.ReadDir(packagesDir)
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		pkgDir := filepath.Join(packagesDir, e.Name())
+		// Drop the per-package store dir only when the merged root is active
+		// AND fully covers this package's importable modules. A materialized
+		// package that still ships an un-merged .42m — a flat-root or otherwise
+		// non-namespaced library module — keeps its store entry so that module
+		// resolves as it did before the merged root existed. The merged root is
+		// emitted first, so namespaced modules still resolve namespace-correctly
+		// (GIS-358) and the retained store entry only backstops the leftovers.
+		if mergedActive && storeDirCovered(pkgDir, mergedDir) {
+			continue
+		}
+		out = append(out, pkgDir)
+	}
+	return out
+}
+
+// storeDirCovered reports whether an installed package's per-package store dir
+// is fully represented in the merged root, so it can be dropped from FGLLDPATH.
+// It is covered only when the package is materialized (its manifest records ≥1
+// generoPackages namespace) AND every importable .42m it ships is present in
+// the merged root. A legacy/flat package (no recorded namespaces), an
+// unreadable manifest, or a package that still ships an un-merged importable
+// module (a flat-root / non-namespaced .42m) is NOT covered — its store dir
+// stays on FGLLDPATH so those modules keep resolving (the historical
+// behaviour), never dropping a package from FGLLDPATH on a manifest read error.
+func storeDirCovered(pkgDir, mergedDir string) bool {
+	m, err := manifest.Load(pkgDir)
+	if err != nil || len(m.GeneroPackages) == 0 {
+		return false
+	}
+	return storeFullyMerged(pkgDir, mergedDir, m.Programs)
+}
+
+// storeFullyMerged reports whether every importable .42m under pkgDir is
+// present in the merged root at the same relative path. It returns false as
+// soon as it finds an importable module the merged root does not cover — a
+// flat-root or otherwise non-namespaced .42m — so the caller keeps the store
+// dir on FGLLDPATH and that module keeps resolving. Declared program modules
+// (manifest `programs`) run by path and are never resolved via FGLLDPATH, so
+// they never force the store dir to be kept (mirrors materialize's exclusion).
+func storeFullyMerged(pkgDir, mergedDir string, programs []string) bool {
+	isProgram := programMatcher(programs)
+	fullyMerged := true
+	_ = filepath.WalkDir(pkgDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".42m") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(pkgDir, p)
+		if relErr != nil {
+			return nil
+		}
+		relSlash := filepath.ToSlash(rel)
+		if isProgram(relSlash) {
+			return nil // out-of-namespace program — never on FGLLDPATH
+		}
+		if _, statErr := os.Stat(filepath.Join(mergedDir, filepath.FromSlash(relSlash))); statErr != nil {
+			fullyMerged = false
+			return fs.SkipAll // one uncovered module is enough
+		}
+		return nil
+	})
+	return fullyMerged
+}
+
+// programMatcher returns a predicate that reports whether a store-relative .42m
+// path (slash form) is a declared program module — matched by full path or by
+// basename, tolerating a trailing .42m — mirroring materialize's programSets so
+// env and materialize agree on which modules are out-of-namespace.
+func programMatcher(programs []string) func(relSlash string) bool {
+	full := make(map[string]bool, len(programs))
+	base := make(map[string]bool, len(programs))
+	for _, pr := range programs {
+		pr = strings.TrimSuffix(filepath.ToSlash(strings.TrimSpace(pr)), ".42m")
+		if pr == "" {
+			continue
+		}
+		full[pr] = true
+		base[path.Base(pr)] = true
+	}
+	return func(relSlash string) bool {
+		modFull := strings.TrimSuffix(relSlash, ".42m")
+		return full[modFull] || base[path.Base(modFull)]
+	}
+}
+
+// isNonEmptyDir reports whether dir exists and contains at least one entry.
+func isNonEmptyDir(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	return err == nil && len(entries) > 0
 }
 
 // buildJavaClasspath returns the fglpkg-managed CLASSPATH entries by
@@ -254,12 +376,10 @@ func (g *Generator) GenerateLocal() ([]string, error) {
 	var lines []string
 
 	localPkgs := filepath.Join(".", ".fglpkg", "packages")
-	fglldpath, err := g.buildPathsFrom(localPkgs, true)
-	if err != nil {
-		return nil, err
-	}
-	if fglldpath != "" {
-		lines = append(lines, g.prependExportLine("FGLLDPATH", fglldpath))
+	if abs, err := filepath.Abs(localPkgs); err == nil {
+		if dirs := scopeFGLLDPATHDirs(abs); len(dirs) > 0 {
+			lines = append(lines, g.prependExportLine("FGLLDPATH", strings.Join(dirs, pathSeparator())))
+		}
 	}
 
 	localJars := filepath.Join(".", ".fglpkg", "jars")
@@ -294,12 +414,8 @@ func (g *Generator) GenerateLocal() ([]string, error) {
 func (g *Generator) GenerateGlobal() ([]string, error) {
 	var lines []string
 
-	fglldpath, err := g.buildPathsFrom(g.packagesDir, true)
-	if err != nil {
-		return nil, err
-	}
-	if fglldpath != "" {
-		lines = append(lines, g.prependExportLine("FGLLDPATH", fglldpath))
+	if dirs := scopeFGLLDPATHDirs(g.packagesDir); len(dirs) > 0 {
+		lines = append(lines, g.prependExportLine("FGLLDPATH", strings.Join(dirs, pathSeparator())))
 	}
 
 	classpath, err := g.buildPathsFrom(g.jarsDir, false)
@@ -329,13 +445,8 @@ func (g *Generator) GenerateGlobal() ([]string, error) {
 func (g *Generator) GenerateGST() ([]string, error) {
 	var lines []string
 
-	localPkgs := filepath.Join(".", ".fglpkg", "packages")
-	fglldpath, err := g.buildGSTPaths(localPkgs, true)
-	if err != nil {
-		return nil, err
-	}
-	if fglldpath != "" {
-		lines = append(lines, fmt.Sprintf("FGLLDPATH=%s;$(FGLLDPATH)", fglldpath))
+	if parts := g.gstFGLLDPATHParts(); len(parts) > 0 {
+		lines = append(lines, fmt.Sprintf("FGLLDPATH=%s;$(FGLLDPATH)", strings.Join(parts, ";")))
 	}
 
 	localJars := filepath.Join(".", ".fglpkg", "jars")
@@ -358,6 +469,35 @@ func (g *Generator) GenerateGST() ([]string, error) {
 	}
 
 	return lines, nil
+}
+
+// gstFGLLDPATHParts returns the local-scope FGLLDPATH parts in Genero Studio
+// ($(ProjectDir)) form: the merged root first when present and non-empty, then a
+// per-package path for every package the merged root does not cover (mirroring
+// scopeFGLLDPATHDirs, but emitted as $(ProjectDir)-relative templates).
+func (g *Generator) gstFGLLDPATHParts() []string {
+	var parts []string
+	mergedDir := filepath.Join(".", ".fglpkg", "merged")
+	mergedActive := isNonEmptyDir(mergedDir)
+	if mergedActive {
+		parts = append(parts, "$(ProjectDir)/.fglpkg/merged")
+	}
+	localPkgs := filepath.Join(".", ".fglpkg", "packages")
+	entries, err := os.ReadDir(localPkgs)
+	if err != nil {
+		return parts
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		pkgDir := filepath.Join(localPkgs, e.Name())
+		if mergedActive && storeDirCovered(pkgDir, mergedDir) {
+			continue
+		}
+		parts = append(parts, "$(ProjectDir)/.fglpkg/packages/"+e.Name())
+	}
+	return parts
 }
 
 // buildPathsFrom scans a directory and returns paths joined by the OS separator.

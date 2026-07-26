@@ -462,3 +462,115 @@ func TestSaveDoesNotHTMLEscape(t *testing.T) {
 		t.Errorf("fglpkg.lock is HTML-escaping requiredBy; want literal <root>:\n%s", got)
 	}
 }
+
+// TestMaterializationFieldsRoundTrip verifies the GIS-346 ownership fields
+// (generoPackages + materialized) survive Save/Load intact.
+func TestMaterializationFieldsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	lf := &lockfile.LockFile{
+		Version: 1,
+		Packages: []lockfile.LockedPackage{{
+			Name:           "dbconnection",
+			Version:        "1.0.0",
+			DownloadURL:    "https://example.test/dbconnection-1.0.0.zip",
+			RequiredBy:     []string{"<root>"},
+			GeneroPackages: []string{"com.fourjs.db"},
+			Materialized:   []string{"com/fourjs/db/DbConnection.42m", "com/fourjs/db/Query.42m"},
+		}},
+	}
+	if err := lf.Save(dir); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	// The keys must appear in the serialized form.
+	data, err := os.ReadFile(filepath.Join(dir, lockfile.Filename))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	for _, key := range []string{"generoPackages", "materialized", "com.fourjs.db", "com/fourjs/db/DbConnection.42m"} {
+		if !strings.Contains(string(data), key) {
+			t.Errorf("saved lock missing %q:\n%s", key, data)
+		}
+	}
+
+	loaded, err := lockfile.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	p := loaded.Packages[0]
+	if want := []string{"com.fourjs.db"}; !equalStrings(p.GeneroPackages, want) {
+		t.Errorf("GeneroPackages = %v, want %v", p.GeneroPackages, want)
+	}
+	if want := []string{"com/fourjs/db/DbConnection.42m", "com/fourjs/db/Query.42m"}; !equalStrings(p.Materialized, want) {
+		t.Errorf("Materialized = %v, want %v", p.Materialized, want)
+	}
+}
+
+// TestMaterializationFieldsOmittedWhenEmpty confirms the new fields are
+// additive/omitempty: a package that owns no namespaces serializes without
+// them, so existing locks and non-PACKAGE packages produce identical output.
+func TestMaterializationFieldsOmittedWhenEmpty(t *testing.T) {
+	dir := t.TempDir()
+	lf := &lockfile.LockFile{
+		Version: 1,
+		Packages: []lockfile.LockedPackage{{
+			Name:        "flatpkg",
+			Version:     "1.0.0",
+			DownloadURL: "https://example.test/flatpkg-1.0.0.zip",
+			RequiredBy:  []string{"<root>"},
+		}},
+	}
+	if err := lf.Save(dir); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, lockfile.Filename))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	for _, key := range []string{"generoPackages", "materialized"} {
+		if strings.Contains(string(data), key) {
+			t.Errorf("empty %q should be omitted from lock:\n%s", key, data)
+		}
+	}
+}
+
+// TestPreExistingLockParsesWithoutMaterializationFields confirms a lock
+// written before GIS-346 (no generoPackages / materialized keys) loads
+// cleanly with the fields left nil — no lockfileVersion bump required.
+func TestPreExistingLockParsesWithoutMaterializationFields(t *testing.T) {
+	dir := t.TempDir()
+	legacy := `{
+  "lockfileVersion": 1,
+  "generatedAt": "2026-01-01T00:00:00Z",
+  "generoVersion": "4.01.12",
+  "root": { "name": "myapp", "version": "1.0.0" },
+  "packages": [
+    { "name": "dep", "version": "1.0.0", "downloadUrl": "https://example.test/dep.zip", "requiredBy": ["<root>"] }
+  ],
+  "jars": []
+}`
+	if err := os.WriteFile(filepath.Join(dir, lockfile.Filename), []byte(legacy), 0o644); err != nil {
+		t.Fatalf("write legacy lock: %v", err)
+	}
+	loaded, err := lockfile.Load(dir)
+	if err != nil {
+		t.Fatalf("Load legacy lock: %v", err)
+	}
+	p := loaded.Packages[0]
+	if p.GeneroPackages != nil || p.Materialized != nil {
+		t.Errorf("legacy lock should parse with nil materialization fields, got %v / %v",
+			p.GeneroPackages, p.Materialized)
+	}
+}
+
+// equalStrings reports whether two string slices are element-wise equal.
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

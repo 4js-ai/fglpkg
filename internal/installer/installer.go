@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	gh "github.com/4js-mikefolcher/fglpkg/internal/github"
 	"github.com/4js-mikefolcher/fglpkg/internal/lockfile"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
+	"github.com/4js-mikefolcher/fglpkg/internal/materialize"
 	"github.com/4js-mikefolcher/fglpkg/internal/registry"
 	"github.com/4js-mikefolcher/fglpkg/internal/resolver"
 	"github.com/4js-mikefolcher/fglpkg/internal/signing"
@@ -337,6 +339,16 @@ func (i *Installer) InstallAllWithOptions(m *manifest.Manifest, projectDir strin
 					fmt.Printf("warning: %v\n", vr.GeneroMismatch)
 				}
 				if vr.IsClean() {
+					// Everything is already on disk. Build the merged root only
+					// when it is MISSING — the migration case (fglpkg upgraded on
+					// an already-installed project, or .fglpkg/merged deleted).
+					// When it already exists, install/remove have kept it current,
+					// so skip the redundant rebuild (and its inference re-scan).
+					if !i.mergedRootExists() {
+						if err := i.syncMergedRoot(projectDir, !opts.Production); err != nil {
+							return err
+						}
+					}
 					fmt.Printf("Lock file is up to date (Genero %s). Nothing to install.\n", gv)
 					return nil
 				}
@@ -533,6 +545,12 @@ func (i *Installer) installFromLock(lf *lockfile.LockFile, root *manifest.Manife
 	if !opts.Production {
 		i.recordManifestJARs(projectDir, supplemental)
 	}
+
+	// Materialize the PACKAGE-correct merged FGLLDPATH root from the installed
+	// stores. A namespace clash aborts (strict one-package-per-namespace).
+	if err := i.syncMergedRoot(projectDir, !opts.Production); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -647,6 +665,12 @@ func (i *Installer) installFromPlan(plan *resolver.Plan, root *manifest.Manifest
 
 	if !opts.Production {
 		i.recordManifestJARs(projectDir, supplemental)
+	}
+
+	// Materialize the PACKAGE-correct merged FGLLDPATH root from the now-installed
+	// stores. A namespace clash aborts the install (strict one-package-per-namespace).
+	if err := i.syncMergedRoot(projectDir, !opts.Production); err != nil {
+		return err
 	}
 	return nil
 }
@@ -865,6 +889,12 @@ func (i *Installer) ReconcileAfterRemove(m *manifest.Manifest, projectDir string
 	if lockNote != "" {
 		pruned = append(pruned, lockNote) // reported after the pruned artifacts
 	}
+
+	// Rebuild the merged root so a removed package's modules disappear from it
+	// (and record ownership into the rewritten lock). Best-effort on removal: a
+	// merged-root issue — even a pre-existing namespace clash — must never block
+	// a remove, so any error is swallowed here.
+	_ = i.syncMergedRoot(projectDir, true)
 	return pruned, nil
 }
 
@@ -979,6 +1009,126 @@ func (i *Installer) List() ([]InstalledPackage, error) {
 
 // PackagesDir returns the path where BDL packages are installed.
 func (i *Installer) PackagesDir() string { return i.packagesDir }
+
+// MergedDir returns this scope's derived, PACKAGE-correct merged FGLLDPATH root
+// (home/merged). It is a rebuildable cache materialized from the per-package
+// stores; see internal/materialize and specs/package-layout-materialized-root.md.
+func (i *Installer) MergedDir() string { return filepath.Join(i.home, "merged") }
+
+// materializeScope pairs this installer's store and merged directories for the
+// materialize package.
+func (i *Installer) materializeScope() materialize.Scope {
+	return materialize.Scope{PackagesDir: i.packagesDir, MergedDir: i.MergedDir()}
+}
+
+// syncMergedRoot rebuilds this scope's merged FGLLDPATH root from the installed
+// stores. When recordLock is true, it also records each package's namespaces and
+// materialized files into the project lock.
+//
+// A namespace clash is returned so the caller can decide (install aborts on it;
+// removal ignores it — a stale merged root must never block a remove). Any other
+// (I/O) failure is non-fatal: the stores are intact, so it is reported as a
+// warning and `fglpkg relink` can recover.
+func (i *Installer) syncMergedRoot(projectDir string, recordLock bool) error {
+	if _, err := i.materializeAndRecord(projectDir, recordLock); err != nil {
+		var clash *materialize.NamespaceClashError
+		if errors.As(err, &clash) {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "warning: could not build merged FGLLDPATH root: %v\n", err)
+		fmt.Fprintf(os.Stderr, "  the packages are installed; run 'fglpkg relink' to retry.\n")
+		return nil
+	}
+	return nil
+}
+
+// materializeAndRecord rebuilds this scope's merged root and — when recordLock
+// is true — records ownership into the project lock. It returns the result
+// (including the list of packages whose namespaces were inferred from layout)
+// and any error verbatim (a namespace clash included), leaving each caller to
+// decide how to treat a failure and whether to surface the inferred list.
+//
+// Inference notes are intentionally NOT printed here: inference is correct and
+// expected for packages published before namespaces were recorded, so emitting
+// a note on every automatic install/remove/env sync would be pure noise. Only
+// the explicit `fglpkg relink` surfaces the inferred list (see cmdRelink).
+func (i *Installer) materializeAndRecord(projectDir string, recordLock bool) (*materialize.Result, error) {
+	res, err := materialize.Rebuild(i.materializeScope())
+	if err != nil {
+		return nil, err
+	}
+	if recordLock {
+		if err := applyMaterializationToLock(projectDir, res); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not record materialization in %s: %v\n",
+				lockfile.Filename, err)
+		}
+	}
+	return res, nil
+}
+
+// mergedRootExists reports whether this scope's merged root is present and
+// non-empty (so a fast-path install can skip a redundant rebuild).
+func (i *Installer) mergedRootExists() bool {
+	entries, err := os.ReadDir(i.MergedDir())
+	return err == nil && len(entries) > 0
+}
+
+// RebuildMergedRoot rebuilds this scope's merged FGLLDPATH root from the
+// installed stores on a best-effort basis, without touching the lock file. Used
+// by the offline remove-fallback; it never fails the caller.
+func (i *Installer) RebuildMergedRoot() { _ = i.syncMergedRoot("", false) }
+
+// Relink rebuilds this scope's merged FGLLDPATH root for `fglpkg relink`,
+// returning the materialize result and any error (a namespace clash included)
+// so the command can report what it linked and fail loudly on a clash. When
+// recordLock is true it also records ownership into the project lock.
+func (i *Installer) Relink(projectDir string, recordLock bool) (*materialize.Result, error) {
+	return i.materializeAndRecord(projectDir, recordLock)
+}
+
+// applyMaterializationToLock patches each LockedPackage in the project lock with
+// the PACKAGE namespaces it owns and the merged-root files it materialized, then
+// saves — only when something changed. A no-op when the project has no lock
+// (e.g. a --production or lockless install), so it never conjures one.
+func applyMaterializationToLock(projectDir string, res *materialize.Result) error {
+	if !lockfile.Exists(projectDir) {
+		return nil
+	}
+	lf, err := lockfile.Load(projectDir)
+	if err != nil {
+		return err
+	}
+	changed := false
+	for idx := range lf.Packages {
+		name := lf.Packages[idx].Name
+		if ns := res.Namespaces[name]; !stringSlicesEqual(lf.Packages[idx].GeneroPackages, ns) {
+			lf.Packages[idx].GeneroPackages = ns
+			changed = true
+		}
+		if files := res.Owned[name]; !stringSlicesEqual(lf.Packages[idx].Materialized, files) {
+			lf.Packages[idx].Materialized = files
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return lf.Save(projectDir)
+}
+
+// stringSlicesEqual reports element-wise equality, treating nil and empty as
+// equal so a nil↔[] difference never dirties the lock.
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
 
 // WebcomponentsDir is the directory holding installed webcomponent bundles,
 // one subdirectory per COMPONENTTYPE.

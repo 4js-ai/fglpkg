@@ -117,6 +117,18 @@ type LockedPackage struct {
 	// re-routed. See specs/artifactory-secondary-repository.md §9.
 	Registry string `json:"registry,omitempty"`
 
+	// ── PACKAGE-aware materialization (GIS-346) ──
+	// GeneroPackages records the Genero PACKAGE namespace(s) this package's
+	// library modules declare, mirroring the manifest's generoPackages field
+	// (recorded at publish). Materialized records the merged-root-relative
+	// .42m paths this package linked/copied into its scope's merged root, so
+	// removal and rebuild are O(manifest) rather than a filesystem walk. Both
+	// are populated by the installer after extraction/materialization (Phase
+	// 4) and are additive/omitempty — pre-existing locks parse unchanged (no
+	// lockfileVersion bump). See specs/package-layout-materialized-root.md.
+	GeneroPackages []string `json:"generoPackages,omitempty"`
+	Materialized   []string `json:"materialized,omitempty"`
+
 	// ── Layer 1 signing material ──
 	// Size/UploadedAt/Uploader are the remaining inputs (beyond name,
 	// version, variant, and Checksum) needed to reconstruct the canonical

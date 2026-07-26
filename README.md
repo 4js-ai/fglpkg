@@ -114,7 +114,7 @@ fglpkg stores everything under `~/.fglpkg` (override with `FGLPKG_HOME`):
 
 ```
 ~/.fglpkg/
-├── packages/          # Installed BDL packages (each in its own subdir)
+├── packages/          # Installed BDL packages (each in its own subdir) — the source of truth
 │   ├── myutils/
 │   │   ├── fglpkg.json
 │   │   ├── strings.42m
@@ -123,11 +123,21 @@ fglpkg stores everything under `~/.fglpkg` (override with `FGLPKG_HOME`):
 │       └── com/fourjs/poiapi/
 │           ├── fglpkg.json
 │           └── PoiApi.42m
+├── merged/            # Derived FGLLDPATH root — modules laid out by PACKAGE namespace
+│   └── com/fourjs/poiapi/PoiApi.42m
 ├── jars/              # Java JARs
 │   ├── gson-2.10.1.jar
 │   └── commons-lang3-3.12.0.jar
 └── credentials.json   # Registry + GitHub auth tokens
 ```
+
+The `merged/` directory is a **derived cache**, not a source of truth: `fglpkg env` puts it on
+`FGLLDPATH` as a single entry so `IMPORT FGL <namespace>.<module>` resolves to the correct
+namespace path regardless of which package's store dir a module came from. It is built from the
+per-package stores by hard-linking each namespaced `.42m` into place (falling back to a copy when
+hard links are unavailable — a different filesystem, or Windows), so it costs almost no extra disk.
+`install`/`remove` keep it current; delete it freely and rebuild with `fglpkg relink`. It is always
+git-ignored, even if you choose to vendor `.fglpkg/packages/`.
 
 When working inside a project, fglpkg can also install to a local `.fglpkg/` directory:
 
@@ -150,7 +160,7 @@ fglpkg automatically detects whether to use local or global package storage:
 | `fglpkg.json` file | Local (`.fglpkg/`) |
 | Neither | Global (`~/.fglpkg/`) |
 
-Override with `--local` / `-l` or `--global` / `-g` on `install`, `remove`, `update`, `list`, and `env`.
+Override with `--local` / `-l` or `--global` / `-g` on `install`, `remove`, `update`, `list`, `env`, and `relink`.
 
 For shell profiles, always use `--global` so all installed packages are available regardless of directory:
 
@@ -337,6 +347,9 @@ fglpkg list                              # List installed packages
 fglpkg env                               # Print export statements (auto-detects scope)
 fglpkg env --global                      # Print exports for all global packages
 fglpkg env --gst                         # Print in Genero Studio format
+fglpkg relink                            # Rebuild the merged FGLLDPATH root (recover a
+                                         #   deleted/stale .fglpkg/merged; install/remove
+                                         #   keep it current automatically)
 fglpkg search json                       # Search (annotates ✓/✗/? vs your Genero version)
 fglpkg search --all                      # List every package in the registry
                                          #   a STATUS column appears only when a match is

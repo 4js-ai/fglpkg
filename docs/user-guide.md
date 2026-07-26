@@ -203,8 +203,29 @@ Genero Studio translates `$(ProjectDir)` to the actual project path and `;` to t
 
 Key points:
 - Existing `FGLLDPATH` and `CLASSPATH` values are preserved (fglpkg prepends its paths)
-- All installed package directories are added to `FGLLDPATH`
+- Installed packages are exposed through a single merged `FGLLDPATH` entry (see below)
 - All downloaded JARs are added to `CLASSPATH`
+
+### The merged FGLLDPATH root
+
+Each namespaced package declares a Genero `PACKAGE` (e.g. `PACKAGE com.fourjs.poiapi`). fglpkg records
+those namespaces when the package is published, and at install time it builds a **merged root** —
+`.fglpkg/merged` for a local project, `~/.fglpkg/merged` globally — where every namespaced `.42m` is
+laid out by its namespace path (`com/fourjs/poiapi/PoiApi.42m`). `fglpkg env` then adds that one
+directory to `FGLLDPATH` instead of one entry per installed package, so `IMPORT FGL com.fourjs.poiapi.PoiApi`
+resolves to the namespace-correct path no matter what the package or its store directory is named.
+
+- The merged root is a **derived cache**. It is built by hard-linking each module into place (a copy is
+  used when hard links aren't available — a different filesystem, or Windows), so it costs almost no
+  extra disk, and you can delete it at any time.
+- `install` and `remove` keep it up to date automatically. If it is ever missing or stale — you deleted
+  it, or edited `.fglpkg/packages/` by hand — rebuild it with **`fglpkg relink`** (add `--local` /
+  `--global` to target one scope).
+- Two installed packages that declare the **same** `PACKAGE` namespace is a hard error at install time,
+  rather than one silently shadowing the other.
+- Packages published before namespaces were recorded, and packages with no namespace, keep their
+  historical per-package `FGLLDPATH` entry — nothing about those changes.
+- `.fglpkg/merged` is git-ignored by the `init` templates; never commit it (rebuild it instead).
 
 ### Home Directory
 
