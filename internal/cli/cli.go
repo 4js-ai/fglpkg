@@ -4015,6 +4015,9 @@ ENVIRONMENT:
                            stored login; cannot be cleared by 'fglpkg logout'.
   FGLPKG_PUBLISH_REGISTRY  Name of the repository 'fglpkg publish' targets when no
                            --registry is given (overrides fglpkg.json defaultRegistry)
+  FGLPKG_MAVEN_URL         Maven mirror base URL for JAR downloads (e.g. a JFrog
+                           Artifactory Maven repo). Overrides fglpkg.json/config.json
+                           mavenMirror. Default: https://repo1.maven.org/maven2
   FGLPKG_GENERO_VERSION    Override Genero version detection
   FGLPKG_INSTALL_CONCURRENCY  Cap parallel downloads during install (default 4)
 
@@ -4065,11 +4068,43 @@ func buildInstaller(home string, m *manifest.Manifest) (*installer.Installer, *p
 	registryToken, _ := credentials.ActiveBearer(context.Background(), globalHome, registryURL, oauth.Refresh)
 	inst := installer.New(home, githubToken, registryToken, registryURL)
 
+	// Resolve the Maven mirror (GIS-365): env FGLPKG_MAVEN_URL → project
+	// fglpkg.json → global config.json. When set, JAR downloads reroute to it
+	// (WithMavenBase) and its URL prefix is registered in repoAuth so downloads
+	// carry credentials via matchRepoAuth — independent of whether any secondary
+	// FGL registry is configured (Tyler may pull FGL packages from GI but JARs
+	// from Artifactory).
+	mavenBase, mavenAuth := resolveMavenMirror(globalHome, m)
+	var mirrorAuth []installer.RepoAuth
+	if mavenBase != "" {
+		inst = inst.WithMavenBase(mavenBase)
+		creds, _ := credentials.Load(globalHome)
+		var headers map[string]string
+		if creds != nil {
+			// Resolve the mirror credential by URL prefix, not exact key: a
+			// login to the enclosing Artifactory base (".../artifactory") must
+			// cover a mirror nested under it (".../artifactory/<repo>"), since
+			// `fglpkg login` keys credentials by the registry base, not the
+			// mirror URL (GIS-365).
+			headers = creds.AuthHeadersForURL(mavenBase, mavenAuth)
+		}
+		// Only register a mirror auth entry when it actually carries
+		// credentials. An empty entry would shadow a broader registry
+		// credential whose prefix already covers the mirror URL, because
+		// matchRepoAuth picks the longest-prefix match regardless of whether it
+		// has headers. JAR downloads never receive the GI bearer (InstallJar
+		// passes it empty), so no anonymous placeholder is needed here.
+		if len(headers) > 0 {
+			mirrorAuth = []installer.RepoAuth{{URLPrefix: mavenBase, Headers: headers}}
+		}
+	}
+
 	// Engage multi-provider routing only when repositories beyond the built-in
 	// GI registry are configured — otherwise the single-registry path stays
 	// byte-identical (no Source stamped in the lockfile).
 	var set *provider.RepositorySet
-	if rs, repoAuth, regNames, err := buildRepositorySet(globalHome, m); err != nil {
+	rs, repoAuth, regNames, err := buildRepositorySet(globalHome, m)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: ignoring registries config: %v\n", err)
 	} else {
 		// Record the configured names in every case (even single-registry) so a
@@ -4077,8 +4112,14 @@ func buildInstaller(home string, m *manifest.Manifest) (*installer.Installer, *p
 		inst = inst.WithConfiguredRegistries(regNames)
 		if rs != nil {
 			set = rs
-			inst = inst.WithFetchers(rs.Versions, rs.Info).WithRepoAuth(repoAuth).WithPinDeclarer(rs)
+			inst = inst.WithFetchers(rs.Versions, rs.Info).WithPinDeclarer(rs)
 		}
+	}
+	// Attach download auth: the secondary FGL repos (if any) plus the Maven
+	// mirror. Skipped entirely when neither is present, keeping the pure-GI path
+	// byte-identical.
+	if repoAuth = append(repoAuth, mirrorAuth...); len(repoAuth) > 0 {
+		inst = inst.WithRepoAuth(repoAuth)
 	}
 
 	// Layer 1 signature verification. The keys manifest is cached in the
@@ -4188,6 +4229,35 @@ func resolveDefaultPublishRegistry(home string, m *manifest.Manifest) string {
 		return v
 	}
 	return ""
+}
+
+// resolveMavenMirror returns the Maven mirror base URL and its auth scheme for
+// JAR downloads (GIS-365), in decreasing precedence: FGLPKG_MAVEN_URL, the
+// project manifest's mavenMirror, then the global config's mavenMirror. Returns
+// ("", "") when none is set — the caller then fetches JARs from public Maven
+// Central anonymously, exactly as before. The env var overrides only the URL;
+// the auth scheme comes from whichever config object supplied a mirror
+// (defaulting to bearer), since a bare URL carries no scheme.
+func resolveMavenMirror(home string, m *manifest.Manifest) (base, authScheme string) {
+	// Establish the configured mirror (manifest wins over global) first, so its
+	// auth scheme survives even when the env var overrides just the URL.
+	var mm *config.MavenMirror
+	if m != nil && m.MavenMirror != nil && strings.TrimSpace(m.MavenMirror.URL) != "" {
+		mm = m.MavenMirror
+	} else if g, err := config.GlobalMavenMirror(home); err == nil && g != nil && strings.TrimSpace(g.URL) != "" {
+		mm = g
+	}
+	if mm != nil {
+		base = strings.TrimRight(strings.TrimSpace(mm.URL), "/")
+		authScheme = mm.Auth
+	}
+	if v := strings.TrimSpace(os.Getenv("FGLPKG_MAVEN_URL")); v != "" {
+		base = strings.TrimRight(v, "/")
+	}
+	if base != "" && authScheme == "" {
+		authScheme = config.AuthBearer
+	}
+	return base, authScheme
 }
 
 func parsePackageArg(arg string) (name, version string, err error) {

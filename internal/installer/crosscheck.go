@@ -202,7 +202,7 @@ func (i *Installer) recordManifestJARs(projectDir string, jars []manifest.JavaDe
 		printSync("warning: could not update lock file with fallback JARs: %v\n", err)
 		return
 	}
-	if !lf.AddManifestJARs(jars) {
+	if !lf.AddManifestJARs(jars, i.mavenBase) {
 		return // nothing new to record
 	}
 	if err := lf.Save(projectDir); err != nil {
