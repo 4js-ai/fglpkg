@@ -30,6 +30,7 @@ rules](#parsing--validation-rules).
   - [6.6 Java dependency object](#66-java-dependency-object)
   - [6.7 Lifecycle hooks](#67-lifecycle-hooks)
   - [6.8 Tooling & legacy keys](#68-tooling--legacy-keys)
+  - [6.9 Registries & default registry](#69-registries--default-registry)
 - [7. Worked examples](#7-worked-examples)
 - [8. Editor integration](#8-editor-integration)
 - [9. Field summary table](#9-field-summary-table)
@@ -411,8 +412,22 @@ Each bucket is an object with two optional keys:
 }
 ```
 
-- **`fgl`** — a map of BDL package name → semver **constraint** string. The
-  constraint accepts the usual operators (`^`, `~`, ranges, `||`, exact pins).
+- **`fgl`** — a map of BDL package name → dependency spec. The spec is usually a
+  semver **constraint** string accepting the usual operators (`^`, `~`, ranges,
+  `||`, exact pins). It may instead be an **object** to pin the package to a
+  specific source registry (see [§6.9](#69-registries--default-registry)):
+
+  ```json
+  "fgl": {
+    "dbtools": "^2.0.0",
+    "utils":   { "version": "^1.0.0", "registry": "acme" }
+  }
+  ```
+
+  The object form takes a required `version` (same constraint syntax) and an
+  optional `registry` naming a [declared registry](#69-registries--default-registry).
+  A pin restricts that package to the named repository, disambiguating a name that
+  would otherwise collide across registries.
 - **`java`** — an array of [Java dependency objects](#66-java-dependency-object),
   resolved from Maven Central by default.
 
@@ -520,6 +535,67 @@ backward compatibility but should be **omitted on new manifests**.
 The previous `scripts` field was defined but never executed and has been
 removed. A manifest that still uses it fails to load with an error pointing at
 `hooks`. Convert each entry to a declarative hook operation.
+
+### 6.9 Registries & default registry
+
+These two keys let a project draw packages from — and publish to — package
+repositories **in addition to** the built-in Genero Intelligence (GI) registry,
+most commonly a team's own JFrog Artifactory. Because they live in the committed
+`fglpkg.json`, a clean clone resolves against the right repositories with no
+per-developer machine setup — the same role `.npmrc` / `NuGet.config` play for
+npm / NuGet. They carry **no secrets**: credentials are stored separately, per
+developer, in `~/.fglpkg/credentials.json` (written by `fglpkg login`).
+
+The full behaviour — routing, the collision guard, publishing — is described in
+the [Secondary Package Repositories](../README.md#secondary-package-repositories-jfrog-artifactory)
+section of the README and in
+[specs/artifactory-secondary-repository.md](../specs/artifactory-secondary-repository.md);
+this reference covers only the manifest keys.
+
+#### `registries` — array of registry descriptors
+Additional repositories consulted alongside the built-in GI registry. The
+effective set is a cascade, in **increasing** precedence: built-in GI → the
+machine-wide `~/.fglpkg/config.json` → this project `registries` array. Entries
+merge by `name`, so a project entry can retarget or extend a global one. Each
+descriptor has these fields:
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | **Yes** | Logical id used in `--registry`, credential lookup, and dependency `registry` pins. |
+| `type` | string | **Yes** | `"genero"` or `"artifactory"`. (Only the built-in `gi` may be `genero`.) |
+| `url` | string | **Yes** | Base URL, including any context path (e.g. `https://artifactory.acme.example/artifactory`). |
+| `repoKey` | string | For `artifactory` | The Artifactory **generic** repository key. |
+| `priority` | integer | **Yes** | Lower is queried first; must be unique across the set. Ordering/diagnostics only — **not** a precedence tiebreak when a name collides. |
+| `auth` | string | No | `bearer` (default) \| `basic` \| `apikey` \| `anonymous`. |
+| `packages` | string[] | No | Glob allow-list (e.g. `["acme-*"]`); names outside it are never queried against this repo. |
+
+```json
+{
+  "registries": [
+    {
+      "name": "acme",
+      "type": "artifactory",
+      "url": "https://artifactory.acme.example/artifactory",
+      "repoKey": "fgl-internal-generic",
+      "priority": 2,
+      "auth": "bearer",
+      "packages": ["acme-*"]
+    }
+  ]
+}
+```
+
+Rather than editing this array by hand, `fglpkg registry add <name> <url> …
+--project` writes a validated entry into `fglpkg.json` (omit `--project` to write
+the global `~/.fglpkg/config.json` instead), and `fglpkg registry list` shows the
+effective set with each entry's `SOURCE` (`builtin` / `global` / `project`).
+
+#### `defaultRegistry` — string
+Logical name of the repository that `fglpkg publish` targets when no `--registry`
+flag is given (and `FGLPKG_PUBLISH_REGISTRY` is unset). Lets a team that publishes
+to its own Artifactory avoid passing `--registry` every time. **Publish-only**: it
+does not change which repository packages are *consumed* from. Omit it (or use
+`"gi"`) to publish to the GI registry.
 
 ---
 
@@ -669,13 +745,15 @@ authority (see [§5](#5-parsing--validation-rules)).
 | `devDependencies` | bucket | No | Dev-only deps; not transitive; stripped on publish. |
 | `optionalDependencies` | bucket | No | Best-effort deps; failure warns. |
 | `hooks` | map | No | Declarative lifecycle operations. |
+| `registries` | array | No | Extra package repositories (e.g. Artifactory); committed, no secrets. |
+| `defaultRegistry` | string | No | Default `publish` target when `--registry` is omitted (publish-only). |
 | `$schema` | string | No | Editor schema reference (ignored by fglpkg). |
 | `type` | string | No | **Deprecated**, accepted-but-ignored. |
 
 *Buckets* (`dependencies`, `devDependencies`, `optionalDependencies`) each
-contain `fgl` (name → semver constraint) and/or `java` (array of Maven-coordinate
-objects with `groupId`, `artifactId`, `version`, and optional `checksum`, `jar`,
-`url`).
+contain `fgl` (name → semver constraint, or a `{ "version", "registry" }` object
+to source-pin) and/or `java` (array of Maven-coordinate objects with `groupId`,
+`artifactId`, `version`, and optional `checksum`, `jar`, `url`).
 
 ---
 
