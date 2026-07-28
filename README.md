@@ -238,6 +238,7 @@ eval "$(fglpkg env --global)"
 | `importRoot` | No | Directory whose *contents* become the archive root (its prefix is stripped) — e.g. ship compiled output from under `lib/` without the `lib/` prefix. Must lie on the same path as `root`. |
 | `files` | No | Glob patterns for files to include in the zip (default `["*.42m", "*.42f", "*.sch"]`). A pattern with no `/` matches basenames at any depth under `root`; a pattern containing `/` is path-scoped relative to `root`. |
 | `include` | No | Extra loose files folded into the archive **root** by basename (e.g. `["dist/app.4st"]` ships as `app.4st`) — for files that live outside `importRoot`. |
+| `profile` | No | Genero configuration **files** this package ships (e.g. `["profiles/app.4gp"]`), relative to `root`. Always packed (even when `files` doesn't match them) and put on the consumer's `FGLPROFILE` ahead of their existing value, so their own settings still win |
 | `bin` | No | Command name to script path mappings (e.g., `{"migrate": "scripts/migrate.sh"}`) |
 | `docs` | No | Glob patterns for documentation files to include (e.g., `["README.md", "docs/**/*.md"]`) |
 | `dependencies.fgl` | No | BDL production package dependencies. Each value is either a version-constraint string (`"^1.0.0"`) or an object pinning the source repository: `{ "version": "^1.0.0", "registry": "acme" }` (see [Secondary Package Repositories](#secondary-package-repositories-jfrog-artifactory)) |
@@ -263,8 +264,12 @@ eval "$(fglpkg env --global)"
 | `FGLPKG_INSTALL_CONCURRENCY` | Cap parallel downloads during install (default 4) |
 | `FGLPKG_SIGNING` | Layer 1 signature enforcement: `require`, `warn`, or `off`. Overrides `signing.enforce` in `config.json` |
 | `FGLPKG_NO_UPDATE_CHECK` | Set to disable the passive "new version available" notice (also configurable via `updateCheck` in `~/.fglpkg/config.json`). Always off for `dev` builds, in CI, and for non-interactive output |
-| `FGLLDPATH` | Auto-managed by `fglpkg env` (prepends, preserves existing value) |
-| `CLASSPATH` | Auto-managed by `fglpkg env` (prepends, preserves existing value) |
+| `FGLLDPATH` | Auto-managed by `fglpkg env` — program modules, via the merged root (prepends, preserves existing value) |
+| `CLASSPATH` | Auto-managed by `fglpkg env` — installed JARs (prepends, preserves existing value) |
+| `FGLRESOURCEPATH` | Auto-managed by `fglpkg env` — directories holding packaged `.42f`/`.42s`/`.4ad`/`.4st`/`.4sm`/`.4tb`/`.4tm`/`.iem` |
+| `FGLDBPATH` | Auto-managed by `fglpkg env` — directories holding packaged `.sch`/`.val`/`.att` |
+| `FGLIMAGEPATH` | Auto-managed by `fglpkg env` — installed webcomponents plus directories holding packaged images and `.ttf` icon fonts |
+| `FGLPROFILE` | Auto-managed by `fglpkg env` — config **files** declared by a package's `profile` (listed first, so your own value still overrides) |
 
 ### Authentication
 

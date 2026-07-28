@@ -74,6 +74,24 @@ type Manifest struct {
 	Bin                  map[string]string `json:"bin,omitempty"`        // command name -> script path
 	Docs                 []string          `json:"docs,omitempty"`       // glob patterns for doc files
 	Programs             []string          `json:"programs,omitempty"`   // modules with MAIN blocks (e.g. "PoiConvert")
+	// Profile lists the FGLPROFILE configuration files this package ships, as
+	// paths relative to the package root. These are FILE paths, not globs and
+	// not directories — FGLPROFILE is an ordered list of files, unlike the
+	// directory search paths (FGLLDPATH, FGLRESOURCEPATH, …).
+	//
+	// `fglpkg env` emits them ahead of any existing FGLPROFILE value: Genero
+	// applies FGLPROFILE entries left to right with the LAST definition
+	// winning, so putting package profiles first means a project- or
+	// user-level profile still overrides a package's defaults.
+	//
+	// Declared files are always packed, even when the `files` globs don't
+	// match them (the defaults — *.42m/*.42f/*.sch — never would) and even
+	// when .fglpkgignore would exclude them; the same rule as `bin`, for the
+	// same reason: a declared profile that never reaches the archive is a
+	// silently broken package. `pack` rewrites this list to archive-relative
+	// paths in the shipped manifest so the installed copy resolves against
+	// the store dir.
+	Profile []string `json:"profile,omitempty"`
 	// Webcomponents lists the COMPONENTTYPE names this package provides.
 	// Required (and non-empty) when Type is KindWebcomponent; forbidden
 	// otherwise. Each name matches Genero's COMPONENTTYPE lexical rule and
@@ -824,6 +842,11 @@ func (m *Manifest) Validate() error {
 	}
 	for i, inc := range m.Include {
 		if err := safeRelPath(fmt.Sprintf("include[%d]", i), inc); err != nil {
+			return err
+		}
+	}
+	for i, p := range m.Profile {
+		if err := safeRelPath(fmt.Sprintf("profile[%d]", i), p); err != nil {
 			return err
 		}
 	}

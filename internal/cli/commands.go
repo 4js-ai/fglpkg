@@ -139,6 +139,19 @@ allowed by the manifest constraints.
 
 Prints shell export lines. Evaluate the output to load them, e.g.
   eval "$(fglpkg env --global)"
+
+VARIABLES (each emitted only when a package ships matching files):
+  FGLLDPATH                program modules — .42m/.42r/.42x
+  CLASSPATH                Java jars
+  FGLRESOURCEPATH          .42f .42s .4ad .4st .4sm .4tb .4tm .iem
+  FGLDBPATH                .sch .val .att
+  FGLIMAGEPATH             webcomponents + .png .jpg .gif .svg .bmp .ico
+                           .tiff .ttf
+  FGLPROFILE               config files declared by a package's "profile"
+
+Existing values are preserved — fglpkg prepends. Diagnostics (such as two
+packages shipping the same resource basename, where first-on-path wins) are
+written to STDERR so stdout stays safe to eval.
 `,
 	},
 	{

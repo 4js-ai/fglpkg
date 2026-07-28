@@ -347,8 +347,18 @@ flat, non-`PACKAGE` case (module directly under the package dir) keeps its own p
 *(Resolved and moved to Decisions: delete-the-slug-layer alternative → keep store + materialize;
 clash granularity → strict one-per-namespace; automatic vs opt-in → automatic.)*
 
-- **Non-`.42m` artifact types** (`.42f`, `.sch`, C extensions): confirm each type's runtime search
-  path and whether `env` should point it at the merged root.
+- ~~**Non-`.42m` artifact types** (`.42f`, `.sch`, C extensions): confirm each type's runtime search
+  path and whether `env` should point it at the merged root.~~ **Resolved (issue #47).** Not via the
+  merged root: `FGLRESOURCEPATH` / `FGLDBPATH` / `FGLIMAGEPATH` are **basename-addressed,
+  non-recursive directory searches**, so there is no namespace path to remap and a synthetic tree buys
+  nothing. `env` instead emits the **real leaf directories** that hold the files, inside each
+  package's own store dir — which is why a materialized package's store dir stays load-bearing for
+  resources after leaving `FGLLDPATH`. `FGLPROFILE` is not a search path at all (an ordered list of
+  files, last-wins) and is driven by an explicit `profile` manifest field. Because basenames cannot be
+  disambiguated, GIS-359-style shadowing is unavoidable here and is instead made loud: a deterministic
+  order (local before global, packages lexical, first-on-path wins) plus a stderr warning naming both
+  packages. Materializing resources into a merged root remains open as a *scaling* follow-up if path
+  lengths become a problem (Windows caps the environment block at ~32 KB).
 - **Merged-root scoping** beyond local/global (e.g. workspace members).
 - **Meta-packages** (`com.fourjs` parent with installable children) — Leo's larger idea; a registry +
   manifest modeling change, tracked separately.

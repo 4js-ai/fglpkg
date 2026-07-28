@@ -99,6 +99,12 @@
       "items": { "type": "string" },
       "uniqueItems": true
     },
+    "profile": {
+      "type": "array",
+      "description": "FGLPROFILE configuration files this package ships, as paths relative to the package root (e.g. [\"profiles/poiapi.4gp\"]). These are file paths, not glob patterns and not directories. `fglpkg env` puts them on FGLPROFILE ahead of any existing value — Genero applies FGLPROFILE entries left to right with the last winning — so project and user settings still override a package's defaults. Declared files are always included in the published archive, even when the `files` globs would not match them.",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
     "webcomponents": {
       "type": "array",
       "description": "COMPONENTTYPE names this package provides. A package may declare webcomponents alongside BDL files to ship a BDL wrapper paired with its companion webcomponent. Each name must match the Genero COMPONENTTYPE lexical rule and correspond to a webcomponents/<NAME>/ source directory.",

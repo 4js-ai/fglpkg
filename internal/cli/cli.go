@@ -1077,10 +1077,24 @@ func cmdEnv(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Diagnostics go to STDERR, never stdout: this command's stdout is consumed
+	// by `eval "$(fglpkg env)"` and, under --gst, must stay a strict VAR=value
+	// list Genero Studio can parse. Emitting them here — after the switch —
+	// covers every output mode, --gst included.
+	printEnvWarnings(g)
 	for _, line := range exports {
 		fmt.Println(line)
 	}
 	return nil
+}
+
+// printEnvWarnings writes an env Generator's diagnostics (basename collisions
+// between installed packages, unusable `profile` declarations, over-long
+// values) to stderr.
+func printEnvWarnings(g *env.Generator) {
+	for _, w := range g.Warnings() {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
 }
 
 // cmdRelink rebuilds the derived, PACKAGE-correct merged FGLLDPATH root(s)
@@ -2272,12 +2286,24 @@ func stagePackage(stageDir string, m *manifest.Manifest) error {
 	if err := stageIncludeFiles(stageDir, m, staged); err != nil {
 		return err
 	}
+	// Unconditional: a webcomponent-only package may legitimately ship a
+	// profile too.
+	profilePaths, err := stageProfileFiles(stageDir, m, staged)
+	if err != nil {
+		return err
+	}
 
 	// Always write the manifest last, using a publish-safe copy so the shipped
 	// fglpkg.json omits devDependencies and reflects the post-strip layout.
 	// This is authoritative — it overwrites any file already staged at
 	// fglpkg.json rather than colliding.
 	pub := m.PublishCopy()
+	// Rewrite `profile` to the paths the files actually occupy in the archive.
+	// Author-side entries are relative to `root`, but stagePathFor strips
+	// importRoot — without this, a package with importRoot "lib" would ship
+	// "lib/profiles/x.4gp" in its manifest while the file sits at
+	// "profiles/x.4gp", and env's existence check would silently drop it.
+	pub.Profile = profilePaths
 	if err := recordGeneroPackages(pub, staged, m.Programs); err != nil {
 		return err
 	}
@@ -2510,6 +2536,50 @@ func stageIncludeFiles(stageDir string, m *manifest.Manifest, staged map[string]
 	return nil
 }
 
+// stageProfileFiles stages each declared `profile` file, resolved against the
+// package root and rebased under importRoot like any other packaged file.
+// It returns the staged archive paths in declaration order, for the shipped
+// manifest.
+//
+// Profiles are always shipped, even when the `files` globs don't match them and
+// even when .fglpkgignore would exclude them — the same rule as `bin`, for the
+// same reason: a declared profile that never reaches the archive is a silently
+// broken package. The default globs (*.42m/*.42f/*.sch) would never match a
+// profile, so without this a declared profile could not ship at all.
+func stageProfileFiles(stageDir string, m *manifest.Manifest, staged map[string]string) ([]string, error) {
+	if len(m.Profile) == 0 {
+		return nil, nil
+	}
+	root := m.Root
+	if root == "" {
+		root = "."
+	}
+	var archivePaths []string
+	for _, profilePath := range m.Profile {
+		fullPath := filepath.Join(root, profilePath)
+		info, err := os.Stat(fullPath)
+		if err != nil {
+			return nil, fmt.Errorf("profile file %q not found: %w", profilePath, err)
+		}
+		if info.IsDir() {
+			return nil, fmt.Errorf("profile file %q is a directory, not a file", profilePath)
+		}
+		relPath, relErr := filepath.Rel(".", fullPath)
+		if relErr != nil {
+			relPath = fullPath
+		}
+		archivePath, err := stagePathFor(m.ImportRoot, relPath)
+		if err != nil {
+			return nil, err
+		}
+		if err := stageFile(stageDir, archivePath, fullPath, staged); err != nil {
+			return nil, err
+		}
+		archivePaths = append(archivePaths, filepath.ToSlash(archivePath))
+	}
+	return archivePaths, nil
+}
+
 // stagePathFor returns the archive path for a packaged file, rebased under
 // importRoot when set. It errors if the file lies outside importRoot (which
 // would otherwise produce a "../" escape) — the caller must fix root/importRoot
@@ -2705,24 +2775,25 @@ func cmdBdl(args []string) error {
 	}
 	g := env.New(home)
 
-	fglldpath, err := g.BuildFGLLDPATH()
+	// Set every variable `fglpkg env` manages, not just FGLLDPATH/CLASSPATH:
+	// a program launched through `fglpkg bdl` must find its package's forms,
+	// schemas, images and profile too. Driving this off RawEnv/RawEnvOrder
+	// keeps the child environment in step with the shell output automatically.
+	raw, err := g.RawEnv()
 	if err != nil {
 		return err
 	}
-	classpath, err := g.BuildJavaClasspath()
-	if err != nil {
-		return err
-	}
+	printEnvWarnings(g)
 
-	// Merge with existing env values.
-	fglldpath = env.MergeEnvVar(fglldpath, os.Getenv("FGLLDPATH"))
-	classpath = env.MergeEnvVar(classpath, os.Getenv("CLASSPATH"))
-
-	// Build the full environment, replacing FGLLDPATH and CLASSPATH.
 	cmdEnv := os.Environ()
-	cmdEnv = setEnvVar(cmdEnv, "FGLLDPATH", fglldpath)
-	if classpath != "" {
-		cmdEnv = setEnvVar(cmdEnv, "CLASSPATH", classpath)
+	for _, key := range env.RawEnvOrder {
+		// MergeEnvVar puts the package paths first. For the search-path
+		// variables that means fglpkg's entries win; for FGLPROFILE, applied
+		// left to right with the last winning, it means the user's own profile
+		// still overrides a package's.
+		if merged := env.MergeEnvVar(raw[key], os.Getenv(key)); merged != "" {
+			cmdEnv = setEnvVar(cmdEnv, key, merged)
+		}
 	}
 
 	// Execute fglrun.
