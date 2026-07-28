@@ -199,3 +199,102 @@ func TestCmdRegistryAdd_ArtifactoryRequiresRepoKey(t *testing.T) {
 		t.Fatal("expected error: artifactory type requires --repo-key")
 	}
 }
+
+// TestSplitArtifactoryURL covers the URL forms the repo-key inference accepts
+// and, just as importantly, the ones it must leave alone.
+func TestSplitArtifactoryURL(t *testing.T) {
+	for _, tc := range []struct {
+		in, base, key string
+	}{
+		// The pasted-URL case, with and without a trailing slash.
+		{"https://acme.jfrog.io/artifactory/GeneroBDL", "https://acme.jfrog.io/artifactory", "GeneroBDL"},
+		{"https://acme.jfrog.io/artifactory/GeneroBDL/", "https://acme.jfrog.io/artifactory", "GeneroBDL"},
+		// A reverse-proxy context path in front of /artifactory is preserved.
+		{"https://acme.example/repo/artifactory/GeneroBDL", "https://acme.example/repo/artifactory", "GeneroBDL"},
+		{"acme.jfrog.io/artifactory/GeneroBDL", "acme.jfrog.io/artifactory", "GeneroBDL"},
+		// Already a base URL → nothing to split.
+		{"https://acme.jfrog.io/artifactory", "https://acme.jfrog.io/artifactory", ""},
+		{"https://acme.jfrog.io/artifactory/", "https://acme.jfrog.io/artifactory/", ""},
+		{"https://acme.example", "https://acme.example", ""},
+		// No /artifactory segment: a single trailing segment is indistinguishable
+		// from a context path, so it stays part of the base URL.
+		{"https://acme.example/GeneroBDL", "https://acme.example/GeneroBDL", ""},
+		// Deeper paths and query/fragment-bearing pastes are not guessed at.
+		{"https://acme.jfrog.io/artifactory/api/storage/GeneroBDL", "https://acme.jfrog.io/artifactory/api/storage/GeneroBDL", ""},
+		{"https://acme.jfrog.io/artifactory/GeneroBDL?x=1", "https://acme.jfrog.io/artifactory/GeneroBDL?x=1", ""},
+	} {
+		base, key := splitArtifactoryURL(tc.in)
+		if base != tc.base || key != tc.key {
+			t.Errorf("splitArtifactoryURL(%q) = (%q, %q), want (%q, %q)", tc.in, base, key, tc.base, tc.key)
+		}
+	}
+}
+
+// TestParseRegistryAddFlags_RepoKeyFromURL locks in that a pasted repository URL
+// carries the repo key, that --repo-key remains available, and that the two
+// spellings produce the same descriptor.
+func TestParseRegistryAddFlags_RepoKeyFromURL(t *testing.T) {
+	f, err := parseRegistryAddFlags([]string{"acme", "https://acme.jfrog.io/artifactory/GeneroBDL"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if f.url != "https://acme.jfrog.io/artifactory" || f.repoKey != "GeneroBDL" || !f.repoKeyFromURL {
+		t.Fatalf("inferred flags = %+v", f)
+	}
+
+	// An agreeing --repo-key strips the key from the URL just the same, so the
+	// belt-and-braces spelling does not record a doubled-up base URL.
+	f, err = parseRegistryAddFlags([]string{"acme", "https://acme.jfrog.io/artifactory/GeneroBDL", "--repo-key", "GeneroBDL"})
+	if err != nil {
+		t.Fatalf("parse with agreeing --repo-key: %v", err)
+	}
+	if f.url != "https://acme.jfrog.io/artifactory" || f.repoKey != "GeneroBDL" || f.repoKeyFromURL {
+		t.Fatalf("explicit-key flags = %+v", f)
+	}
+
+	// A base URL plus --repo-key is untouched.
+	f, err = parseRegistryAddFlags([]string{"acme", "https://acme.jfrog.io/artifactory", "--repo-key", "GeneroBDL"})
+	if err != nil {
+		t.Fatalf("parse base URL: %v", err)
+	}
+	if f.url != "https://acme.jfrog.io/artifactory" || f.repoKey != "GeneroBDL" || f.repoKeyFromURL {
+		t.Fatalf("base-URL flags = %+v", f)
+	}
+
+	// A disagreeing --repo-key is a mistake, not a precedence question.
+	if _, err := parseRegistryAddFlags([]string{
+		"acme", "https://acme.jfrog.io/artifactory/GeneroBDL", "--repo-key", "Other",
+	}); err == nil {
+		t.Error("expected error when --repo-key disagrees with the URL")
+	}
+
+	// type=genero has no repo key, so the URL is never split.
+	f, err = parseRegistryAddFlags([]string{"gi", "https://acme.jfrog.io/artifactory/GeneroBDL", "--type", "genero"})
+	if err != nil {
+		t.Fatalf("parse genero: %v", err)
+	}
+	if f.url != "https://acme.jfrog.io/artifactory/GeneroBDL" || f.repoKey != "" {
+		t.Fatalf("genero flags = %+v", f)
+	}
+}
+
+// TestCmdRegistryAdd_PastedURLPersistsSplit is the end-to-end check: the written
+// config.json must hold the base URL and repoKey separately, exactly as if
+// --repo-key had been used.
+func TestCmdRegistryAdd_PastedURLPersistsSplit(t *testing.T) {
+	home := chdirTemp(t)
+	if err := cmdRegistryAdd([]string{"acme", "https://acme.jfrog.io/artifactory/GeneroBDL"}); err != nil {
+		t.Fatalf("registry add: %v", err)
+	}
+	g, err := config.LoadGlobalFile(home)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	r, ok := config.Find(g.Registries, "acme")
+	if !ok {
+		t.Fatalf("acme not persisted: %+v", g.Registries)
+	}
+	if r.URL != "https://acme.jfrog.io/artifactory" || r.RepoKey != "GeneroBDL" {
+		t.Fatalf("persisted registry = %+v", r)
+	}
+}

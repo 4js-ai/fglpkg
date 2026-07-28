@@ -1217,11 +1217,23 @@ the result before writing and auto-assigns the priority after `gi` when you omit
 `--priority`:
 
 ```bash
+# Paste the repository URL as Artifactory shows it — the repo key is split off
+# the end and recorded as "repoKey", so --repo-key is optional:
+fglpkg registry add acme https://artifactory.acme.example/artifactory/fgl-internal-generic \
+    --packages "acme-*"                                   # writes ~/.fglpkg/config.json
+
+# Equivalent, spelling the key out explicitly:
 fglpkg registry add acme https://artifactory.acme.example/artifactory \
-    --repo-key fgl-internal-generic --packages "acme-*"   # writes ~/.fglpkg/config.json
+    --repo-key fgl-internal-generic --packages "acme-*"
 fglpkg registry add acme https://… --repo-key K --project # writes the project fglpkg.json
 fglpkg registry remove acme
 ```
+
+The key is only inferred from the single path segment following `/artifactory` —
+a deeper path (`/artifactory/api/storage/…`) or a URL with no `/artifactory`
+segment is treated as a plain base URL, so `--repo-key` is still required there.
+A `--repo-key` that disagrees with the key in the URL is rejected rather than
+guessed at.
 
 `add` defaults `--type` to `artifactory`; pass `--type genero`, `--auth`, or
 `--priority` as needed. It refuses to redefine the built-in `gi` or collide on
