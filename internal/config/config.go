@@ -61,6 +61,22 @@ const defaultGIURL = "https://service.generointelligence.ai"
 // GlobalFilename is the machine-wide config file name under the fglpkg home.
 const GlobalFilename = "config.json"
 
+// DefaultMavenBase is the public Maven Central base used for JAR downloads when
+// no Maven mirror is configured. Keeping it here (rather than only inline in
+// manifest.MavenURL) lets the mirror resolver fall back to a single source.
+const DefaultMavenBase = "https://repo1.maven.org/maven2"
+
+// MavenMirror describes a Maven repository (typically a JFrog Artifactory
+// Maven remote/virtual repo) that replaces Maven Central as the source for JAR
+// downloads. It carries no secrets — credentials live in credentials.json,
+// keyed by URL. URL is the base serving the standard Maven2 layout (e.g.
+// https://acme.jfrog.io/artifactory/libs-release). Auth is the scheme used
+// against it (bearer|basic|apikey|anonymous); empty defaults to bearer.
+type MavenMirror struct {
+	URL  string `json:"url"`
+	Auth string `json:"auth,omitempty"`
+}
+
 // BuiltinGI returns the always-present GI registry descriptor. When
 // fglpkgRegistry is non-empty (the FGLPKG_REGISTRY env override) it retargets
 // the GI URL, so existing single-registry users are unaffected.
@@ -83,6 +99,11 @@ func LoadGlobal(home string) ([]Registry, error) {
 type GlobalFile struct {
 	Registries      []Registry `json:"registries"`
 	DefaultRegistry string     `json:"defaultRegistry"` // logical name of the default publish target
+
+	// MavenMirror, when set, reroutes JAR downloads from Maven Central to the
+	// given Maven repository (GIS-365). Machine-wide fallback; the project
+	// fglpkg.json and FGLPKG_MAVEN_URL take precedence. nil => Maven Central.
+	MavenMirror *MavenMirror `json:"mavenMirror,omitempty"`
 
 	// Passive update-check user settings (GIS-255). These are READ-ONLY here —
 	// the tool never rewrites config.json. The mutable cache (last check time,
@@ -176,6 +197,13 @@ func WriteGlobalFile(home string, g GlobalFile) error {
 func GlobalDefaultRegistry(home string) (string, error) {
 	g, err := loadGlobalFile(home)
 	return g.DefaultRegistry, err
+}
+
+// GlobalMavenMirror returns the mavenMirror declared in the global config file,
+// or nil if none (or no file). Errors mirror LoadGlobal.
+func GlobalMavenMirror(home string) (*MavenMirror, error) {
+	g, err := loadGlobalFile(home)
+	return g.MavenMirror, err
 }
 
 // Load resolves the effective registry set: built-in GI (honoring

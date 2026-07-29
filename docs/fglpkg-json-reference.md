@@ -30,7 +30,8 @@ rules](#parsing--validation-rules).
   - [6.6 Java dependency object](#66-java-dependency-object)
   - [6.7 Lifecycle hooks](#67-lifecycle-hooks)
   - [6.8 Tooling & legacy keys](#68-tooling--legacy-keys)
-  - [6.9 Registries & default registry](#69-registries--default-registry)
+  - [6.9 Maven mirror for JAR downloads](#69-maven-mirror-for-jar-downloads)
+  - [6.10 Registries & default registry](#610-registries--default-registry)
 - [7. Worked examples](#7-worked-examples)
 - [8. Editor integration](#8-editor-integration)
 - [9. Field summary table](#9-field-summary-table)
@@ -415,7 +416,7 @@ Each bucket is an object with two optional keys:
 - **`fgl`** — a map of BDL package name → dependency spec. The spec is usually a
   semver **constraint** string accepting the usual operators (`^`, `~`, ranges,
   `||`, exact pins). It may instead be an **object** to pin the package to a
-  specific source registry (see [§6.9](#69-registries--default-registry)):
+  specific source registry (see [§6.10](#610-registries--default-registry)):
 
   ```json
   "fgl": {
@@ -425,7 +426,7 @@ Each bucket is an object with two optional keys:
   ```
 
   The object form takes a required `version` (same constraint syntax) and an
-  optional `registry` naming a [declared registry](#69-registries--default-registry).
+  optional `registry` naming a [declared registry](#610-registries--default-registry).
   A pin restricts that package to the named repository, disambiguating a name that
   would otherwise collide across registries.
 - **`java`** — an array of [Java dependency objects](#66-java-dependency-object),
@@ -459,9 +460,14 @@ Optional override of the computed JAR filename. Defaults to
 `<artifactId>-<version>.jar`.
 
 #### `url` — string
-Optional override of the download URL entirely. Useful for mirrors or
-non-standard repositories. When omitted, fglpkg builds the standard Maven
-Central URL (`https://repo1.maven.org/maven2/...`) from the coordinates.
+Optional override of the download URL entirely — the highest-precedence source
+for this one JAR. Useful for a one-off non-standard location. When omitted,
+fglpkg builds the standard Maven2 layout URL from the coordinates against the
+configured [Maven mirror](#69-maven-mirror-for-jar-downloads), falling back to
+Maven Central (`https://repo1.maven.org/maven2/...`) when no mirror is set. To
+route **all** JARs through an internal mirror, prefer the top-level
+[`mavenMirror`](#69-maven-mirror-for-jar-downloads) rather than a per-dependency
+`url`.
 
 ### 6.7 Lifecycle hooks
 
@@ -536,7 +542,83 @@ The previous `scripts` field was defined but never executed and has been
 removed. A manifest that still uses it fails to load with an error pointing at
 `hooks`. Convert each entry to a declarative hook operation.
 
-### 6.9 Registries & default registry
+### 6.9 Maven mirror for JAR downloads
+
+By default, Java/JAR dependencies (§6.6) are fetched from public Maven Central
+(`https://repo1.maven.org/maven2`). The top-level **`mavenMirror`** reroutes
+those downloads to an internal Maven repository — typically a JFrog Artifactory
+Maven *remote* (proxy) or *virtual* repository. This is the recommended setup
+for environments where nothing may be pulled directly from a public source.
+
+An Artifactory Maven repo serves the identical Maven2 layout, so only the base
+URL changes — the per-JAR path is built from the coordinates exactly as before.
+
+#### `mavenMirror` — object
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `url` | string | **Yes** | Base URL of the Maven repository serving the standard Maven2 layout, e.g. `https://artifactory.acme.example/artifactory/libs-release`. Replaces the `https://repo1.maven.org/maven2` prefix. |
+| `auth` | string | No | Auth scheme against the mirror: `bearer` (default), `basic`, `apikey`, or `anonymous`. |
+
+```json
+{
+  "name": "salesapp",
+  "version": "2.3.0",
+  "mavenMirror": {
+    "url": "https://artifactory.acme.example/artifactory/libs-release",
+    "auth": "bearer"
+  },
+  "dependencies": {
+    "java": [
+      { "groupId": "com.google.code.gson", "artifactId": "gson", "version": "2.10.1" }
+    ]
+  }
+}
+```
+
+With the mirror above, `gson` is fetched from
+`https://artifactory.acme.example/artifactory/libs-release/com/google/code/gson/gson/2.10.1/gson-2.10.1.jar`.
+
+**Credentials stay separate.** `mavenMirror` carries no secrets. The mirror is
+authenticated through the same credential store as your other repositories, not
+a per-URL login. Declare the Artifactory base — any URL that is a path prefix of
+the mirror, typically `https://artifactory.acme.example/artifactory` — as a
+[`registries`](#registries--array) entry and authenticate it:
+
+```bash
+fglpkg login --registry acme --token <access-token>
+```
+
+The stored credential is matched onto the mirror by **URL prefix**, so it covers
+every repository nested under that base — including this Maven mirror — and JAR
+downloads pick it up automatically. (There is no `fglpkg login <url>` form;
+credentials are always keyed by a configured registry.) A committed `mavenMirror`
+plus a committed `registries` entry therefore gives teammates the
+"clone → `login --registry` → install just works" flow without re-declaring the
+mirror.
+
+Make sure the mirror's `auth` scheme matches how that registry was logged in — a
+`bearer` mirror needs a token login (`--token`), a `basic` mirror needs
+`--user`/`--password`. A mismatch resolves to no headers and the download falls
+back to anonymous.
+
+**Resolution precedence** (highest first):
+
+1. A per-dependency [`url`](#url--string) override (wins for that one JAR).
+2. The `FGLPKG_MAVEN_URL` environment variable — overrides only the base URL.
+3. This committed project `mavenMirror` (team-shared, in `fglpkg.json`).
+4. The per-user global `mavenMirror` in `~/.fglpkg/config.json`.
+5. Public Maven Central, anonymously (when none of the above is set — behavior
+   is unchanged from having no mirror configured).
+
+The resolved mirror URL is recorded in `fglpkg.lock`, so a change to
+`FGLPKG_MAVEN_URL` or the `mavenMirror` block takes effect on the next
+re-resolution (`fglpkg update`, or an `install` that changes the dependency set)
+— a locked `install` reuses the URL already pinned in the lockfile.
+
+An authentication failure against the mirror (HTTP 401/403) is a hard error, so
+a mis-scoped token is reported rather than silently treated as "not found".
+### 6.10 Registries & default registry
 
 These two keys let a project draw packages from — and publish to — package
 repositories **in addition to** the built-in Genero Intelligence (GI) registry,
@@ -745,6 +827,7 @@ authority (see [§5](#5-parsing--validation-rules)).
 | `devDependencies` | bucket | No | Dev-only deps; not transitive; stripped on publish. |
 | `optionalDependencies` | bucket | No | Best-effort deps; failure warns. |
 | `hooks` | map | No | Declarative lifecycle operations. |
+| `mavenMirror` | object | No | Maven mirror (`url` + `auth`) for JAR downloads; overrides Maven Central. |
 | `registries` | array | No | Extra package repositories (e.g. Artifactory); committed, no secrets. |
 | `defaultRegistry` | string | No | Default `publish` target when `--registry` is omitted (publish-only). |
 | `$schema` | string | No | Editor schema reference (ignored by fglpkg). |

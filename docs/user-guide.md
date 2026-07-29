@@ -771,9 +771,50 @@ Genero BDL can call Java code, so fglpkg also manages JAR dependencies. Declare 
 |---|---|
 | `checksum` | SHA256 hex digest for integrity verification (optional, Maven Central is trusted by default) |
 | `jar` | Override the JAR filename (default: `artifactId-version.jar`) |
-| `url` | Override the download URL entirely (default: Maven Central) |
+| `url` | Override the download URL entirely for this one JAR (default: the configured Maven mirror, else Maven Central). To route *all* JARs through a mirror, use the top-level `mavenMirror` instead — see below. |
 
 JARs are downloaded to `~/.fglpkg/jars/` and added to `CLASSPATH` by `fglpkg env`.
+
+### Routing JARs through an internal Maven mirror
+
+By default JARs come from public Maven Central. In environments where nothing may
+be pulled from a public source, point fglpkg at an internal Maven repository (for
+example a JFrog Artifactory Maven *remote* or *virtual* repo) with the top-level
+`mavenMirror` block:
+
+```json
+{
+  "mavenMirror": {
+    "url": "https://artifactory.acme.example/artifactory/libs-release",
+    "auth": "bearer"
+  }
+}
+```
+
+Because an Artifactory Maven repo serves the standard Maven2 layout, only the base
+URL changes — the coordinates resolve to the same per-JAR path. `gson` above is
+fetched from
+`…/artifactory/libs-release/com/google/code/gson/gson/2.10.1/gson-2.10.1.jar`.
+
+- **Credentials stay separate.** `mavenMirror` holds no secrets, and there is no
+  per-URL login. Authenticate the mirror through a [registry](#secondary-repositories-jfrog-artifactory):
+  declare the Artifactory base (a URL that is a prefix of the mirror, e.g.
+  `https://artifactory.acme.example/artifactory`) in `registries` and run
+  `fglpkg login --registry <name> --token <access-token>`. That credential is
+  matched onto the mirror by URL prefix and applied to JAR downloads
+  automatically. An auth failure (401/403) is a hard error, not a silent miss.
+- **Match the schemes.** The mirror's `auth` must match how you logged the
+  registry in — `bearer` ↔ `--token`, `basic` ↔ `--user`/`--password`. A
+  mismatch yields no headers and falls back to anonymous.
+- **Where to declare it** (highest precedence first): a per-dependency `url`
+  override → the `FGLPKG_MAVEN_URL` environment variable (URL only) → the
+  committed project `fglpkg.json` (team-shared) → the per-user
+  `~/.fglpkg/config.json` → Maven Central when none is set. The resolved URL is
+  pinned in `fglpkg.lock`, so a change takes effect on the next `fglpkg update`
+  (or an `install` that alters the dependency set), not on a locked `install`.
+- Committing `mavenMirror` plus its `registries` entry to `fglpkg.json` gives
+  teammates a "clone → `login --registry` → install just works" flow without
+  re-declaring the mirror.
 
 ## Webcomponent Packages
 
