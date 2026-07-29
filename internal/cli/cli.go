@@ -542,6 +542,14 @@ func cmdInstall(args []string) error {
 	if flags.registry != "" && len(flags.pkgs) == 0 {
 		return fmt.Errorf("--registry requires a package to install (it pins that package's source repository)")
 	}
+	// --frozen asserts the lock is already correct, so anything that forces a
+	// re-resolve contradicts it.
+	if flags.frozen && len(flags.pkgs) > 0 {
+		return fmt.Errorf("--frozen cannot be combined with a package to install (adding a dependency requires re-resolving)")
+	}
+	if flags.frozen && flags.force {
+		return fmt.Errorf("--frozen and --force are mutually exclusive (--force re-resolves from scratch)")
+	}
 
 	// `fglpkg install <pkg>` in a directory that isn't yet a project (no
 	// .fglpkg/, no fglpkg.json) is treated as local: the add-package branch
@@ -583,7 +591,13 @@ func cmdInstall(args []string) error {
 		}
 	}
 
-	instOpts := installer.Options{Production: flags.production, NoManifestFallback: flags.noManifestFallback}
+	// Prune only ever applies to a project-local .fglpkg/ — a global home is
+	// shared across projects (the same rule `remove` follows).
+	instOpts := installer.Options{
+		Production:         flags.production,
+		NoManifestFallback: flags.noManifestFallback,
+		Prune:              isLocal && !flags.noPrune,
+	}
 
 	if len(flags.pkgs) == 0 {
 		m, err := manifest.Load(".")
@@ -595,6 +609,11 @@ func cmdInstall(args []string) error {
 		}
 		if flags.production {
 			fmt.Println("Installing in production mode (devDependencies will be skipped)")
+		}
+		if flags.frozen {
+			if err := checkFrozen(m, projectDir); err != nil {
+				return err
+			}
 		}
 		if err := runHook(m, manifest.HookPreInstall, projectDir); err != nil {
 			return err
@@ -696,6 +715,33 @@ func cmdInstall(args []string) error {
 		return err
 	}
 	return runHook(m, manifest.HookPostInstall, projectDir)
+}
+
+// checkFrozen enforces --frozen: the committed lock must already agree with
+// fglpkg.json, so a CI or deployment install can never quietly re-resolve to
+// versions other than the ones that were reviewed and committed. A missing or
+// stale lock is a hard error rather than a re-resolve.
+//
+// On-disk state is deliberately not consulted (both dir arguments empty): a
+// fresh checkout has nothing installed yet, which is precisely the case a
+// frozen install exists to serve. The Genero version is skipped too — a
+// runtime mismatch is a warning elsewhere, not lock staleness.
+func checkFrozen(m *manifest.Manifest, projectDir string) error {
+	if !lockfile.Exists(projectDir) {
+		return fmt.Errorf("--frozen requires a committed %s, but none was found.\n"+
+			"  Run 'fglpkg install' without --frozen to create one, then commit it.",
+			lockfile.Filename)
+	}
+	lf, err := lockfile.Load(projectDir)
+	if err != nil {
+		return fmt.Errorf("--frozen: cannot read %s: %w", lockfile.Filename, err)
+	}
+	if vr := lf.Validate(m, "", "", ""); vr.NeedsResolve() {
+		return fmt.Errorf("--frozen: %s is out of date with %s — %s.\n"+
+			"  Run 'fglpkg install' (or 'fglpkg update') and commit the updated lock.",
+			lockfile.Filename, manifest.Filename, vr.StaleReason())
+	}
+	return nil
 }
 
 // runHook executes any operations declared for event in the project's
@@ -835,6 +881,8 @@ type installFlags struct {
 	production         bool
 	noManifestFallback bool
 	noVerifySignature  bool
+	noPrune            bool // --no-prune: keep artifacts the graph no longer requires
+	frozen             bool // --frozen: fail instead of re-resolving a stale lock
 	scope              manifest.Scope
 	registry           string // --registry <name>: restrict resolution to one repo and pin it
 	pkgs               []string
@@ -864,6 +912,10 @@ func parseInstallFlags(args []string) (installFlags, error) {
 			f.noManifestFallback = true
 		case "--no-verify-signature":
 			f.noVerifySignature = true
+		case "--no-prune":
+			f.noPrune = true
+		case "--frozen", "--frozen-lockfile":
+			f.frozen = true
 		case "--save-dev", "-D":
 			devSeen = true
 			f.scope = manifest.ScopeDev
@@ -963,7 +1015,12 @@ func cmdUpdate(args []string) error {
 	if err != nil {
 		return err
 	}
-	home, _, err := resolveHome(flags.local, flags.global)
+	// --frozen pins the lock; update exists to move it. Refusing beats silently
+	// ignoring the flag.
+	if flags.frozen {
+		return fmt.Errorf("--frozen is not valid for 'update' (update re-resolves by design); use 'fglpkg install --frozen'")
+	}
+	home, isLocal, err := resolveHome(flags.local, flags.global)
 	if err != nil {
 		return err
 	}
@@ -973,7 +1030,11 @@ func cmdUpdate(args []string) error {
 	}
 	projectDir, _ := os.Getwd()
 	fmt.Println("Ignoring lock file and re-resolving all dependencies...")
-	instOpts := installer.Options{Production: flags.production, NoManifestFallback: flags.noManifestFallback}
+	instOpts := installer.Options{
+		Production:         flags.production,
+		NoManifestFallback: flags.noManifestFallback,
+		Prune:              isLocal && !flags.noPrune,
+	}
 	inst, rs := buildInstaller(home, m)
 
 	// --registry <name> restricts this re-resolution to a single repository

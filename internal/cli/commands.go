@@ -75,8 +75,19 @@ UNLICENSED, detected repository) without prompting.
                            divergence is still reported
   --no-verify-signature    Skip Layer 1 registry signature verification for this
                            install (discouraged; overrides signing.enforce)
+  --no-prune               Keep packages, webcomponents, and JARs the dependency
+                           graph no longer requires instead of deleting them
+  --frozen                 Fail if fglpkg.lock disagrees with fglpkg.json instead
+                           of re-resolving. For CI and deployment builds
 
 With no package arguments, installs everything declared in fglpkg.json.
+
+Install converges .fglpkg/ on fglpkg.json: a dependency you delete from the
+manifest by hand is re-resolved out of fglpkg.lock AND deleted from disk, so it
+stops appearing in 'fglpkg list' and stops resolving on FGLLDPATH. Pruning
+applies to local (.fglpkg/) installs only — a global ~/.fglpkg/ is shared
+across projects — and is skipped under --production, which resolves a
+deliberately narrowed graph.
 
 Installed packages are verified against the registry's Ed25519 signature by
 default (mode "warn": a bad or missing signature warns but does not block).
@@ -109,12 +120,20 @@ shared across projects and are left on disk.
 		Long: `FLAGS:
   --local, -l              Force local project directory (.fglpkg/)
   --global, -g             Force global home directory (~/.fglpkg/)
+  --registry <name>        Restrict this re-resolution to the named repository
+  --production, --prod     Skip devDependencies (does not rewrite fglpkg.lock)
   --no-manifest-fallback   Do not install Java dependencies a package's bundled
                            manifest declares but its registry record omits; the
                            divergence is still reported
+  --no-prune               Keep packages, webcomponents, and JARs the dependency
+                           graph no longer requires instead of deleting them
 
 Ignores fglpkg.lock and re-resolves every dependency to the newest version
 allowed by the manifest constraints.
+
+Like install, update then converges .fglpkg/ on the resolved graph: anything it
+no longer requires is deleted from disk. Local (.fglpkg/) installs only — a
+global ~/.fglpkg/ is shared across projects.
 `,
 	},
 	{
