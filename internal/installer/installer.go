@@ -928,14 +928,19 @@ func reconcileLock(plan *resolver.Plan, m *manifest.Manifest, projectDir string)
 // removed. Webcomponent bundles are keyed on disk by COMPONENTTYPE, not by
 // package name, so their removal is driven by the per-scope ownership sidecar
 // written at install time (webcomponent_owners.go); a file still owned by a
-// remaining package is kept (GIS-372).
+// remaining package is kept (GIS-372). The sidecar is keyed by package name for
+// pure webcomponent and mixed BDL+webcomponent packages alike.
 func (i *Installer) pruneToPlan(plan *resolver.Plan) ([]string, error) {
 	wantPkg := make(map[string]bool, len(plan.Packages))
-	wantWC := make(map[string]bool)
+	wantWC := make(map[string]bool, len(plan.Packages))
 	for _, p := range plan.Packages {
-		if p.IsWebcomponent() {
-			wantWC[p.Name] = true
-		} else {
+		// A mixed package resolves to a genero variant, so IsWebcomponent()
+		// is false for it even though installBDL recorded the webcomponent
+		// files it routed out. Every remaining package therefore keeps its
+		// recorded artifacts; pure-BDL packages own none, so listing them is
+		// harmless (#41).
+		wantWC[p.Name] = true
+		if !p.IsWebcomponent() {
 			wantPkg[p.Name] = true
 		}
 	}
