@@ -3459,18 +3459,39 @@ func cmdRegistryList() error {
 	if m, err := manifest.Load("."); err == nil {
 		projRegs = m.Registries
 	}
-	regs, err := config.Load(home, os.Getenv("FGLPKG_REGISTRY"), projRegs)
+	fglpkgRegistry := os.Getenv("FGLPKG_REGISTRY")
+	regs, err := config.Load(home, fglpkgRegistry, projRegs)
 	if err != nil {
 		return err
 	}
 	creds, _ := credentials.Load(home)
+	source := registrySources(home, fglpkgRegistry, projRegs)
 
-	fmt.Printf("%-16s %-12s %-4s %-9s %-6s %s\n", "NAME", "TYPE", "PRIO", "AUTH", "LOGIN", "URL")
+	fmt.Printf("%-16s %-12s %-4s %-9s %-6s %-7s %s\n", "NAME", "TYPE", "PRIO", "AUTH", "LOGIN", "SOURCE", "URL")
 	for _, r := range regs {
-		fmt.Printf("%-16s %-12s %-4d %-9s %-6s %s\n",
-			r.Name, r.Type, r.Priority, r.Auth, registryLoginStatus(creds, r), r.URL)
+		fmt.Printf("%-16s %-12s %-4d %-9s %-6s %-7s %s\n",
+			r.Name, r.Type, r.Priority, r.Auth, registryLoginStatus(creds, r), source[r.Name], r.URL)
 	}
 	return nil
+}
+
+// registrySources maps each registry name to the config layer that ultimately
+// defined it, using the same increasing-precedence order as config.Resolve:
+// built-in GI ("builtin") ⊕ the machine-wide config.json ("global") ⊕ the
+// project fglpkg.json ("project"), later wins. It lets `registry list` show
+// which entries came from the committed project config vs. a per-user machine.
+func registrySources(home, fglpkgRegistry string, projRegs []config.Registry) map[string]string {
+	src := map[string]string{}
+	src[config.BuiltinGI(fglpkgRegistry).Name] = "builtin"
+	if global, err := config.LoadGlobal(home); err == nil {
+		for _, r := range global {
+			src[r.Name] = "global"
+		}
+	}
+	for _, r := range projRegs {
+		src[r.Name] = "project"
+	}
+	return src
 }
 
 // registryLoginStatus reports whether usable credentials exist for a registry.

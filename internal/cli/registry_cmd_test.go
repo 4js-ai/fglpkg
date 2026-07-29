@@ -2,9 +2,12 @@ package cli
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/config"
+	"github.com/4js-mikefolcher/fglpkg/internal/credentials"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 )
 
@@ -197,5 +200,59 @@ func TestCmdRegistryAdd_ArtifactoryRequiresRepoKey(t *testing.T) {
 	chdirTemp(t)
 	if err := cmdRegistryAdd([]string{"acme", "https://a"}); err == nil {
 		t.Fatal("expected error: artifactory type requires --repo-key")
+	}
+}
+
+// TestRegistryConfig_NeverContainsCredentials is the GIS-366 regression test for
+// the "config and credentials are separate files" guarantee: declaring a project
+// registry and then logging into it must write the secret only to
+// ~/.fglpkg/credentials.json — never into the committed fglpkg.json or the
+// machine-wide config.json. The Registry / GlobalFile structs carry no
+// secret-bearing fields, so this makes that structural fact a locked invariant.
+func TestRegistryConfig_NeverContainsCredentials(t *testing.T) {
+	home := chdirTemp(t)
+
+	// A committed project manifest declaring a bearer Artifactory registry.
+	m := manifest.New("app", "1.0.0", "", "")
+	if err := m.Save("."); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	if err := cmdRegistryAdd([]string{"acme", "https://a.example", "--repo-key", "K", "--project"}); err != nil {
+		t.Fatalf("registry add --project: %v", err)
+	}
+
+	// Log in to that registry — the secret must be persisted somewhere.
+	const secret = "super-secret-bearer-token-9f3a"
+	creds, err := credentials.Load(home)
+	if err != nil {
+		t.Fatalf("load creds: %v", err)
+	}
+	if err := loginToRegistry(home, creds, loginArgs{registry: "acme", token: secret}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	// It belongs in credentials.json …
+	credBytes, err := os.ReadFile(filepath.Join(home, "credentials.json"))
+	if err != nil {
+		t.Fatalf("read credentials.json: %v", err)
+	}
+	if !strings.Contains(string(credBytes), secret) {
+		t.Fatal("secret should be stored in credentials.json")
+	}
+
+	// … and NEVER in the committed manifest or the machine-wide config.
+	manifestBytes, err := os.ReadFile(manifest.Filename)
+	if err != nil {
+		t.Fatalf("read %s: %v", manifest.Filename, err)
+	}
+	if strings.Contains(string(manifestBytes), secret) {
+		t.Fatalf("secret leaked into %s", manifest.Filename)
+	}
+	// config.json need not exist (the registry went to the project file); if it
+	// does, it must not carry the secret either.
+	if cfgBytes, err := os.ReadFile(filepath.Join(home, config.GlobalFilename)); err == nil {
+		if strings.Contains(string(cfgBytes), secret) {
+			t.Fatal("secret leaked into config.json")
+		}
 	}
 }
