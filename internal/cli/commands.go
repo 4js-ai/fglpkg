@@ -161,11 +161,14 @@ the local root (when run inside a project) and the global root.
 		Summary:    "Search the registry",
 		ListDetail: " (use --all to list every package)",
 		Args:       "<term>",
-		Usage:      "fglpkg search <term>\nfglpkg search --all",
+		Usage:      "fglpkg search <term> [--registry <name>]\nfglpkg search --all [--registry <name>]",
 		Long: `FLAGS:
   --all                    List every package in the registry (no term)
   --genero <version>       Grade results against this Genero version instead
                            of the detected one (overrides FGLPKG_GENERO_VERSION)
+  --registry <name>        Search only the named repository (results are still
+                           source-tagged). Errors if the name isn't a configured
+                           registry.
 
 Each result is annotated with a compatibility marker against the running Genero
 version (detected, or overridden with --genero / FGLPKG_GENERO_VERSION):

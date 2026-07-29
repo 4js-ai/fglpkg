@@ -1184,7 +1184,7 @@ func searchDeprecatedStatus(deprecated bool, movedTo string) string {
 }
 
 func cmdSearch(args []string) error {
-	term, all, generoFlag, err := parseSearchArgs(args)
+	term, all, generoFlag, reg, err := parseSearchArgs(args)
 	if err != nil {
 		return err
 	}
@@ -1205,7 +1205,14 @@ func cmdSearch(args []string) error {
 		m = mm
 	}
 	if rs, _, _, rErr := buildRepositorySet(home, m); rErr == nil && rs != nil {
-		return searchAcrossProviders(rs, term, all, target)
+		return searchAcrossProviders(rs, term, all, target, reg)
+	}
+
+	// Single-registry (only the built-in GI repository is configured). --registry
+	// gi is a harmless no-op; any other name cannot be honoured — mirror the
+	// install/update UX exactly (cli.go cmdUpdate).
+	if reg != "" && reg != config.GIName {
+		return fmt.Errorf("--registry %q: no repository named %q is configured (add it to fglpkg.json or ~/.fglpkg/config.json)", reg, reg)
 	}
 
 	results, err := registry.Search(term)
@@ -1388,7 +1395,25 @@ func printSearchTable(rows []searchRow, target *genero.Version, showSource bool)
 // FetchInfo, so those rows render "-"/"?" (unknown). On a name collision the
 // constraint (like the version/description) comes from the highest-priority
 // source. The columns match the single-registry search layout.
-func searchAcrossProviders(rs *provider.RepositorySet, term string, all bool, target *genero.Version) error {
+func searchAcrossProviders(rs *provider.RepositorySet, term string, all bool, target *genero.Version, restrict string) error {
+	// A --registry <name> scopes the fan-out to a single repository. Search
+	// queries providers directly (it does not route through RepositorySet.route),
+	// so the restriction is applied here by filtering the provider loop; validate
+	// the name up front and error like the routing layer does for an unknown pin.
+	if restrict != "" {
+		found := false
+		names := make([]string, 0, len(rs.Providers()))
+		for _, p := range rs.Providers() {
+			names = append(names, p.Name())
+			if p.Name() == restrict {
+				found = true
+			}
+		}
+		if !found {
+			return fmt.Errorf("--registry %q: no repository named %q is configured.\n"+
+				"  Configured registries: %s", restrict, restrict, strings.Join(names, ", "))
+		}
+	}
 	// Gather in provider priority order so the first-seen version/description
 	// for a colliding name comes from the highest-priority repository.
 	type merged struct {
@@ -1403,6 +1428,9 @@ func searchAcrossProviders(rs *provider.RepositorySet, term string, all bool, ta
 	var order []string
 	byName := map[string]*merged{}
 	for _, p := range rs.Providers() {
+		if restrict != "" && p.Name() != restrict {
+			continue
+		}
 		rr, err := p.Search(term)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: search in %q failed: %v\n", p.Name(), err)
@@ -1469,11 +1497,12 @@ func searchAcrossProviders(rs *provider.RepositorySet, term string, all bool, ta
 	return nil
 }
 
-// parseSearchArgs returns the keyword term, the --all flag, and an optional
-// --genero <version> override used to grade result compatibility. Errors on
-// `search` with no args + no --all (the historical "missing keyword" error),
-// and on conflicting `search --all <term>`.
-func parseSearchArgs(args []string) (term string, all bool, generoFlag string, err error) {
+// parseSearchArgs returns the keyword term, the --all flag, an optional
+// --genero <version> override used to grade result compatibility, and an
+// optional --registry <name> that scopes the search to a single repository.
+// Errors on `search` with no args + no --all (the historical "missing keyword"
+// error), and on conflicting `search --all <term>`.
+func parseSearchArgs(args []string) (term string, all bool, generoFlag string, registry string, err error) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -1481,29 +1510,40 @@ func parseSearchArgs(args []string) (term string, all bool, generoFlag string, e
 			all = true
 		case a == "--genero":
 			if i+1 >= len(args) {
-				return "", false, "", fmt.Errorf("--genero requires a version argument (e.g. --genero 4.01)")
+				return "", false, "", "", fmt.Errorf("--genero requires a version argument (e.g. --genero 4.01)")
 			}
 			i++
 			generoFlag = args[i]
 		case strings.HasPrefix(a, "--genero="):
 			generoFlag = strings.TrimPrefix(a, "--genero=")
 			if generoFlag == "" {
-				return "", false, "", fmt.Errorf("--genero requires a version argument (e.g. --genero 4.01)")
+				return "", false, "", "", fmt.Errorf("--genero requires a version argument (e.g. --genero 4.01)")
+			}
+		case a == "--registry":
+			if i+1 >= len(args) {
+				return "", false, "", "", fmt.Errorf("--registry requires a value")
+			}
+			i++
+			registry = args[i]
+		case strings.HasPrefix(a, "--registry="):
+			registry = strings.TrimPrefix(a, "--registry=")
+			if registry == "" {
+				return "", false, "", "", fmt.Errorf("--registry requires a value")
 			}
 		default:
 			if term != "" {
-				return "", false, "", fmt.Errorf("unexpected extra argument %q", a)
+				return "", false, "", "", fmt.Errorf("unexpected extra argument %q", a)
 			}
 			term = a
 		}
 	}
 	if all && term != "" {
-		return "", false, "", fmt.Errorf("--all and <term> are mutually exclusive")
+		return "", false, "", "", fmt.Errorf("--all and <term> are mutually exclusive")
 	}
 	if !all && term == "" {
-		return "", false, "", fmt.Errorf("usage: fglpkg search <term>   |   fglpkg search --all")
+		return "", false, "", "", fmt.Errorf("usage: fglpkg search <term>   |   fglpkg search --all")
 	}
-	return term, all, generoFlag, nil
+	return term, all, generoFlag, registry, nil
 }
 
 // ─── publish ──────────────────────────────────────────────────────────────────
