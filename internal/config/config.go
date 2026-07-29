@@ -89,8 +89,13 @@ type GlobalFile struct {
 	// last seen version) lives in the separate tool-managed update-check.json
 	// (see internal/updatecheck), so an advisory feature never reformats the
 	// user's hand-edited registry config.
-	UpdateCheck         *bool  `json:"updateCheck"`         // opt-out; nil => default (enabled)
-	UpdateCheckInterval string `json:"updateCheckInterval"` // Go duration; "" => default 24h
+	//
+	// Both carry omitempty so the read-modify-write cycle in `registry
+	// add`/`remove` cannot inject "updateCheck": null / "updateCheckInterval": ""
+	// into a config that never set them. A user's explicit false still
+	// round-trips: the pointer is non-nil, so omitempty keeps it.
+	UpdateCheck         *bool  `json:"updateCheck,omitempty"`         // opt-out; nil => default (enabled)
+	UpdateCheckInterval string `json:"updateCheckInterval,omitempty"` // Go duration; "" => default 24h
 }
 
 // UpdateSettings are the resolved passive-update-check preferences.

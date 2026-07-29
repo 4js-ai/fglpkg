@@ -78,10 +78,11 @@ binary; on any verification failure it prints a manual-download link instead. Sc
 latest-stable only — no version pinning, pre-releases, or downgrades. `--yes` skips the
 confirmation prompt (for scripts); `--force` reinstalls even when you are already current.
 
-fglpkg also **passively notices** new releases: at most once every 24h, after a command
-finishes, it prints a one-line "a new version is available" hint to stderr. It never blocks a
-command, changes an exit code, or reports network errors. Turn it off with
-`FGLPKG_NO_UPDATE_CHECK=1`, or in `~/.fglpkg/config.json`:
+fglpkg also **passively notices** new releases: after a command finishes, it prints a one-line
+"a new version is available" hint to stderr for as long as a newer release is known. It checks
+the registry at most once every 24h and remembers the answer, so the hint costs no network time
+and works offline. It never blocks a command, changes an exit code, or reports network errors.
+Turn it off with `FGLPKG_NO_UPDATE_CHECK=1`, or in `~/.fglpkg/config.json`:
 
 ```json
 {

@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -272,5 +274,35 @@ func TestPinnedRootsAreValid(t *testing.T) {
 		if len(raw) != ed25519.PublicKeySize {
 			t.Errorf("root %q: pub is %d bytes, want %d", r.KeyID, len(raw), ed25519.PublicKeySize)
 		}
+	}
+}
+
+// TestRepoKeysManifestVerifiesAgainstPinnedRoots checks the repo's committed
+// keys.json against the roots baked into this binary — the exact chain
+// `fglpkg self-update` walks before trusting a release checksum.
+//
+// The release pipeline's verify-release gate catches a break at release time;
+// this catches it at PR time, which is where a rotated root that was never
+// re-signed (or a re-signed manifest whose root was never pinned) actually gets
+// introduced. Key validity is asserted at the manifest's own issuedAt, so the
+// test is deterministic and won't start failing on a wall-clock date.
+func TestRepoKeysManifestVerifiesAgainstPinnedRoots(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "keys.json"))
+	if err != nil {
+		t.Fatalf("reading the repo keys.json: %v", err)
+	}
+	m, err := ParseManifest(data)
+	if err != nil {
+		t.Fatalf("repo keys.json does not parse: %v", err)
+	}
+	if err := m.Verify(PinnedRoots()); err != nil {
+		t.Fatalf("repo keys.json does not verify against any pinned root (rotated root not re-signed, or manifest signed by an unpinned root): %v", err)
+	}
+	issued, err := time.Parse(time.RFC3339, m.IssuedAt)
+	if err != nil {
+		t.Fatalf("issuedAt %q is not RFC3339: %v", m.IssuedAt, err)
+	}
+	if len(m.ValidKeys(issued)) == 0 {
+		t.Errorf("no working key in the repo keys.json is valid at its own issuedAt (%s)", m.IssuedAt)
 	}
 }
