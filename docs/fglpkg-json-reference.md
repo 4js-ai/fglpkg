@@ -31,7 +31,7 @@ rules](#parsing--validation-rules).
   - [6.7 Lifecycle hooks](#67-lifecycle-hooks)
   - [6.8 Tooling & legacy keys](#68-tooling--legacy-keys)
   - [6.9 Maven mirror for JAR downloads](#69-maven-mirror-for-jar-downloads)
-  - [6.10 Registries & default registry](#69-registries--default-registry)
+  - [6.10 Registries & default registry](#610-registries--default-registry)
 - [7. Worked examples](#7-worked-examples)
 - [8. Editor integration](#8-editor-integration)
 - [9. Field summary table](#9-field-summary-table)
@@ -416,7 +416,7 @@ Each bucket is an object with two optional keys:
 - **`fgl`** — a map of BDL package name → dependency spec. The spec is usually a
   semver **constraint** string accepting the usual operators (`^`, `~`, ranges,
   `||`, exact pins). It may instead be an **object** to pin the package to a
-  specific source registry (see [§6.9](#69-registries--default-registry)):
+  specific source registry (see [§6.10](#610-registries--default-registry)):
 
   ```json
   "fgl": {
@@ -426,7 +426,7 @@ Each bucket is an object with two optional keys:
   ```
 
   The object form takes a required `version` (same constraint syntax) and an
-  optional `registry` naming a [declared registry](#69-registries--default-registry).
+  optional `registry` naming a [declared registry](#610-registries--default-registry).
   A pin restricts that package to the named repository, disambiguating a name that
   would otherwise collide across registries.
 - **`java`** — an array of [Java dependency objects](#66-java-dependency-object),
