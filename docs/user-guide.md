@@ -1241,6 +1241,20 @@ Or provision it once for every project on the machine in `~/.fglpkg/config.json`
 { "registries": [ { "name": "acme", "type": "artifactory", "url": "…", "repoKey": "…", "priority": 2, "auth": "bearer" } ] }
 ```
 
+There are three layers, mirroring how npm (`.npmrc`) and NuGet (`NuGet.config`)
+separate *what to fetch* from *how to authenticate*:
+
+| Layer | File | Scope | Committed? |
+|---|---|---|---|
+| Project | `fglpkg.json` `registries` | This repo — team-shared | **Yes**, checked in |
+| Machine | `~/.fglpkg/config.json` | Per-user default for every project | No (per developer) |
+| Secrets | `~/.fglpkg/credentials.json` | Per-user tokens, keyed by URL | **Never** |
+
+Because the registry declarations live in the committed `fglpkg.json`, a clean
+clone needs no registry setup: **clone → `fglpkg login --registry <name>` →
+`fglpkg install`** just works. Each developer supplies only their own credentials;
+nobody re-declares the registries, and no secret is ever committed.
+
 Descriptor fields:
 
 | Field | Required | Meaning |
@@ -1272,13 +1286,16 @@ Check the effective configuration and login status any time:
 
 ```bash
 fglpkg registry list
-# NAME   TYPE         PRIO  AUTH    LOGIN  URL
-# gi     genero       1     bearer  env    https://service.generointelligence.ai
-# acme   artifactory  2     bearer  no     https://artifactory.acme.example/artifactory
+# NAME   TYPE         PRIO  AUTH    LOGIN  SOURCE   URL
+# gi     genero       1     bearer  env    builtin  https://service.generointelligence.ai
+# acme   artifactory  2     bearer  no     project  https://artifactory.acme.example/artifactory
 ```
 
 The `LOGIN` column shows `yes` (stored credentials), `env` (GI authenticated by
-`FGLPKG_TOKEN`), `no` (none), or `anon` (no auth needed).
+`FGLPKG_TOKEN`), `no` (none), or `anon` (no auth needed). The `SOURCE` column
+shows where each entry came from — `builtin` (the always-present GI entry),
+`global` (`~/.fglpkg/config.json`), or `project` (the committed `fglpkg.json`) —
+so you can confirm which registries a clone inherited from the repo.
 
 ### 2. Log in
 
