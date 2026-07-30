@@ -126,6 +126,81 @@ func TestPruneToPlanIgnoresWebcomponentPlanEntries(t *testing.T) {
 	}
 }
 
+// TestPruneToPlanKeepsMixedPackageWebcomponents is the #41 regression: a mixed
+// BDL+webcomponent package resolves to a genero variant, so IsWebcomponent() is
+// false for it even though installBDL records its routed webcomponent files in
+// the ownership sidecar. Removing an unrelated package must not take the mixed
+// package's still-owned bundle down with it. Drives the real pruneToPlan →
+// pruneWebcomponents path against a populated sidecar, which the
+// TestPruneWebcomponents* tests bypass by passing wantWC in directly.
+func TestPruneToPlanKeepsMixedPackageWebcomponents(t *testing.T) {
+	home := t.TempDir()
+	inst := New(home, "", "", "")
+	if err := inst.ensureDirs(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The mixed package, installed the way installBDL does it.
+	mixedZip := filepath.Join(home, "chart-3d.zip")
+	writeTestZip(t, mixedZip, map[string]string{
+		"fglpkg.json":          `{"name":"chart-3d","version":"1.0.0","webcomponents":["3DChart"]}`,
+		"ChartDemo.42m":        "BDL\n",
+		"3DChart/3DChart.html": "<html/>",
+	})
+	wcInstalled, err := extractZipRouted(mixedZip, filepath.Join(inst.packagesDir, "chart-3d"), inst.webcomponentsDir, []string{"3DChart"})
+	if err != nil {
+		t.Fatalf("extractZipRouted: %v", err)
+	}
+	if err := recordWCOwnership(inst.webcomponentsDir, "chart-3d", wcInstalled); err != nil {
+		t.Fatalf("recordWCOwnership: %v", err)
+	}
+
+	// The unrelated packages being removed: a pure webcomponent and a pure BDL.
+	installWC(t, home, inst.webcomponentsDir, "fjs-map", "Map", nil)
+	mkPkgDir(t, inst.packagesDir, "bar")
+
+	// The re-resolved plan keeps only the mixed package.
+	plan := &resolver.Plan{
+		Packages: []resolver.ResolvedPackage{{Name: "chart-3d", Variant: "genero6"}},
+	}
+	pruned, err := inst.pruneToPlan(plan)
+	if err != nil {
+		t.Fatalf("pruneToPlan: %v", err)
+	}
+
+	// The mixed package survives whole — BDL side and webcomponent side.
+	if _, err := os.Stat(filepath.Join(inst.packagesDir, "chart-3d", "ChartDemo.42m")); err != nil {
+		t.Errorf("mixed package's BDL files must be retained: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(inst.webcomponentsDir, "3DChart", "3DChart.html")); err != nil {
+		t.Errorf("still-installed mixed package's webcomponent bundle was deleted: %v", err)
+	}
+	// The removed packages are gone.
+	if _, err := os.Stat(filepath.Join(inst.webcomponentsDir, "Map", "Map.html")); !os.IsNotExist(err) {
+		t.Errorf("removed webcomponent package's bundle should be pruned, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(inst.packagesDir, "bar")); !os.IsNotExist(err) {
+		t.Error("removed BDL package bar should be pruned")
+	}
+
+	for _, p := range pruned {
+		if p == "webcomponent chart-3d" {
+			t.Errorf("pruned = %v, must not report the still-installed mixed package", pruned)
+		}
+	}
+
+	o, err := loadWCOwners(inst.webcomponentsDir)
+	if err != nil {
+		t.Fatalf("loadWCOwners: %v", err)
+	}
+	if _, ok := o.Packages["chart-3d"]; !ok {
+		t.Error("sidecar dropped the still-installed mixed package chart-3d")
+	}
+	if _, ok := o.Packages["fjs-map"]; ok {
+		t.Error("sidecar still lists removed package fjs-map")
+	}
+}
+
 // TestPruneKeepsMixedPackageWebcomponentBundle pins the wantWC contract: the
 // ownership sidecar is keyed by package name for ANY webcomponent-bearing
 // package, including a *mixed* one (BDL modules under packages/<name>/ plus a

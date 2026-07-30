@@ -116,10 +116,14 @@ install time).
   (mixed BDL+webcomponent packages) — and `install*` calls `recordWCOwnership`. A file deduped at
   install (GIS-298) is still recorded as owned by the deduping package, so shared files are
   **co-owned**.
-- **Consumed at remove:** `pruneToPlan` computes the set of webcomponent packages that should
-  remain (`wantWC`, from `plan.Packages`) and calls `pruneWebcomponents`, which deletes every file
-  owned *only* by now-absent packages, keeps any file a remaining package still owns, prunes emptied
-  directories, and rewrites (or removes) the sidecar. Covers both pure and mixed packages.
+- **Consumed at remove:** `pruneToPlan` computes the set of packages whose webcomponent artifacts
+  should remain — `wantWC` is **every** name in `plan.Packages`, not just the ones with a
+  `"webcomponent"` variant — and calls `pruneWebcomponents`, which deletes every file owned *only*
+  by now-absent packages, keeps any file a remaining package still owns, prunes emptied directories,
+  and rewrites (or removes) the sidecar. Listing pure-BDL packages in `wantWC` is harmless (they own
+  no sidecar entries), and it is what makes mixed packages safe: a mixed package resolves to a
+  `genero<N>` variant, so gating `wantWC` on `IsWebcomponent()` silently deleted the bundle of a
+  still-installed mixed package on any unrelated `remove` (#41).
 
 This is the file-level ownership index that GIS-298 and
 [package-layout-materialized-root.md](package-layout-materialized-root.md) flagged as needed;
@@ -128,7 +132,10 @@ even if the install-time clash guard doesn't yet consult it).
 
 **Tests** (`internal/installer/webcomponent_owners_test.go`): remove-prunes-owned (the GIS-372
 regression, incl. emptied namespace dirs), co-owned file survives until its last owner is removed,
-and no-sidecar (pre-fix install) prunes as a safe no-op.
+and no-sidecar (pre-fix install) prunes as a safe no-op. Those pass a `wantWC` in directly, so
+`TestPruneToPlanKeepsMixedPackageWebcomponents` (`reconcile_test.go`) covers the construction of it:
+a mixed package installed through `extractZipRouted` + `recordWCOwnership` keeps its bundle when an
+unrelated package is removed (#41).
 
 ## Known limitations / out of scope
 
