@@ -597,7 +597,7 @@ func rootWithDeps(deps map[string]string) *manifest.Manifest {
 
 func TestValidateDependencyRemovedIsStale(t *testing.T) {
 	locked := rootWithDeps(map[string]string{"utils": "^1.0.0", "poiapi": "^2.0.0"})
-	lf := lockfile.FromPlan(makePlan(), locked)
+	lf := lockfile.FromPlan(makePlan(), locked, "")
 
 	// The user deletes poiapi from fglpkg.json by hand.
 	edited := rootWithDeps(map[string]string{"utils": "^1.0.0"})
@@ -616,7 +616,7 @@ func TestValidateDependencyRemovedIsStale(t *testing.T) {
 }
 
 func TestValidateDependencyAddedIsStale(t *testing.T) {
-	lf := lockfile.FromPlan(makePlan(), rootWithDeps(map[string]string{"utils": "^1.0.0"}))
+	lf := lockfile.FromPlan(makePlan(), rootWithDeps(map[string]string{"utils": "^1.0.0"}), "")
 	edited := rootWithDeps(map[string]string{"utils": "^1.0.0", "newdep": "^3.0.0"})
 
 	result := lf.Validate(edited, "4.01.12", "", "")
@@ -630,7 +630,7 @@ func TestValidateDependencyAddedIsStale(t *testing.T) {
 }
 
 func TestValidateConstraintChangeIsStale(t *testing.T) {
-	lf := lockfile.FromPlan(makePlan(), rootWithDeps(map[string]string{"utils": "^1.0.0"}))
+	lf := lockfile.FromPlan(makePlan(), rootWithDeps(map[string]string{"utils": "^1.0.0"}), "")
 	edited := rootWithDeps(map[string]string{"utils": "^2.0.0"})
 
 	result := lf.Validate(edited, "4.01.12", "", "")
@@ -644,7 +644,7 @@ func TestValidateConstraintChangeIsStale(t *testing.T) {
 
 func TestValidateUnchangedDependenciesStayClean(t *testing.T) {
 	root := rootWithDeps(map[string]string{"utils": "^1.0.0", "poiapi": "^2.0.0"})
-	lf := lockfile.FromPlan(makePlan(), root)
+	lf := lockfile.FromPlan(makePlan(), root, "")
 
 	// Same declarations, independently constructed — must not report staleness
 	// just because the maps are different objects.
@@ -658,7 +658,7 @@ func TestValidateUnchangedDependenciesStayClean(t *testing.T) {
 func TestValidateScopeMoveIsStale(t *testing.T) {
 	root := makeRoot()
 	root.Dependencies.FGL = map[string]string{"tester": "^1.0.0"}
-	lf := lockfile.FromPlan(makePlan(), root)
+	lf := lockfile.FromPlan(makePlan(), root, "")
 
 	// Same package, same constraint — moved from prod to dev.
 	moved := makeRoot()
@@ -674,7 +674,7 @@ func TestValidateJavaDependencyChangeIsStale(t *testing.T) {
 	root.Dependencies.Java = []manifest.JavaDependency{
 		{GroupID: "com.google.code.gson", ArtifactID: "gson", Version: "2.10.1"},
 	}
-	lf := lockfile.FromPlan(makePlan(), root)
+	lf := lockfile.FromPlan(makePlan(), root, "")
 
 	bumped := makeRoot()
 	bumped.Dependencies.Java = []manifest.JavaDependency{
@@ -689,7 +689,7 @@ func TestValidateJavaDependencyChangeIsStale(t *testing.T) {
 func TestValidateRegistryPinChangeIsStale(t *testing.T) {
 	root := rootWithDeps(map[string]string{"utils": "^1.0.0"})
 	root.Dependencies.FGLPins = map[string]string{"utils": "gi"}
-	lf := lockfile.FromPlan(makePlan(), root)
+	lf := lockfile.FromPlan(makePlan(), root, "")
 
 	repinned := rootWithDeps(map[string]string{"utils": "^1.0.0"})
 	repinned.Dependencies.FGLPins = map[string]string{"utils": "acme"}
@@ -703,7 +703,7 @@ func TestValidateRegistryPinChangeIsStale(t *testing.T) {
 // a project that genuinely declares nothing must not read as a legacy lock.
 func TestValidateNoDependenciesStaysClean(t *testing.T) {
 	root := makeRoot()
-	lf := lockfile.FromPlan(makePlan(), root)
+	lf := lockfile.FromPlan(makePlan(), root, "")
 
 	if result := lf.Validate(makeRoot(), "4.01.12", "", ""); result.ManifestMismatch != nil {
 		t.Errorf("a dependency-less project should be clean, got: %v", result.ManifestMismatch)
@@ -742,7 +742,7 @@ func TestLegacyLockWithoutDeclaredIsStale(t *testing.T) {
 	}
 
 	// After a re-resolve writes the snapshot, validation settles.
-	rewritten := lockfile.FromPlan(makePlan(), makeRoot())
+	rewritten := lockfile.FromPlan(makePlan(), makeRoot(), "")
 	if rewritten.RootManifest.Declared == nil {
 		t.Fatal("FromPlan must record the declared snapshot")
 	}
@@ -756,7 +756,7 @@ func TestLegacyLockWithoutDeclaredIsStale(t *testing.T) {
 func TestDeclaredSurvivesSaveLoad(t *testing.T) {
 	dir := t.TempDir()
 	root := rootWithDeps(map[string]string{"utils": "^1.0.0"})
-	if err := lockfile.FromPlan(makePlan(), root).Save(dir); err != nil {
+	if err := lockfile.FromPlan(makePlan(), root, "").Save(dir); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	loaded, err := lockfile.Load(dir)
