@@ -72,6 +72,30 @@ run_raw() {  # run any command (e.g. the toolchain), same capture contract + tim
   output="$(python3 "$_TIMED" "$_FT_TIMEOUT" - "$@" 2>&1)" && status=0 || status=$?
   return 0
 }
+# run_split is run() with the streams kept apart, setting $out (stdout only) and
+# $err (stderr only) alongside the usual $status and combined $output. Needed to
+# assert the eval-safety contract of `fglpkg env`: its diagnostics must land on
+# stderr, because stdout is fed straight to `eval` and, under --gst, must stay a
+# strict VAR=value list.
+run_split() {  # run_split <fglpkg args...>
+  local ef; ef="$(mktemp "$_SANDBOX_ROOT/err.XXXXXX")"
+  out="$(TIMED_STDERR="$ef" python3 "$_TIMED" "$_FT_TIMEOUT" - "$FGLPKG" "$@")" && status=0 || status=$?
+  err="$(cat "$ef")"; rm -f "$ef"
+  output="$out
+$err"
+  return 0
+}
+
+# ---------- platform helpers ----------
+# `fglpkg env` emits `SET VAR=...;%VAR%` on Windows, which a POSIX shell cannot
+# eval. Tests that exercise the eval round-trip probe already-captured output
+# with this and skip there.
+env_output_is_windows_style() {  # env_output_is_windows_style "<captured output>"
+  case "$1" in
+    "SET "*|*$'\n'"SET "*) return 0 ;;
+  esac
+  return 1
+}
 
 # ---------- fixture helper: a minimal, valid, packable package in cwd ----------
 mkpkg() {  # mkpkg [name] [version]

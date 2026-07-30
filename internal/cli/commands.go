@@ -75,8 +75,19 @@ UNLICENSED, detected repository) without prompting.
                            divergence is still reported
   --no-verify-signature    Skip Layer 1 registry signature verification for this
                            install (discouraged; overrides signing.enforce)
+  --no-prune               Keep packages, webcomponents, and JARs the dependency
+                           graph no longer requires instead of deleting them
+  --frozen                 Fail if fglpkg.lock disagrees with fglpkg.json instead
+                           of re-resolving. For CI and deployment builds
 
 With no package arguments, installs everything declared in fglpkg.json.
+
+Install converges .fglpkg/ on fglpkg.json: a dependency you delete from the
+manifest by hand is re-resolved out of fglpkg.lock AND deleted from disk, so it
+stops appearing in 'fglpkg list' and stops resolving on FGLLDPATH. Pruning
+applies to local (.fglpkg/) installs only — a global ~/.fglpkg/ is shared
+across projects — and is skipped under --production, which resolves a
+deliberately narrowed graph.
 
 Installed packages are verified against the registry's Ed25519 signature by
 default (mode "warn": a bad or missing signature warns but does not block).
@@ -109,12 +120,20 @@ shared across projects and are left on disk.
 		Long: `FLAGS:
   --local, -l              Force local project directory (.fglpkg/)
   --global, -g             Force global home directory (~/.fglpkg/)
+  --registry <name>        Restrict this re-resolution to the named repository
+  --production, --prod     Skip devDependencies (does not rewrite fglpkg.lock)
   --no-manifest-fallback   Do not install Java dependencies a package's bundled
                            manifest declares but its registry record omits; the
                            divergence is still reported
+  --no-prune               Keep packages, webcomponents, and JARs the dependency
+                           graph no longer requires instead of deleting them
 
 Ignores fglpkg.lock and re-resolves every dependency to the newest version
 allowed by the manifest constraints.
+
+Like install, update then converges .fglpkg/ on the resolved graph: anything it
+no longer requires is deleted from disk. Local (.fglpkg/) installs only — a
+global ~/.fglpkg/ is shared across projects.
 `,
 	},
 	{
@@ -139,6 +158,19 @@ allowed by the manifest constraints.
 
 Prints shell export lines. Evaluate the output to load them, e.g.
   eval "$(fglpkg env --global)"
+
+VARIABLES (each emitted only when a package ships matching files):
+  FGLLDPATH                program modules — .42m/.42r/.42x
+  CLASSPATH                Java jars
+  FGLRESOURCEPATH          .42f .42s .4ad .4st .4sm .4tb .4tm .iem
+  FGLDBPATH                .sch .val .att
+  FGLIMAGEPATH             webcomponents + .png .jpg .gif .svg .bmp .ico
+                           .tiff .ttf
+  FGLPROFILE               config files declared by a package's "profile"
+
+Existing values are preserved — fglpkg prepends. Diagnostics (such as two
+packages shipping the same resource basename, where first-on-path wins) are
+written to STDERR so stdout stays safe to eval.
 `,
 	},
 	{
@@ -161,11 +193,14 @@ the local root (when run inside a project) and the global root.
 		Summary:    "Search the registry",
 		ListDetail: " (use --all to list every package)",
 		Args:       "<term>",
-		Usage:      "fglpkg search <term>\nfglpkg search --all",
+		Usage:      "fglpkg search <term> [--registry <name>]\nfglpkg search --all [--registry <name>]",
 		Long: `FLAGS:
   --all                    List every package in the registry (no term)
   --genero <version>       Grade results against this Genero version instead
                            of the detected one (overrides FGLPKG_GENERO_VERSION)
+  --registry <name>        Search only the named repository (results are still
+                           source-tagged). Errors if the name isn't a configured
+                           registry.
 
 Each result is annotated with a compatibility marker against the running Genero
 version (detected, or overridden with --genero / FGLPKG_GENERO_VERSION):
@@ -456,9 +491,13 @@ login".
   add <name> <url>         Add a repository descriptor (defaults to type=artifactory)
   remove <name> (rm)       Remove a configured repository
 
+<url> may be pasted with the Artifactory repo key still on the end
+(https://acme.jfrog.io/artifactory/GeneroBDL): the key is split off the URL and
+--repo-key is then optional.
+
 FLAGS (add):
   --type <t>               genero | artifactory (default artifactory)
-  --repo-key <k>           Artifactory generic-repo key (required for type=artifactory)
+  --repo-key <k>           Artifactory generic-repo key; optional when the URL already carries it
   --auth <scheme>          bearer | basic | apikey | anonymous (default bearer)
   --priority <n>           Lower is tried first; unique. Defaults to max+1 when omitted
   --packages <globs>       Comma-separated name-scope allow-list (e.g. 'acme-*,foo-*')

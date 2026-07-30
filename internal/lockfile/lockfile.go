@@ -71,10 +71,94 @@ type LockFile struct {
 	Webcomponents []LockedWebcomponent `json:"webcomponents,omitempty"`
 }
 
-// RootEntry records the identity of the root project.
+// RootEntry records the identity of the root project and the dependency set it
+// declared when the lock was written.
 type RootEntry struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
+
+	// Declared snapshots the root manifest's dependency declarations as they
+	// stood when this lock was resolved. It is what makes a hand-edited
+	// fglpkg.json detectable: without it, Validate can only compare the
+	// project's name and version, so adding or removing a dependency by hand
+	// leaves the lock looking "up to date" and the install becomes a no-op.
+	//
+	// A nil Declared means the lock predates this field. Validate treats that
+	// as stale rather than as "nothing changed", so the next install
+	// re-resolves once and records the snapshot. Deliberately NOT omitempty:
+	// an empty-but-present snapshot ("this project genuinely declares no
+	// dependencies") must stay distinguishable from an absent one.
+	Declared *DeclaredDeps `json:"declared"`
+}
+
+// DeclaredDeps is a per-scope snapshot of the root manifest's dependency
+// declarations — constraints as written, not the versions they resolved to
+// (those live in Packages/JARs).
+type DeclaredDeps struct {
+	Prod     ScopeDeps `json:"dependencies"`
+	Dev      ScopeDeps `json:"devDependencies"`
+	Optional ScopeDeps `json:"optionalDependencies"`
+}
+
+// ScopeDeps is one scope's declarations: FGL constraints by package name, any
+// per-dependency repository pins, and canonicalised Java coordinates.
+type ScopeDeps struct {
+	FGL      map[string]string `json:"fgl,omitempty"`
+	Registry map[string]string `json:"fglRegistry,omitempty"`
+	Java     []string          `json:"java,omitempty"`
+}
+
+// declaredFrom snapshots a root manifest's three dependency scopes.
+func declaredFrom(m *manifest.Manifest) *DeclaredDeps {
+	return &DeclaredDeps{
+		Prod:     scopeDepsFrom(m.Dependencies),
+		Dev:      scopeDepsFrom(m.DevDependencies),
+		Optional: scopeDepsFrom(m.OptionalDependencies),
+	}
+}
+
+// scopeDepsFrom converts one manifest scope into its lock representation.
+// Empty maps/slices are left nil so they omit cleanly and two equivalent
+// manifests always produce byte-identical snapshots.
+func scopeDepsFrom(d manifest.Dependencies) ScopeDeps {
+	var s ScopeDeps
+	if len(d.FGL) > 0 {
+		s.FGL = make(map[string]string, len(d.FGL))
+		for name, constraint := range d.FGL {
+			s.FGL[name] = constraint
+		}
+	}
+	if len(d.FGLPins) > 0 {
+		s.Registry = make(map[string]string, len(d.FGLPins))
+		for name, reg := range d.FGLPins {
+			s.Registry[name] = reg
+		}
+	}
+	if len(d.Java) > 0 {
+		s.Java = make([]string, 0, len(d.Java))
+		for _, dep := range d.Java {
+			s.Java = append(s.Java, javaDeclKey(dep))
+		}
+		sort.Strings(s.Java)
+	}
+	return s
+}
+
+// javaDeclKey canonicalises a Java dependency declaration. Coordinates alone
+// are not enough: a changed jar name, URL override, or expected checksum all
+// change what gets downloaded, so each participates in staleness.
+func javaDeclKey(d manifest.JavaDependency) string {
+	k := d.GroupID + ":" + d.ArtifactID + ":" + d.Version
+	if d.JarFile != "" {
+		k += "|jar=" + d.JarFile
+	}
+	if d.URL != "" {
+		k += "|url=" + d.URL
+	}
+	if d.Checksum != "" {
+		k += "|sha256=" + d.Checksum
+	}
+	return k
 }
 
 // LockedPackage is the fully-pinned record of one BDL package.
@@ -212,8 +296,10 @@ type LockedJAR struct {
 
 // FromPlan builds a LockFile from a resolved Plan and the root manifest.
 // Packages with variant "webcomponent" land in the Webcomponents array;
-// everything else lands in Packages.
-func FromPlan(plan *resolver.Plan, root *manifest.Manifest) *LockFile {
+// everything else lands in Packages. mavenBase is the resolved Maven mirror
+// base ("" for public Maven Central) recorded into each JAR's DownloadURL so
+// the pinned URL replays through the same source (GIS-365).
+func FromPlan(plan *resolver.Plan, root *manifest.Manifest, mavenBase string) *LockFile {
 	pkgs := make([]LockedPackage, 0, len(plan.Packages))
 	wcs := make([]LockedWebcomponent, 0)
 	for _, p := range plan.Packages {
@@ -267,7 +353,7 @@ func FromPlan(plan *resolver.Plan, root *manifest.Manifest) *LockFile {
 			GroupID:     dep.GroupID,
 			ArtifactID:  dep.ArtifactID,
 			Version:     dep.Version,
-			DownloadURL: dep.MavenURL(),
+			DownloadURL: dep.MavenURL(mavenBase),
 			Checksum:    dep.Checksum,
 			Scope:       scopeLockString(plan.JARScopes[dep.Key()]),
 		})
@@ -278,7 +364,7 @@ func FromPlan(plan *resolver.Plan, root *manifest.Manifest) *LockFile {
 		Version:       lockVersion,
 		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
 		GeneroVersion: plan.GeneroVersion.String(),
-		RootManifest:  RootEntry{Name: root.Name, Version: root.Version},
+		RootManifest:  RootEntry{Name: root.Name, Version: root.Version, Declared: declaredFrom(root)},
 		Packages:      pkgs,
 		JARs:          jars,
 		Webcomponents: wcs,
@@ -303,8 +389,9 @@ func normalizeSource(source string) string {
 // "manifest". Coordinates already present (by key) are left untouched, so an
 // entry the resolver already recorded is never downgraded to manifest-sourced.
 // The list is re-sorted by key so diffs stay stable. Returns true if at least
-// one new entry was added.
-func (lf *LockFile) AddManifestJARs(deps []manifest.JavaDependency) bool {
+// one new entry was added. mavenBase is the resolved Maven mirror base ("" for
+// public Maven Central) baked into each new JAR's DownloadURL (GIS-365).
+func (lf *LockFile) AddManifestJARs(deps []manifest.JavaDependency, mavenBase string) bool {
 	existing := make(map[string]bool, len(lf.JARs))
 	for _, j := range lf.JARs {
 		existing[j.Key] = true
@@ -319,7 +406,7 @@ func (lf *LockFile) AddManifestJARs(deps []manifest.JavaDependency) bool {
 			GroupID:     dep.GroupID,
 			ArtifactID:  dep.ArtifactID,
 			Version:     dep.Version,
-			DownloadURL: dep.MavenURL(),
+			DownloadURL: dep.MavenURL(mavenBase),
 			Checksum:    dep.Checksum,
 			Source:      "manifest",
 		})
@@ -417,6 +504,18 @@ func (vr *ValidationResult) NeedsResolve() bool {
 	return vr.SchemaError != nil || vr.ManifestMismatch != nil
 }
 
+// StaleReason is a one-line description of why NeedsResolve is true, for
+// inlining in a progress message. Empty when no re-resolution is needed.
+func (vr *ValidationResult) StaleReason() string {
+	switch {
+	case vr.ManifestMismatch != nil:
+		return vr.ManifestMismatch.Summary()
+	case vr.SchemaError != nil:
+		return vr.SchemaError.Error()
+	}
+	return ""
+}
+
 // GeneroMismatchError describes a Genero version difference.
 type GeneroMismatchError struct {
 	Locked  string // version in lock file
@@ -436,14 +535,116 @@ type ManifestMismatchError struct {
 	Field      string
 	InLock     string
 	InManifest string
+
+	// Reason, when set, replaces the generic "<field> changed from X to Y"
+	// message. Dependency-set changes (a package added, removed, or
+	// re-constrained) don't read as a field edit, so they describe themselves.
+	Reason string
+}
+
+// Summary is the one-line form of the message, for inlining in a progress line.
+func (e *ManifestMismatchError) Summary() string {
+	if e.Reason != "" {
+		return e.Reason
+	}
+	return fmt.Sprintf("%s changed from %q (lock) to %q (manifest)",
+		e.Field, e.InLock, e.InManifest)
 }
 
 func (e *ManifestMismatchError) Error() string {
-	return fmt.Sprintf(
-		"lock file is stale: %s changed from %q (lock) to %q (manifest).\n"+
-			"Run 'fglpkg install' to update the lock file.",
-		e.Field, e.InLock, e.InManifest,
-	)
+	return "lock file is stale: " + e.Summary()
+}
+
+// diffDeclared compares the dependency snapshot recorded in the lock against
+// the root manifest's current declarations, returning the first difference
+// found (or nil when they agree). A nil lock snapshot means the lock predates
+// dependency tracking: reported as stale so one re-resolve records it.
+//
+// Scopes are checked prod → dev → optional, and keys within a scope in sorted
+// order, so the reported difference is deterministic for a given pair of
+// inputs rather than dependent on map iteration order.
+func diffDeclared(inLock, inManifest *DeclaredDeps) *ManifestMismatchError {
+	if inLock == nil {
+		return &ManifestMismatchError{Reason: "it predates dependency-set tracking, " +
+			"so changes to fglpkg.json cannot be detected — re-resolving once to record it"}
+	}
+	scopes := []struct {
+		label  string
+		lock   ScopeDeps
+		latest ScopeDeps
+	}{
+		{"dependencies", inLock.Prod, inManifest.Prod},
+		{"devDependencies", inLock.Dev, inManifest.Dev},
+		{"optionalDependencies", inLock.Optional, inManifest.Optional},
+	}
+	for _, s := range scopes {
+		if e := diffScope(s.label, s.lock, s.latest); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+// diffScope reports the first difference between one scope's locked and current
+// declarations.
+func diffScope(label string, inLock, inManifest ScopeDeps) *ManifestMismatchError {
+	for _, name := range sortedKeys(inLock.FGL, inManifest.FGL) {
+		locked, wasLocked := inLock.FGL[name]
+		current, isDeclared := inManifest.FGL[name]
+		switch {
+		case wasLocked && !isDeclared:
+			return &ManifestMismatchError{Reason: fmt.Sprintf(
+				"dependency %q was removed from %s", name, label)}
+		case !wasLocked && isDeclared:
+			return &ManifestMismatchError{Reason: fmt.Sprintf(
+				"dependency %q was added to %s", name, label)}
+		case locked != current:
+			return &ManifestMismatchError{Reason: fmt.Sprintf(
+				"constraint for %q in %s changed from %q (lock) to %q (manifest)",
+				name, label, locked, current)}
+		}
+	}
+	for _, name := range sortedKeys(inLock.Registry, inManifest.Registry) {
+		if inLock.Registry[name] != inManifest.Registry[name] {
+			return &ManifestMismatchError{Reason: fmt.Sprintf(
+				"repository pin for %q in %s changed from %q (lock) to %q (manifest)",
+				name, label, inLock.Registry[name], inManifest.Registry[name])}
+		}
+	}
+	// Java coordinates are canonicalised and sorted by scopeDepsFrom, so a
+	// straight positional walk finds the first divergence.
+	lockedJava, currentJava := inLock.Java, inManifest.Java
+	for idx := 0; idx < len(lockedJava) || idx < len(currentJava); idx++ {
+		switch {
+		case idx >= len(currentJava):
+			return &ManifestMismatchError{Reason: fmt.Sprintf(
+				"java dependency %q was removed from %s", lockedJava[idx], label)}
+		case idx >= len(lockedJava):
+			return &ManifestMismatchError{Reason: fmt.Sprintf(
+				"java dependency %q was added to %s", currentJava[idx], label)}
+		case lockedJava[idx] != currentJava[idx]:
+			return &ManifestMismatchError{Reason: fmt.Sprintf(
+				"java dependency %q in %s changed to %q",
+				lockedJava[idx], label, currentJava[idx])}
+		}
+	}
+	return nil
+}
+
+// sortedKeys returns the union of two maps' keys in sorted order.
+func sortedKeys(a, b map[string]string) []string {
+	seen := make(map[string]bool, len(a)+len(b))
+	keys := make([]string, 0, len(a)+len(b))
+	for _, m := range []map[string]string{a, b} {
+		for k := range m {
+			if !seen[k] {
+				seen[k] = true
+				keys = append(keys, k)
+			}
+		}
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // Validate checks whether the lock file is consistent with the current
@@ -471,7 +672,10 @@ func (lf *LockFile) Validate(root *manifest.Manifest, currentGenero, packagesDir
 		}
 	}
 
-	// Root manifest identity check.
+	// Root manifest identity check, then its dependency set. The dependency
+	// check is what catches a hand-edited fglpkg.json — the common case being a
+	// dependency deleted from the manifest, which must re-resolve (and prune)
+	// rather than report the lock as up to date.
 	if lf.RootManifest.Name != root.Name {
 		result.ManifestMismatch = &ManifestMismatchError{
 			Field: "project name", InLock: lf.RootManifest.Name, InManifest: root.Name,
@@ -480,6 +684,8 @@ func (lf *LockFile) Validate(root *manifest.Manifest, currentGenero, packagesDir
 		result.ManifestMismatch = &ManifestMismatchError{
 			Field: "project version", InLock: lf.RootManifest.Version, InManifest: root.Version,
 		}
+	} else if e := diffDeclared(lf.RootManifest.Declared, declaredFrom(root)); e != nil {
+		result.ManifestMismatch = e
 	}
 
 	// On-disk presence check.
