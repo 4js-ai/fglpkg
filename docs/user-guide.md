@@ -139,7 +139,8 @@ file it manages automatically — separate from your hand-edited `config.json` s
 
 ## Setting Up Your Environment
 
-fglpkg manages the `FGLLDPATH` and `CLASSPATH` environment variables so Genero can find installed packages and JARs.
+fglpkg manages the Genero environment variables so the runtime can find everything an installed package
+ships — modules, JARs, forms and styles, schemas, images, and configuration.
 
 ### macOS / Linux
 
@@ -175,8 +176,9 @@ FOR /F "tokens=*" %i IN ('fglpkg env --global') DO %i
 On Windows, `fglpkg env` outputs `SET` commands:
 
 ```
-SET FGLLDPATH=C:\Users\you\.fglpkg\packages\poiapi;%FGLLDPATH%
+SET FGLLDPATH=C:\Users\you\.fglpkg\merged;%FGLLDPATH%
 SET CLASSPATH=C:\Users\you\.fglpkg\jars\poi-5.2.3.jar;%CLASSPATH%
+SET FGLRESOURCEPATH=C:\Users\you\.fglpkg\packages\poiapi\com\fourjs\poiapi;%FGLRESOURCEPATH%
 ```
 
 ### Genero Studio
@@ -184,8 +186,9 @@ SET CLASSPATH=C:\Users\you\.fglpkg\jars\poi-5.2.3.jar;%CLASSPATH%
 Run `fglpkg env --gst` and paste the output into your project's environment variable settings:
 
 ```
-FGLLDPATH=$(ProjectDir)/.fglpkg/packages/poiapi;$(FGLLDPATH)
+FGLLDPATH=$(ProjectDir)/.fglpkg/merged;$(FGLLDPATH)
 CLASSPATH=$(ProjectDir)/.fglpkg/jars/poi-5.2.3.jar;$(CLASSPATH)
+FGLRESOURCEPATH=$(ProjectDir)/.fglpkg/packages/poiapi/com/fourjs/poiapi;$(FGLRESOURCEPATH)
 ```
 
 Genero Studio translates `$(ProjectDir)` to the actual project path and `;` to the platform-specific separator automatically.
@@ -202,9 +205,103 @@ Genero Studio translates `$(ProjectDir)` to the actual project path and `;` to t
 | `fglpkg env --gst` | Local `.fglpkg/` only | Genero Studio format | Genero Studio projects |
 
 Key points:
-- Existing `FGLLDPATH` and `CLASSPATH` values are preserved (fglpkg prepends its paths)
+- Existing values are preserved — fglpkg **prepends** its paths, never replaces them
 - Installed packages are exposed through a single merged `FGLLDPATH` entry (see below)
 - All downloaded JARs are added to `CLASSPATH`
+- A variable is emitted **only** when a package actually ships matching files, so you never get an
+  empty export
+- Diagnostics (see [Resource collisions](#resource-collisions)) go to **stderr**, so
+  `eval "$(fglpkg env)"` stays safe and `--gst` output stays a strict `VAR=value` list
+
+### Which variables are emitted
+
+| Variable | Resolves | Emitted as | Populated from |
+|---|---|---|---|
+| `FGLLDPATH` | program modules (`*.42m`, `*.42r`, `*.42x`) | the merged root, plus any uncovered store dir | see [the merged FGLLDPATH root](#the-merged-fglldpath-root) |
+| `CLASSPATH` | Java JARs | one entry per `*.jar` | `.fglpkg/jars/` |
+| `FGLRESOURCEPATH` | program resources (`*.42f`, `*.42s`, `*.4ad`, `*.4st`, `*.4sm`, `*.4tb`, `*.4tm`, `*.iem`) | directories | every directory in a package that holds one |
+| `FGLDBPATH` | database schemas (`*.sch`, `*.val`, `*.att`) | directories | every directory in a package that holds one |
+| `FGLIMAGEPATH` | webcomponents, images (`*.png`, `*.jpg`, `*.jpeg`, `*.gif`, `*.svg`, `*.bmp`, `*.ico`, `*.tiff`), icon fonts (`*.ttf`) | directories | `.fglpkg/` (for webcomponents) + every image directory in a package |
+| `FGLPROFILE` | configuration | **files**, not directories | each package's declared [`profile`](#profile) entries |
+
+The file kinds above are the complete lists from the Genero reference manual, not a
+sample. Three are easy to overlook when packaging:
+
+- **`.iem`** — compiled message files (`fglmkmsg`), used by `OPTIONS HELP FILE`. Neither
+  `fglcomp` nor `fglform` produces one, so it is often missing from build scripts.
+- **`.val` / `.att`** — a Genero database schema is *three* files, not one. Both are legacy
+  (backward compatibility only), but `fgldbsch` still emits them and they resolve through
+  `FGLDBPATH`.
+- **`.ttf`** — with an image-to-font-glyph mapping file, a bare image name resolves to a
+  glyph in a font file, and Genero requires that font's directory on `FGLIMAGEPATH`.
+
+One gap fglpkg cannot close automatically: `FGLIMAGEPATH` accepts *file* entries as well as
+directories — an [image-to-font-glyph mapping file](https://4js.com/online_documentation/fjs-fgl-manual-html/fgl-topics/c_fgl_EnvVariables_FGLIMAGEPATH.html)
+tells Genero how to turn `"smiley"` into a glyph. Mapping files have no reserved extension
+(the manual's own example is `image2font.txt`), so fglpkg cannot recognize one by sight. If
+your package ships a custom icon map, its consumers must add it to `FGLIMAGEPATH` by hand.
+
+Two shapes, and the difference matters:
+
+- **`FGLLDPATH` is namespace-addressed.** A module is found by its `PACKAGE` path, which is why
+  fglpkg can remap every installed module into one synthetic merged tree.
+- **`FGLRESOURCEPATH`, `FGLDBPATH` and `FGLIMAGEPATH` are basename-addressed** and searched
+  **non-recursively**. There is no namespace to remap, so fglpkg points them at the real directories
+  holding the files — which means the *leaf* directory, not the package's store root. A package whose
+  forms sit at `packages/poiapi/com/fourjs/poiapi/Customer.42f` puts exactly that directory on the
+  path. It also means a package's store directory stays load-bearing for resources even after the
+  merged root has taken it off `FGLLDPATH`.
+- **`FGLPROFILE` is not a search path at all.** It is an ordered list of files: Genero loads and
+  merges every one of them, and where the same entry key appears twice the **last file loaded wins**.
+  That is the reverse of a search path, so fglpkg emits `FGLPROFILE` in the reverse order too — see
+  [below](#resource-collisions). fglpkg lists package profiles *before* your existing value, so your
+  own settings still override a package's defaults.
+
+<a id="resource-collisions"></a>
+### Resource collisions
+
+Because resources are looked up by **basename**, two packages that both ship `Customer.42f` (or the
+same `zoom.4st`, or a colliding `.sch`) shadow each other. Unlike a `PACKAGE` namespace clash, there
+is nothing to disambiguate them with — so fglpkg cannot prevent it, and instead makes it **loud**:
+
+```
+$ eval "$(fglpkg env --local)"
+warning: FGLRESOURCEPATH: "Customer.42f" is shipped by both "poiapi" (local) and "reportkit" (global).
+  These variables are searched by basename, first match wins: the copy in
+  /home/you/proj/.fglpkg/packages/poiapi/com/fourjs/poiapi will be used and reportkit's is shadowed.
+  Rename one of the two files, or set FGLRESOURCEPATH yourself to pick a winner.
+```
+
+The order is deterministic, so the winner is reproducible rather than an accident:
+
+1. **Local scope before global** — a project's own copy always wins.
+2. **Packages in name order** within a scope.
+3. **First on the path wins.**
+
+`FGLPROFILE` keeps the same *precedence* but needs the opposite *order*. Because the last file loaded
+wins rather than the first, listing local ahead of global would let a globally installed package
+override the project's own — silently, since both files load without complaint. So fglpkg emits
+profiles back to front: global before local, reverse name order within a scope. The winner is the
+same package that would win a resource collision; only the position in the list is flipped. A
+package's own `profile` array is *not* reversed — there, last-listed winning is what the author
+already means.
+
+Two more rules worth knowing:
+
+- The **same package** installed both locally and globally is *precedence, not a clash*, and is not
+  reported — the same rule that governs `PACKAGE` namespaces across scopes.
+- One package shipping the same basename in **two of its own directories** is reported too; the second
+  copy is unreachable.
+
+Warnings never change the exit status and never appear on stdout.
+
+> **Note** — the default `files` globs are `["*.42m", "*.42f", "*.sch"]`, so a package ships forms and
+> schemas out of the box but **not** styles, action defaults or images. To ship those, list them
+> explicitly: `"files": ["*.42m", "*.42f", "*.sch", "*.4st", "*.png"]`.
+
+> Workspace member directories are **not** scanned for resources. A member is a *source* tree (`.per`,
+> not `.42f`), and where its build drops compiled output is project-specific — so fglpkg would be
+> guessing. Members still contribute to `FGLLDPATH` as before.
 
 ### The merged FGLLDPATH root
 
@@ -225,6 +322,9 @@ resolves to the namespace-correct path no matter what the package or its store d
   rather than one silently shadowing the other.
 - Packages published before namespaces were recorded, and packages with no namespace, keep their
   historical per-package `FGLLDPATH` entry — nothing about those changes.
+- The merged root holds **modules only**. Forms, schemas, images and profiles are not remapped into
+  it, so a package's store directory keeps feeding `FGLRESOURCEPATH` / `FGLDBPATH` / `FGLIMAGEPATH` /
+  `FGLPROFILE` even once the merged root has taken it off `FGLLDPATH`.
 - `.fglpkg/merged` is git-ignored by the `init` templates; never commit it (rebuild it instead).
 
 ### Home Directory
@@ -513,6 +613,42 @@ Patterns come in two forms:
 So with `"root": "com/fourjs/ai/fgl_ai_sdk"`, a `"files": ["*.42m", "tests/*.4gl"]` ships every compiled module plus only the `.4gl` sources under `tests/` — the library `.4gl` at the package root is left out, with no `.fglpkgignore` needed.
 
 > **Note:** `files` path-patterns are relative to `root` (your BDL source base). This differs from [`.fglpkgignore`](#excluding-files-with-fglpkgignore), whose patterns are relative to the **project root**. Keep that in mind when the same file needs to line up across both.
+
+<a id="profile"></a>
+### Shipping Configuration (`profile`)
+
+A package can ship Genero configuration files and have consumers pick them up automatically. List them
+in `profile`, as paths relative to `root`:
+
+```json
+{
+  "name": "poiapi",
+  "version": "1.0.0",
+  "files": ["*.42m", "*.42f"],
+  "profile": ["profiles/poiapi.4gp"]
+}
+```
+
+After install, `fglpkg env` puts each shipped file on `FGLPROFILE`:
+
+```
+export FGLPROFILE=/home/you/proj/.fglpkg/packages/poiapi/profiles/poiapi.4gp"${FGLPROFILE:+:$FGLPROFILE}"
+```
+
+Things to know:
+
+- These are **file paths**, not glob patterns and not directories — `FGLPROFILE` is a list of files.
+- Declared files are **always packed**, even when your `files` globs don't match them (the defaults
+  never would) and even when `.fglpkgignore` would exclude them. Same rule as [`bin`](#distributable-scripts):
+  a declared profile that never reaches the archive is a silently broken package. A declared file that
+  doesn't exist is a **pack error**, not a silent omission.
+- Genero applies `FGLPROFILE` entries **left to right, last one winning**. fglpkg lists package
+  profiles *before* any existing value, so a project- or user-level profile still overrides a
+  package's defaults.
+- The path is rewritten to its archive-relative form when the package is published, so `importRoot`
+  stripping is handled for you.
+- If a declared profile is missing from an installed package, `fglpkg env` skips it and says so on
+  stderr rather than emitting a dangling path.
 
 ### Excluding Files with `.fglpkgignore`
 
@@ -981,9 +1117,17 @@ $ gwabuildtool -p . -o build/ $(fglpkg env --gwa)
 
 | Asset | Install path | Discovered via |
 |---|---|---|
-| BDL package | `.fglpkg/packages/<name>/` | `FGLLDPATH` |
+| BDL module | `.fglpkg/packages/<name>/` → merged into `.fglpkg/merged/<namespace>/` | `FGLLDPATH` |
+| Form / style / action defaults | `.fglpkg/packages/<name>/…` (wherever the package puts it) | `FGLRESOURCEPATH` |
+| Database schema | `.fglpkg/packages/<name>/…` | `FGLDBPATH` |
+| Image | `.fglpkg/packages/<name>/…` | `FGLIMAGEPATH` |
+| Profile / config | `.fglpkg/packages/<name>/…` (declared via `profile`) | `FGLPROFILE` |
 | Java JAR | `.fglpkg/jars/<artifact>-<version>.jar` | `CLASSPATH` |
 | Webcomponent | `.fglpkg/webcomponents/<COMPONENTTYPE>/` | `FGLIMAGEPATH` (direct mode), `WEB_COMPONENT_DIRECTORY` (GAS), `--webcomponent` flag (GWA) |
+
+Only modules are relocated at install time (into the merged root). Everything else is discovered
+in place, in the package's own store directory — which is why that directory stays on the resource
+paths even when the merged root has taken it off `FGLLDPATH`.
 
 The lockfile records webcomponent packages under a separate `webcomponents` array, so a fresh `fglpkg install --frozen` from a committed `fglpkg.lock` reproduces the install byte-for-byte.
 

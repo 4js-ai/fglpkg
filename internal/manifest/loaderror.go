@@ -61,6 +61,7 @@ var fieldHints = map[string]string{
 	"programs":      `an array of module names (e.g. ["PoiConvert"])`,
 	"keywords":      `an array of strings (e.g. ["database","utilities"])`,
 	"include":       `an array of file paths (e.g. ["LICENSE"])`,
+	"profile":       `an array of file paths (e.g. ["profiles/app.4gp"])`,
 	"webcomponents": `an array of COMPONENTTYPE names (e.g. ["MyChart"])`,
 	"bin":           `an object mapping command names to script paths`,
 }

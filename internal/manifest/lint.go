@@ -108,6 +108,13 @@ func (m *Manifest) LintInto(r *Report) {
 	if dups := duplicateStrings(m.Keywords); len(dups) > 0 {
 		r.Warnf("keywords", "duplicate keyword(s): %s", strings.Join(dups, ", "))
 	}
+
+	// A duplicated profile entry would stage the same file twice and put it on
+	// FGLPROFILE twice — harmless (the later copy is identical, and FGLPROFILE
+	// is last-wins) but always a mistake worth pointing out.
+	if dups := duplicateStrings(m.Profile); len(dups) > 0 {
+		r.Warnf("profile", "duplicate profile file(s): %s", strings.Join(dups, ", "))
+	}
 }
 
 // duplicateStrings returns the distinct values that appear more than once in
