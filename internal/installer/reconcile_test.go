@@ -126,6 +126,179 @@ func TestPruneToPlanIgnoresWebcomponentPlanEntries(t *testing.T) {
 	}
 }
 
+// TestPruneKeepsMixedPackageWebcomponentBundle pins the wantWC contract: the
+// ownership sidecar is keyed by package name for ANY webcomponent-bearing
+// package, including a *mixed* one (BDL modules under packages/<name>/ plus a
+// COMPONENTTYPE bundle routed into webcomponents/). A mixed package's plan
+// entry is not IsWebcomponent(), so building wantWC from webcomponent entries
+// alone would delete the bundle of a package that is still required.
+func TestPruneKeepsMixedPackageWebcomponentBundle(t *testing.T) {
+	home := t.TempDir()
+	inst := New(home, "", "", "")
+	if err := inst.ensureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	// "chart3d" is mixed: a BDL package dir AND an owned webcomponent bundle.
+	mkPkgDir(t, inst.packagesDir, "chart3d")
+	installWC(t, home, inst.webcomponentsDir, "chart3d", "Chart3D", nil)
+	bundle := filepath.Join(inst.webcomponentsDir, "Chart3D", "Chart3D.html")
+	if _, err := os.Stat(bundle); err != nil {
+		t.Fatalf("setup: bundle not installed: %v", err)
+	}
+
+	// A plan that still requires chart3d — as an ordinary (non-webcomponent)
+	// package, which is how a mixed package appears.
+	plan := &resolver.Plan{Packages: []resolver.ResolvedPackage{{Name: "chart3d"}}}
+	pruned, err := inst.pruneToPlan(plan)
+	if err != nil {
+		t.Fatalf("pruneToPlan: %v", err)
+	}
+	if _, err := os.Stat(bundle); err != nil {
+		t.Errorf("a still-required mixed package's webcomponent bundle was pruned: %v", err)
+	}
+	if len(pruned) != 0 {
+		t.Errorf("pruned = %v, want nothing", pruned)
+	}
+
+	// And the same via the lock-driven path: a mixed package is recorded in the
+	// lock's `packages` array, not `webcomponents`.
+	lf := &lockfile.LockFile{Packages: []lockfile.LockedPackage{{Name: "chart3d", Version: "1.0.0"}}}
+	if pruned, err = inst.pruneToLock(lf); err != nil {
+		t.Fatalf("pruneToLock: %v", err)
+	}
+	if _, err := os.Stat(bundle); err != nil {
+		t.Errorf("pruneToLock deleted a locked mixed package's bundle: %v", err)
+	}
+	if len(pruned) != 0 {
+		t.Errorf("pruned = %v, want nothing", pruned)
+	}
+}
+
+// Dropping the mixed package from the graph must still prune its bundle — the
+// keep-set widening above must not turn into "never prune webcomponents".
+func TestPruneRemovesMixedPackageBundleWhenDropped(t *testing.T) {
+	home := t.TempDir()
+	inst := New(home, "", "", "")
+	if err := inst.ensureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	mkPkgDir(t, inst.packagesDir, "chart3d")
+	installWC(t, home, inst.webcomponentsDir, "chart3d", "Chart3D", nil)
+	bundle := filepath.Join(inst.webcomponentsDir, "Chart3D", "Chart3D.html")
+
+	pruned, err := inst.pruneToPlan(&resolver.Plan{})
+	if err != nil {
+		t.Fatalf("pruneToPlan: %v", err)
+	}
+	if _, err := os.Stat(bundle); !os.IsNotExist(err) {
+		t.Error("a dropped mixed package's webcomponent bundle should have been pruned")
+	}
+	sort.Strings(pruned)
+	want := []string{"package chart3d", "webcomponent chart3d"}
+	if len(pruned) != len(want) || pruned[0] != want[0] || pruned[1] != want[1] {
+		t.Errorf("pruned = %v, want %v", pruned, want)
+	}
+}
+
+// ─── pruneToLock ─────────────────────────────────────────────────────────────
+//
+// The install paths that never build a resolver plan (lock valid, nothing or
+// only some entries missing) converge against the lock's own contents instead.
+
+func TestPruneToLockRemovesPackagesAbsentFromLock(t *testing.T) {
+	home := t.TempDir()
+	inst := New(home, "", "", "")
+	if err := inst.ensureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	mkPkgDir(t, inst.packagesDir, "keeper")
+	mkPkgDir(t, inst.packagesDir, "orphan")
+
+	lf := &lockfile.LockFile{Packages: []lockfile.LockedPackage{{Name: "keeper", Version: "1.0.0"}}}
+
+	pruned, err := inst.pruneToLock(lf)
+	if err != nil {
+		t.Fatalf("pruneToLock: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(inst.packagesDir, "orphan")); !os.IsNotExist(err) {
+		t.Error("a package the lock does not name should have been pruned")
+	}
+	if _, err := os.Stat(filepath.Join(inst.packagesDir, "keeper")); err != nil {
+		t.Errorf("a locked package must be retained: %v", err)
+	}
+	if len(pruned) != 1 || pruned[0] != "package orphan" {
+		t.Errorf("pruned = %v, want [package orphan]", pruned)
+	}
+}
+
+// TestPruneToLockLeavesJARsAlone is the deliberate asymmetry with pruneToPlan: a
+// LockedJAR records coordinates but not the manifest's optional `jar` filename
+// override, so its on-disk name can only be guessed — and a wrong guess would
+// delete a JAR that is genuinely required. Orphaned JARs wait for a re-resolve,
+// which is the only moment one can actually become orphaned.
+func TestPruneToLockLeavesJARsAlone(t *testing.T) {
+	home := t.TempDir()
+	inst := New(home, "", "", "")
+	if err := inst.ensureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	mkJar(t, inst.jarsDir, "custom-name.jar") // a `jar` override the lock cannot reproduce
+
+	lf := &lockfile.LockFile{JARs: []lockfile.LockedJAR{
+		{Key: "g:a", GroupID: "g", ArtifactID: "a", Version: "1.0.0"},
+	}}
+	pruned, err := inst.pruneToLock(lf)
+	if err != nil {
+		t.Fatalf("pruneToLock: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(inst.jarsDir, "custom-name.jar")); err != nil {
+		t.Errorf("pruneToLock must not delete JARs: %v", err)
+	}
+	if len(pruned) != 0 {
+		t.Errorf("pruned = %v, want nothing", pruned)
+	}
+}
+
+func TestPruneToLockNoopWhenStoreMatches(t *testing.T) {
+	home := t.TempDir()
+	inst := New(home, "", "", "")
+	if err := inst.ensureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	mkPkgDir(t, inst.packagesDir, "keeper")
+
+	lf := &lockfile.LockFile{Packages: []lockfile.LockedPackage{{Name: "keeper", Version: "1.0.0"}}}
+	pruned, err := inst.pruneToLock(lf)
+	if err != nil {
+		t.Fatalf("pruneToLock: %v", err)
+	}
+	if len(pruned) != 0 {
+		t.Errorf("nothing should be pruned, got %v", pruned)
+	}
+}
+
+// pruneTo with a nil wantJar skips the JAR sweep; an empty non-nil one prunes
+// every JAR. The distinction is what keeps pruneToLock and pruneToPlan honest.
+func TestPruneToEmptyNonNilJarSetPrunesAllJARs(t *testing.T) {
+	home := t.TempDir()
+	inst := New(home, "", "", "")
+	if err := inst.ensureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	mkJar(t, inst.jarsDir, "gone-1.0.0.jar")
+
+	pruned, err := inst.pruneTo(map[string]bool{}, map[string]bool{}, map[string]bool{})
+	if err != nil {
+		t.Fatalf("pruneTo: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(inst.jarsDir, "gone-1.0.0.jar")); !os.IsNotExist(err) {
+		t.Error("an empty (non-nil) wantJar should prune every JAR")
+	}
+	if len(pruned) != 1 || pruned[0] != "jar gone-1.0.0.jar" {
+		t.Errorf("pruned = %v, want [jar gone-1.0.0.jar]", pruned)
+	}
+}
+
 func writeStubLock(t *testing.T, dir string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, lockfile.Filename), []byte("{}\n"), 0644); err != nil {

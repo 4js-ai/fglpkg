@@ -453,9 +453,51 @@ Removing the **last** dependency empties the graph, so `fglpkg.lock` is deleted 
 
 If the registry can't be reached to re-resolve, `remove` still updates the manifest, prints a warning, and leaves the lock untouched — run `fglpkg install` once you're back online to reconcile.
 
+`remove` is a convenience, not the only supported path: it is equivalent to deleting the dependency from `fglpkg.json` and running `fglpkg install`, which reconciles the lock and prunes disk the same way (see [Editing fglpkg.json by Hand](#editing-fglpkgjson-by-hand)). What `remove` adds is the `preuninstall` hook and the "which scope was it in" message.
+
+### Editing fglpkg.json by Hand
+
+You do not have to go through `fglpkg install` / `fglpkg remove` to change your dependencies — editing `fglpkg.json` in an editor is fully supported. The lock records the dependency constraints it was resolved from, so the next `install` notices the edit, re-resolves, and reports what changed:
+
+```
+$ fglpkg install
+Lock file is stale (dependency "poiapi" was removed from dependencies) — re-resolving...
+```
+
+This works in both directions: a dependency you **add** by hand is installed, and one you **delete** is removed from `fglpkg.lock` *and* deleted from `.fglpkg/` (see [Pruning](#pruning-converging-on-the-manifest) below). Constraint changes, scope moves (prod ↔ dev), Java coordinate changes, and `registry` pin changes all count as edits.
+
+> A lock written by fglpkg 4.0.5 or earlier carries no record of the dependencies it was resolved from, so the first `install` after upgrading re-resolves once to record them. That re-resolve can move versions within your existing constraints; run it somewhere you can review the resulting `fglpkg.lock` diff.
+
+### Pruning: Converging on the Manifest
+
+For a **local** (`.fglpkg/`) install, `install` and `update` both delete installed artifacts the dependency graph no longer requires — packages, webcomponent bundles, and orphaned JARs:
+
+```
+$ fglpkg install
+Lock file is stale (dependency "poiapi" was removed from dependencies) — re-resolving...
+  pruned package poiapi
+  pruned jar poi-5.3.0.jar
+```
+
+This matters because `.fglpkg/packages/` is not an inert cache: `fglpkg env` puts it on `FGLLDPATH`. An orphan left there stays importable, so code that should have stopped compiling keeps compiling on your machine and breaks on a fresh clone. Pruning is also what keeps `fglpkg list` honest — it reports what is on disk.
+
+Two deliberate limits:
+
+- **Global (`~/.fglpkg/`) installs are never pruned.** Those packages and JARs are shared across every project, so pruning them against one project's graph would delete another project's dependencies. Only `fglpkg.lock` is updated.
+- **`--production` never prunes.** It resolves a deliberately narrowed graph (no dev scope), so pruning against it would delete a developer's dev packages.
+
+Use `--no-prune` to keep orphans on disk for a single run:
+
+```bash
+fglpkg install --no-prune
+fglpkg update --no-prune
+```
+
+Note that pruning deletes anything under `.fglpkg/packages/`, `.fglpkg/jars/`, and `.fglpkg/webcomponents/` that the graph does not account for — including files you placed there by hand. Those directories are fglpkg-managed; keep local patches somewhere else, or use `--no-prune`.
+
 ### Updating Dependencies
 
-Once a `fglpkg.lock` exists, `fglpkg install` will **not** fetch a newer version of a dependency just because one was published — even if your version constraint (e.g. `^1.0.0`) would allow it. `install` only re-resolves when `fglpkg.json` itself changed; otherwise it validates the existing lock against disk and stops there (`Lock file is up to date... Nothing to install`).
+Once a `fglpkg.lock` exists, `fglpkg install` will **not** fetch a newer version of a dependency just because one was published — even if your version constraint (e.g. `^1.0.0`) would allow it. `install` re-resolves when `fglpkg.json` has changed (including by hand); otherwise it validates the existing lock against disk and stops there (`Lock file is up to date... Nothing to install`).
 
 To re-resolve all dependencies to their latest compatible versions (ignoring the lock file):
 
@@ -464,6 +506,22 @@ fglpkg update
 ```
 
 This rewrites `fglpkg.lock` with whatever versions the registry now resolves to, and re-installs anything that changed — BDL packages, Java JARs, and webcomponent packages alike. Webcomponent bundles are always re-extracted on install (there's no "already installed, skip" fast path for them like there is for BDL packages), so an `update` that picks up a new webcomponent version reliably overwrites the old files in `.fglpkg/webcomponents/<COMPONENTTYPE>/`. See [Publishing an Update](#publishing-an-update) for the publisher side of this flow.
+
+### Reproducible Installs for CI (`--frozen`)
+
+`fglpkg install --frozen` refuses to re-resolve: if `fglpkg.lock` is missing, or disagrees with `fglpkg.json`, it fails instead of quietly resolving to versions nobody reviewed.
+
+```bash
+fglpkg install --frozen --production
+```
+
+```
+$ fglpkg install --frozen
+--frozen: fglpkg.lock is out of date with fglpkg.json — dependency "poiapi" was removed from dependencies.
+  Run 'fglpkg install' (or 'fglpkg update') and commit the updated lock.
+```
+
+It checks the committed lock against the manifest only — nothing needs to be installed yet, which is exactly the fresh-checkout case. `--frozen` cannot be combined with a package argument or `--force` (both require re-resolving), and is not valid for `update`, whose whole purpose is to move the lock.
 
 ### Listing Installed Packages
 
@@ -1566,6 +1624,7 @@ When you run `fglpkg install`, a `fglpkg.lock` file is created alongside your `f
 - Exact resolved versions of every BDL package
 - Download URLs and SHA256 checksums
 - The Genero version used at resolution time
+- Under `root.declared`, the dependency constraints it was resolved *from* — this is what lets `install` tell that `fglpkg.json` has been edited (see [Editing fglpkg.json by Hand](#editing-fglpkgjson-by-hand))
 
 This ensures reproducible installs across machines and CI environments. Commit `fglpkg.lock` to version control.
 
@@ -1573,6 +1632,12 @@ To bypass the lock and re-resolve everything:
 
 ```bash
 fglpkg update
+```
+
+To assert the lock is already correct and fail rather than re-resolve (CI):
+
+```bash
+fglpkg install --frozen
 ```
 
 ## Package Signature Verification
@@ -1650,6 +1715,10 @@ If dependencies in `fglpkg.json` have changed and `fglpkg install` says the lock
 ```bash
 fglpkg update
 ```
+
+### `fglpkg list` shows a package I removed
+
+`list` reports what is actually installed under `.fglpkg/packages/`, so a package that is gone from `fglpkg.json` but still listed means the store hasn't been reconciled yet. Run `fglpkg install` — it re-resolves and prunes the orphan (see [Pruning](#pruning-converging-on-the-manifest)). If it persists, you are most likely on a **global** install (`~/.fglpkg/`), which is shared across projects and deliberately never pruned; check with `fglpkg list --local` vs `fglpkg list --global`.
 
 ### Wrong Genero version detected
 
