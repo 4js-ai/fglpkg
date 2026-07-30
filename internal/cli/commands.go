@@ -158,6 +158,19 @@ global ~/.fglpkg/ is shared across projects.
 
 Prints shell export lines. Evaluate the output to load them, e.g.
   eval "$(fglpkg env --global)"
+
+VARIABLES (each emitted only when a package ships matching files):
+  FGLLDPATH                program modules — .42m/.42r/.42x
+  CLASSPATH                Java jars
+  FGLRESOURCEPATH          .42f .42s .4ad .4st .4sm .4tb .4tm .iem
+  FGLDBPATH                .sch .val .att
+  FGLIMAGEPATH             webcomponents + .png .jpg .gif .svg .bmp .ico
+                           .tiff .ttf
+  FGLPROFILE               config files declared by a package's "profile"
+
+Existing values are preserved — fglpkg prepends. Diagnostics (such as two
+packages shipping the same resource basename, where first-on-path wins) are
+written to STDERR so stdout stays safe to eval.
 `,
 	},
 	{
@@ -180,11 +193,14 @@ the local root (when run inside a project) and the global root.
 		Summary:    "Search the registry",
 		ListDetail: " (use --all to list every package)",
 		Args:       "<term>",
-		Usage:      "fglpkg search <term>\nfglpkg search --all",
+		Usage:      "fglpkg search <term> [--registry <name>]\nfglpkg search --all [--registry <name>]",
 		Long: `FLAGS:
   --all                    List every package in the registry (no term)
   --genero <version>       Grade results against this Genero version instead
                            of the detected one (overrides FGLPKG_GENERO_VERSION)
+  --registry <name>        Search only the named repository (results are still
+                           source-tagged). Errors if the name isn't a configured
+                           registry.
 
 Each result is annotated with a compatibility marker against the running Genero
 version (detected, or overridden with --genero / FGLPKG_GENERO_VERSION):
@@ -475,9 +491,13 @@ login".
   add <name> <url>         Add a repository descriptor (defaults to type=artifactory)
   remove <name> (rm)       Remove a configured repository
 
+<url> may be pasted with the Artifactory repo key still on the end
+(https://acme.jfrog.io/artifactory/GeneroBDL): the key is split off the URL and
+--repo-key is then optional.
+
 FLAGS (add):
   --type <t>               genero | artifactory (default artifactory)
-  --repo-key <k>           Artifactory generic-repo key (required for type=artifactory)
+  --repo-key <k>           Artifactory generic-repo key; optional when the URL already carries it
   --auth <scheme>          bearer | basic | apikey | anonymous (default bearer)
   --priority <n>           Lower is tried first; unique. Defaults to max+1 when omitted
   --packages <globs>       Comma-separated name-scope allow-list (e.g. 'acme-*,foo-*')

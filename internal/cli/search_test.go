@@ -7,32 +7,41 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/4js-mikefolcher/fglpkg/internal/config"
 	"github.com/4js-mikefolcher/fglpkg/internal/genero"
+	"github.com/4js-mikefolcher/fglpkg/internal/provider"
+	"github.com/4js-mikefolcher/fglpkg/internal/registry"
 )
 
 func TestParseSearchArgs(t *testing.T) {
 	cases := []struct {
-		name       string
-		args       []string
-		wantTerm   string
-		wantAll    bool
-		wantGenero string
-		wantErr    string
+		name         string
+		args         []string
+		wantTerm     string
+		wantAll      bool
+		wantGenero   string
+		wantRegistry string
+		wantErr      string
 	}{
-		{"keyword", []string{"foo"}, "foo", false, "", ""},
-		{"all", []string{"--all"}, "", true, "", ""},
-		{"no args errors", nil, "", false, "", "usage:"},
-		{"all + term conflict", []string{"--all", "foo"}, "", false, "", "mutually exclusive"},
-		{"two terms errors", []string{"foo", "bar"}, "", false, "", "extra argument"},
-		{"genero flag separate value", []string{"--genero", "4.01", "foo"}, "foo", false, "4.01", ""},
-		{"genero flag equals form", []string{"--genero=4.01", "foo"}, "foo", false, "4.01", ""},
-		{"genero with all", []string{"--all", "--genero", "3.20"}, "", true, "3.20", ""},
-		{"genero missing value", []string{"--genero"}, "", false, "", "requires a version"},
-		{"genero empty equals form", []string{"--genero="}, "", false, "", "requires a version"},
+		{"keyword", []string{"foo"}, "foo", false, "", "", ""},
+		{"all", []string{"--all"}, "", true, "", "", ""},
+		{"no args errors", nil, "", false, "", "", "usage:"},
+		{"all + term conflict", []string{"--all", "foo"}, "", false, "", "", "mutually exclusive"},
+		{"two terms errors", []string{"foo", "bar"}, "", false, "", "", "extra argument"},
+		{"genero flag separate value", []string{"--genero", "4.01", "foo"}, "foo", false, "4.01", "", ""},
+		{"genero flag equals form", []string{"--genero=4.01", "foo"}, "foo", false, "4.01", "", ""},
+		{"genero with all", []string{"--all", "--genero", "3.20"}, "", true, "3.20", "", ""},
+		{"genero missing value", []string{"--genero"}, "", false, "", "", "requires a version"},
+		{"genero empty equals form", []string{"--genero="}, "", false, "", "", "requires a version"},
+		{"registry separate value", []string{"--registry", "acme", "foo"}, "foo", false, "", "acme", ""},
+		{"registry equals form", []string{"foo", "--registry=acme"}, "foo", false, "", "acme", ""},
+		{"registry with all", []string{"--all", "--registry", "acme"}, "", true, "", "acme", ""},
+		{"registry missing value", []string{"foo", "--registry"}, "", false, "", "", "requires a value"},
+		{"registry empty equals form", []string{"foo", "--registry="}, "", false, "", "", "requires a value"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			term, all, genero, err := parseSearchArgs(c.args)
+			term, all, genero, registry, err := parseSearchArgs(c.args)
 			if c.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
 					t.Fatalf("err = %v, want one containing %q", err, c.wantErr)
@@ -42,9 +51,9 @@ func TestParseSearchArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if term != c.wantTerm || all != c.wantAll || genero != c.wantGenero {
-				t.Errorf("term=%q all=%v genero=%q, want term=%q all=%v genero=%q",
-					term, all, genero, c.wantTerm, c.wantAll, c.wantGenero)
+			if term != c.wantTerm || all != c.wantAll || genero != c.wantGenero || registry != c.wantRegistry {
+				t.Errorf("term=%q all=%v genero=%q registry=%q, want term=%q all=%v genero=%q registry=%q",
+					term, all, genero, registry, c.wantTerm, c.wantAll, c.wantGenero, c.wantRegistry)
 			}
 		})
 	}
@@ -300,5 +309,94 @@ func TestCmdSearchAllSurfacesCleanErrorOn400(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "doesn't support --all") {
 		t.Errorf("err = %v, want one explaining --all unsupported", err)
+	}
+}
+
+// TestCmdSearchRegistrySingleRegistry covers --registry on the single-registry
+// (only built-in GI configured) path: `--registry gi` is a harmless no-op that
+// still searches, while any other name errors like install/update do, since no
+// such repository is configured.
+func TestCmdSearchRegistrySingleRegistry(t *testing.T) {
+	ts := browsePackagesServer(t, []map[string]any{
+		{"slug": "jsonutils", "name": "jsonutils", "description": "JSON helpers",
+			"latest_version": "2.1.0", "owner": map[string]any{"name": "ACME"}},
+	})
+	t.Setenv("FGLPKG_REGISTRY", ts.URL)
+	// Isolate the fglpkg home so a developer's real config doesn't add a second
+	// provider and divert onto the multi-provider path.
+	t.Setenv("FGLPKG_HOME", t.TempDir())
+
+	// --registry gi: no-op, search still runs and returns the package.
+	out, err := captureStdout(t, func() error {
+		return cmdSearch([]string{"json", "--registry", "gi"})
+	})
+	if err != nil {
+		t.Fatalf("--registry gi: unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "jsonutils") {
+		t.Errorf("--registry gi should still search; output missing result:\n%s", out)
+	}
+
+	// --registry <unknown>: hard error, matching install/update wording.
+	err = cmdSearch([]string{"json", "--registry", "acme"})
+	if err == nil {
+		t.Fatal("--registry acme: expected error for unconfigured registry, got nil")
+	}
+	if !strings.Contains(err.Error(), "no repository named") {
+		t.Errorf("err = %v, want one explaining the registry isn't configured", err)
+	}
+}
+
+// TestSearchAcrossProvidersRestrict verifies the --registry filter on the
+// multi-provider search path: with no restriction both repos are queried; with
+// a restriction only the named repo's results appear; and an unknown name is a
+// hard error listing the configured registries. (searchStub is defined in
+// search_dedup_test.go.)
+func TestSearchAcrossProvidersRestrict(t *testing.T) {
+	gi := &searchStub{name: "gi", results: []registry.SearchResult{
+		{Name: "gipkg", LatestVersion: "1.0.0", Description: "from gi"},
+	}}
+	acme := &searchStub{name: "acme", results: []registry.SearchResult{
+		{Name: "acmepkg", LatestVersion: "2.0.0", Description: "from acme"},
+	}}
+	descs := []config.Registry{
+		{Name: "gi", Type: config.TypeGenero, URL: "https://gi", Priority: 1},
+		{Name: "acme", Type: config.TypeArtifactory, URL: "https://a", RepoKey: "k", Priority: 2},
+	}
+	rs := provider.NewRepositorySet([]provider.Provider{gi, acme}, descs, nil)
+
+	// No restriction: both repos queried.
+	out, err := captureStdout(t, func() error {
+		return searchAcrossProviders(rs, "pkg", false, nil, "")
+	})
+	if err != nil {
+		t.Fatalf("unrestricted: %v", err)
+	}
+	if !strings.Contains(out, "gipkg") || !strings.Contains(out, "acmepkg") {
+		t.Errorf("unrestricted search should show both repos' results:\n%s", out)
+	}
+
+	// Restrict to acme: only acme's result appears.
+	out, err = captureStdout(t, func() error {
+		return searchAcrossProviders(rs, "pkg", false, nil, "acme")
+	})
+	if err != nil {
+		t.Fatalf("restricted: %v", err)
+	}
+	if strings.Contains(out, "gipkg") {
+		t.Errorf("--registry acme should exclude gi results:\n%s", out)
+	}
+	if !strings.Contains(out, "acmepkg") {
+		t.Errorf("--registry acme should include acme results:\n%s", out)
+	}
+
+	// Unknown registry: hard error listing configured names.
+	err = searchAcrossProviders(rs, "pkg", false, nil, "ghost")
+	if err == nil {
+		t.Fatal("--registry ghost: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "no repository named") ||
+		!strings.Contains(err.Error(), "gi, acme") {
+		t.Errorf("err = %v, want one naming the unknown registry and listing gi, acme", err)
 	}
 }

@@ -43,6 +43,10 @@ type Installer struct {
 	registryToken    string // bearer for the consumer registry when it serves zips directly
 	giOrigin         string // scheme+host of the GI registry; gates where registryToken may be sent
 	repoAuth         []RepoAuth
+	// mavenBase, when non-empty, replaces public Maven Central as the base for
+	// JAR downloads (GIS-365). The mirror is also registered in repoAuth so its
+	// downloads carry credentials via matchRepoAuth. "" == Maven Central.
+	mavenBase string
 	// versionFetcher/infoFetcher, when non-nil, replace the default live GI
 	// registry fetchers with a multi-provider routing layer (RepositorySet).
 	versionFetcher resolver.VersionFetcher
@@ -101,6 +105,15 @@ func New(home, githubToken, registryToken, giOrigin string) *Installer {
 // secondary repositories) and returns the installer for chaining.
 func (i *Installer) WithRepoAuth(ra []RepoAuth) *Installer {
 	i.repoAuth = ra
+	return i
+}
+
+// WithMavenBase sets the Maven mirror base URL used for JAR downloads (GIS-365)
+// and returns the installer for chaining. An empty base keeps the default
+// (public Maven Central). Register the same base in WithRepoAuth so authenticated
+// mirrors receive credentials.
+func (i *Installer) WithMavenBase(base string) *Installer {
+	i.mavenBase = base
 	return i
 }
 
@@ -419,7 +432,7 @@ func (i *Installer) InstallAllWithOptions(m *manifest.Manifest, projectDir strin
 	// When --production is in effect we do NOT overwrite the lock file,
 	// because it would drop dev entries that should remain recorded.
 	if !opts.Production {
-		lf := lockfile.FromPlan(plan, m)
+		lf := lockfile.FromPlan(plan, m, i.mavenBase)
 		if err := lf.Save(projectDir); err != nil {
 			// Non-fatal: warn but continue with the install.
 			fmt.Printf("warning: could not write lock file: %v\n", err)
@@ -873,11 +886,16 @@ func (i *Installer) InstallJar(dep manifest.JavaDependency) error {
 		return fmt.Errorf("cannot create jar file: %w", err)
 	}
 
-	url := dep.MavenURL()
+	url := dep.MavenURL(i.mavenBase)
 
-	// JavaDependency doesn't carry a checksum field today; pass "" to skip.
-	// JARs come from Maven Central anonymously — no repo auth.
-	if err := downloadAndVerify(url, dep.Checksum, dep.JarFileName(), f, "", "", "", nil, false); err != nil {
+	// If the JAR is served by a configured repository (a Maven mirror registered
+	// in repoAuth, GIS-365), apply that repo's auth headers — the same path FGL
+	// packages take via matchRepoAuth. With no mirror configured the URL is
+	// Maven Central, matchRepoAuth returns matched=false, and the download stays
+	// anonymous — byte-identical to the previous behavior. The GI/GitHub tokens
+	// are deliberately left empty: a JAR host must never receive the GI bearer.
+	repoHeaders, repoMatched := i.matchRepoAuth(url)
+	if err := downloadAndVerify(url, dep.Checksum, dep.JarFileName(), f, "", "", "", repoHeaders, repoMatched); err != nil {
 		f.Close()
 		os.Remove(dest)
 		return err
@@ -931,7 +949,7 @@ func (i *Installer) ReconcileAfterRemove(m *manifest.Manifest, projectDir string
 	// re-resolved graph, or delete it when that graph is now empty. Always
 	// safe regardless of prune — the lock is project-local wherever artifacts
 	// live.
-	lockNote, err := reconcileLock(plan, m, projectDir)
+	lockNote, err := reconcileLock(plan, m, projectDir, i.mavenBase)
 	if err != nil {
 		return nil, err
 	}
@@ -965,7 +983,7 @@ func (i *Installer) ReconcileAfterRemove(m *manifest.Manifest, projectDir string
 // empty fglpkg.lock is confusing (GIS-273). Otherwise the lock is rewritten
 // from the plan. Returns a human-readable note when the lock was deleted (for
 // the caller's summary), or "" when it was rewritten or absent.
-func reconcileLock(plan *resolver.Plan, m *manifest.Manifest, projectDir string) (string, error) {
+func reconcileLock(plan *resolver.Plan, m *manifest.Manifest, projectDir, mavenBase string) (string, error) {
 	if !lockfile.Exists(projectDir) {
 		return "", nil
 	}
@@ -975,7 +993,7 @@ func reconcileLock(plan *resolver.Plan, m *manifest.Manifest, projectDir string)
 		}
 		return lockfile.Filename + " (no dependencies remain)", nil
 	}
-	if err := lockfile.FromPlan(plan, m).Save(projectDir); err != nil {
+	if err := lockfile.FromPlan(plan, m, mavenBase).Save(projectDir); err != nil {
 		return "", fmt.Errorf("cannot write lock file: %w", err)
 	}
 	return "", nil
@@ -1310,6 +1328,12 @@ func downloadAndVerify(url, expectedChecksum, name string, w io.Writer, githubTo
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		return fmt.Errorf("HTTP 401 downloading %s: Not authorised — run 'fglpkg login' or set FGLPKG_TOKEN", name)
+	}
+	// Artifactory returns 403 (not 401) for a bad or missing credential on a
+	// protected repo; surface it as an auth failure rather than the generic
+	// message so a mis-scoped Maven mirror token is diagnosable (GIS-365).
+	if resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("HTTP 403 downloading %s from %s: Forbidden — check your credentials for this repository (run 'fglpkg login')", name, url)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d downloading %s from %s", resp.StatusCode, name, url)

@@ -2,9 +2,12 @@ package cli
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/config"
+	"github.com/4js-mikefolcher/fglpkg/internal/credentials"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 )
 
@@ -197,5 +200,158 @@ func TestCmdRegistryAdd_ArtifactoryRequiresRepoKey(t *testing.T) {
 	chdirTemp(t)
 	if err := cmdRegistryAdd([]string{"acme", "https://a"}); err == nil {
 		t.Fatal("expected error: artifactory type requires --repo-key")
+	}
+}
+
+// TestSplitArtifactoryURL covers the URL forms the repo-key inference accepts
+// and, just as importantly, the ones it must leave alone.
+func TestSplitArtifactoryURL(t *testing.T) {
+	for _, tc := range []struct {
+		in, base, key string
+	}{
+		// The pasted-URL case, with and without a trailing slash.
+		{"https://acme.jfrog.io/artifactory/GeneroBDL", "https://acme.jfrog.io/artifactory", "GeneroBDL"},
+		{"https://acme.jfrog.io/artifactory/GeneroBDL/", "https://acme.jfrog.io/artifactory", "GeneroBDL"},
+		// A reverse-proxy context path in front of /artifactory is preserved.
+		{"https://acme.example/repo/artifactory/GeneroBDL", "https://acme.example/repo/artifactory", "GeneroBDL"},
+		{"acme.jfrog.io/artifactory/GeneroBDL", "acme.jfrog.io/artifactory", "GeneroBDL"},
+		// Already a base URL → nothing to split.
+		{"https://acme.jfrog.io/artifactory", "https://acme.jfrog.io/artifactory", ""},
+		{"https://acme.jfrog.io/artifactory/", "https://acme.jfrog.io/artifactory/", ""},
+		{"https://acme.example", "https://acme.example", ""},
+		// No /artifactory segment: a single trailing segment is indistinguishable
+		// from a context path, so it stays part of the base URL.
+		{"https://acme.example/GeneroBDL", "https://acme.example/GeneroBDL", ""},
+		// Deeper paths and query/fragment-bearing pastes are not guessed at.
+		{"https://acme.jfrog.io/artifactory/api/storage/GeneroBDL", "https://acme.jfrog.io/artifactory/api/storage/GeneroBDL", ""},
+		{"https://acme.jfrog.io/artifactory/GeneroBDL?x=1", "https://acme.jfrog.io/artifactory/GeneroBDL?x=1", ""},
+	} {
+		base, key := splitArtifactoryURL(tc.in)
+		if base != tc.base || key != tc.key {
+			t.Errorf("splitArtifactoryURL(%q) = (%q, %q), want (%q, %q)", tc.in, base, key, tc.base, tc.key)
+		}
+	}
+}
+
+// TestParseRegistryAddFlags_RepoKeyFromURL locks in that a pasted repository URL
+// carries the repo key, that --repo-key remains available, and that the two
+// spellings produce the same descriptor.
+func TestParseRegistryAddFlags_RepoKeyFromURL(t *testing.T) {
+	f, err := parseRegistryAddFlags([]string{"acme", "https://acme.jfrog.io/artifactory/GeneroBDL"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if f.url != "https://acme.jfrog.io/artifactory" || f.repoKey != "GeneroBDL" || !f.repoKeyFromURL {
+		t.Fatalf("inferred flags = %+v", f)
+	}
+
+	// An agreeing --repo-key strips the key from the URL just the same, so the
+	// belt-and-braces spelling does not record a doubled-up base URL.
+	f, err = parseRegistryAddFlags([]string{"acme", "https://acme.jfrog.io/artifactory/GeneroBDL", "--repo-key", "GeneroBDL"})
+	if err != nil {
+		t.Fatalf("parse with agreeing --repo-key: %v", err)
+	}
+	if f.url != "https://acme.jfrog.io/artifactory" || f.repoKey != "GeneroBDL" || f.repoKeyFromURL {
+		t.Fatalf("explicit-key flags = %+v", f)
+	}
+
+	// A base URL plus --repo-key is untouched.
+	f, err = parseRegistryAddFlags([]string{"acme", "https://acme.jfrog.io/artifactory", "--repo-key", "GeneroBDL"})
+	if err != nil {
+		t.Fatalf("parse base URL: %v", err)
+	}
+	if f.url != "https://acme.jfrog.io/artifactory" || f.repoKey != "GeneroBDL" || f.repoKeyFromURL {
+		t.Fatalf("base-URL flags = %+v", f)
+	}
+
+	// A disagreeing --repo-key is a mistake, not a precedence question.
+	if _, err := parseRegistryAddFlags([]string{
+		"acme", "https://acme.jfrog.io/artifactory/GeneroBDL", "--repo-key", "Other",
+	}); err == nil {
+		t.Error("expected error when --repo-key disagrees with the URL")
+	}
+
+	// type=genero has no repo key, so the URL is never split.
+	f, err = parseRegistryAddFlags([]string{"gi", "https://acme.jfrog.io/artifactory/GeneroBDL", "--type", "genero"})
+	if err != nil {
+		t.Fatalf("parse genero: %v", err)
+	}
+	if f.url != "https://acme.jfrog.io/artifactory/GeneroBDL" || f.repoKey != "" {
+		t.Fatalf("genero flags = %+v", f)
+	}
+}
+
+// TestCmdRegistryAdd_PastedURLPersistsSplit is the end-to-end check: the written
+// config.json must hold the base URL and repoKey separately, exactly as if
+// --repo-key had been used.
+func TestCmdRegistryAdd_PastedURLPersistsSplit(t *testing.T) {
+	home := chdirTemp(t)
+	if err := cmdRegistryAdd([]string{"acme", "https://acme.jfrog.io/artifactory/GeneroBDL"}); err != nil {
+		t.Fatalf("registry add: %v", err)
+	}
+	g, err := config.LoadGlobalFile(home)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	r, ok := config.Find(g.Registries, "acme")
+	if !ok {
+		t.Fatalf("acme not persisted: %+v", g.Registries)
+	}
+	if r.URL != "https://acme.jfrog.io/artifactory" || r.RepoKey != "GeneroBDL" {
+		t.Fatalf("persisted registry = %+v", r)
+	}
+}
+
+// TestRegistryConfig_NeverContainsCredentials is the GIS-366 regression test for
+// the "config and credentials are separate files" guarantee: declaring a project
+// registry and then logging into it must write the secret only to
+// ~/.fglpkg/credentials.json — never into the committed fglpkg.json or the
+// machine-wide config.json. The Registry / GlobalFile structs carry no
+// secret-bearing fields, so this makes that structural fact a locked invariant.
+func TestRegistryConfig_NeverContainsCredentials(t *testing.T) {
+	home := chdirTemp(t)
+
+	// A committed project manifest declaring a bearer Artifactory registry.
+	m := manifest.New("app", "1.0.0", "", "")
+	if err := m.Save("."); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	if err := cmdRegistryAdd([]string{"acme", "https://a.example", "--repo-key", "K", "--project"}); err != nil {
+		t.Fatalf("registry add --project: %v", err)
+	}
+
+	// Log in to that registry — the secret must be persisted somewhere.
+	const secret = "super-secret-bearer-token-9f3a"
+	creds, err := credentials.Load(home)
+	if err != nil {
+		t.Fatalf("load creds: %v", err)
+	}
+	if err := loginToRegistry(home, creds, loginArgs{registry: "acme", token: secret}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	// It belongs in credentials.json …
+	credBytes, err := os.ReadFile(filepath.Join(home, "credentials.json"))
+	if err != nil {
+		t.Fatalf("read credentials.json: %v", err)
+	}
+	if !strings.Contains(string(credBytes), secret) {
+		t.Fatal("secret should be stored in credentials.json")
+	}
+
+	// … and NEVER in the committed manifest or the machine-wide config.
+	manifestBytes, err := os.ReadFile(manifest.Filename)
+	if err != nil {
+		t.Fatalf("read %s: %v", manifest.Filename, err)
+	}
+	if strings.Contains(string(manifestBytes), secret) {
+		t.Fatalf("secret leaked into %s", manifest.Filename)
+	}
+	// config.json need not exist (the registry went to the project file); if it
+	// does, it must not carry the secret either.
+	if cfgBytes, err := os.ReadFile(filepath.Join(home, config.GlobalFilename)); err == nil {
+		if strings.Contains(string(cfgBytes), secret) {
+			t.Fatal("secret leaked into config.json")
+		}
 	}
 }

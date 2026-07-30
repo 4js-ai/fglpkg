@@ -313,7 +313,7 @@ func TestReconcileLockDeletesLockWhenGraphEmpty(t *testing.T) {
 	writeStubLock(t, dir)
 
 	m := &manifest.Manifest{Name: "proj", Version: "0.1.0"}
-	note, err := reconcileLock(&resolver.Plan{}, m, dir)
+	note, err := reconcileLock(&resolver.Plan{}, m, dir, "")
 	if err != nil {
 		t.Fatalf("reconcileLock: %v", err)
 	}
@@ -338,7 +338,7 @@ func TestReconcileLockKeepsLockWhenGraphNonEmpty(t *testing.T) {
 			{Name: "keeper", Version: semver.MustParse("1.0.0"), Scope: manifest.ScopeProd},
 		},
 	}
-	note, err := reconcileLock(plan, m, dir)
+	note, err := reconcileLock(plan, m, dir, "")
 	if err != nil {
 		t.Fatalf("reconcileLock: %v", err)
 	}
@@ -362,7 +362,7 @@ func TestReconcileLockKeepsLockWhenGraphNonEmpty(t *testing.T) {
 func TestReconcileLockNoopWhenNoLock(t *testing.T) {
 	dir := t.TempDir()
 	m := &manifest.Manifest{Name: "proj", Version: "0.1.0"}
-	note, err := reconcileLock(&resolver.Plan{}, m, dir)
+	note, err := reconcileLock(&resolver.Plan{}, m, dir, "")
 	if err != nil {
 		t.Fatalf("reconcileLock: %v", err)
 	}
