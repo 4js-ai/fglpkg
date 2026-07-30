@@ -472,9 +472,13 @@ login".
   add <name> <url>         Add a repository descriptor (defaults to type=artifactory)
   remove <name> (rm)       Remove a configured repository
 
+<url> may be pasted with the Artifactory repo key still on the end
+(https://acme.jfrog.io/artifactory/GeneroBDL): the key is split off the URL and
+--repo-key is then optional.
+
 FLAGS (add):
   --type <t>               genero | artifactory (default artifactory)
-  --repo-key <k>           Artifactory generic-repo key (required for type=artifactory)
+  --repo-key <k>           Artifactory generic-repo key; optional when the URL already carries it
   --auth <scheme>          bearer | basic | apikey | anonymous (default bearer)
   --priority <n>           Lower is tried first; unique. Defaults to max+1 when omitted
   --packages <globs>       Comma-separated name-scope allow-list (e.g. 'acme-*,foo-*')

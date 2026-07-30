@@ -3253,19 +3253,22 @@ func cmdRegistry(args []string) error {
 
 // registryEditFlags carries the parsed flags for `registry add`.
 type registryEditFlags struct {
-	name     string
-	url      string
-	typ      string
-	repoKey  string
-	auth     string
-	priority *int // nil = unset (auto-assign); an explicit value (incl. 0) is validated
-	packages []string
-	project  bool // write to the project fglpkg.json instead of the global config
+	name           string
+	url            string
+	typ            string
+	repoKey        string
+	repoKeyFromURL bool // repoKey was split off the pasted URL, not given via --repo-key
+	auth           string
+	priority       *int // nil = unset (auto-assign); an explicit value (incl. 0) is validated
+	packages       []string
+	project        bool // write to the project fglpkg.json instead of the global config
 }
 
 const registryAddUsage = "usage: fglpkg registry add <name> <url> " +
 	"[--type genero|artifactory] [--repo-key K] [--auth bearer|basic|apikey|anonymous] " +
-	"[--priority N] [--packages 'acme-*,foo-*'] [--project]"
+	"[--priority N] [--packages 'acme-*,foo-*'] [--project]\n" +
+	"       <url> may include the Artifactory repo key (https://acme.jfrog.io/artifactory/GeneroBDL), " +
+	"in which case --repo-key is optional"
 
 func parseRegistryAddFlags(args []string) (registryEditFlags, error) {
 	f := registryEditFlags{typ: config.TypeArtifactory}
@@ -3323,7 +3326,72 @@ func parseRegistryAddFlags(args []string) (registryEditFlags, error) {
 		return f, fmt.Errorf("registry add needs exactly <name> and <url>\n%s", registryAddUsage)
 	}
 	f.name, f.url = positional[0], positional[1]
+	if err := f.resolveRepoKey(); err != nil {
+		return f, err
+	}
 	return f, nil
+}
+
+// resolveRepoKey lets the repository URL be pasted exactly as Artifactory shows
+// it — with the generic-repo key still on the end — so --repo-key is optional.
+// The key is split off the URL and the base URL keeps only the /artifactory
+// context path, which is what the provider joins its paths onto.
+//
+// --repo-key stays supported and, when it agrees with the URL, the pasted key is
+// still stripped so both spellings yield the same descriptor. A key that
+// disagrees with the URL is a mistake worth surfacing rather than silently
+// resolving one way.
+func (f *registryEditFlags) resolveRepoKey() error {
+	if f.typ != config.TypeArtifactory {
+		return nil
+	}
+	base, key := splitArtifactoryURL(f.url)
+	switch {
+	case key == "":
+		return nil
+	case f.repoKey == "":
+		f.url, f.repoKey, f.repoKeyFromURL = base, key, true
+	case f.repoKey == key:
+		f.url = base
+	default:
+		return fmt.Errorf(
+			"--repo-key %q disagrees with the repo key %q in the URL %s\n"+
+				"pass the base URL %s with --repo-key %s, or drop --repo-key to use %s",
+			f.repoKey, key, f.url, base, f.repoKey, key,
+		)
+	}
+	return nil
+}
+
+// splitArtifactoryURL splits a pasted Artifactory repository URL into its base
+// URL and generic-repo key, e.g.
+//
+//	https://acme.jfrog.io/artifactory/GeneroBDL
+//	→ ("https://acme.jfrog.io/artifactory", "GeneroBDL")
+//
+// The inference is deliberately narrow: the key is recognised only as the single
+// segment following the /artifactory context path, since that is the one place
+// Artifactory puts it. Everything else — a bare base URL, a deeper path such as
+// /artifactory/api/storage/GeneroBDL, or a URL carrying a query/fragment — is
+// returned unchanged with an empty key, leaving --repo-key required.
+func splitArtifactoryURL(rawURL string) (base, repoKey string) {
+	trimmed := strings.TrimRight(rawURL, "/")
+	if strings.ContainsAny(trimmed, "?#") {
+		return rawURL, ""
+	}
+	scheme, rest := "", trimmed
+	if i := strings.Index(trimmed, "://"); i >= 0 {
+		scheme, rest = trimmed[:i+3], trimmed[i+3:]
+	}
+	// segs[0] is the host, so a host plus /artifactory/<key> is the minimum.
+	segs := strings.Split(rest, "/")
+	if len(segs) < 3 || !strings.EqualFold(segs[len(segs)-2], "artifactory") {
+		return rawURL, ""
+	}
+	if key := segs[len(segs)-1]; key != "" {
+		return scheme + strings.Join(segs[:len(segs)-1], "/"), key
+	}
+	return rawURL, ""
 }
 
 // flagValue resolves either "--flag value" (advancing i) or "--flag=value".
@@ -3347,6 +3415,23 @@ func cmdRegistryAdd(args []string) error {
 	}
 	if f.name == config.GIName {
 		return fmt.Errorf("%q is the built-in registry and cannot be redefined", config.GIName)
+	}
+	// config.Resolve would reject this too, but from here the message can name
+	// both ways to supply the key. (parseRegistryAddFlags has already tried to
+	// split one off the URL.)
+	if f.typ == config.TypeArtifactory && f.repoKey == "" {
+		return fmt.Errorf(
+			"registry %q (type=artifactory) needs a generic-repo key: paste the full repository URL "+
+				"(e.g. https://acme.jfrog.io/artifactory/GeneroBDL) or add --repo-key K",
+			f.name,
+		)
+	}
+	// Surface a key taken from the URL, so the recorded base URL and repo key are
+	// visible without a follow-up 'registry list'.
+	noteRepoKeySplit := func() {
+		if f.repoKeyFromURL {
+			fmt.Printf("  Inferred repo key %q from the URL; base URL recorded as %s\n", f.repoKey, f.url)
+		}
 	}
 
 	home, err := fglpkgHome()
@@ -3408,6 +3493,7 @@ func cmdRegistryAdd(args []string) error {
 			return err
 		}
 		fmt.Printf("✓ Added registry %q to %s\n", f.name, manifest.Filename)
+		noteRepoKeySplit()
 		return nil
 	}
 
@@ -3424,6 +3510,7 @@ func cmdRegistryAdd(args []string) error {
 		return err
 	}
 	fmt.Printf("✓ Added registry %q to %s\n", f.name, filepath.Join(home, config.GlobalFilename))
+	noteRepoKeySplit()
 	if r.Auth != config.AuthAnonymous {
 		fmt.Printf("  Run 'fglpkg login --registry %s' to store credentials.\n", f.name)
 	}
