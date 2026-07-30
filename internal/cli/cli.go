@@ -542,6 +542,14 @@ func cmdInstall(args []string) error {
 	if flags.registry != "" && len(flags.pkgs) == 0 {
 		return fmt.Errorf("--registry requires a package to install (it pins that package's source repository)")
 	}
+	// --frozen asserts the lock is already correct, so anything that forces a
+	// re-resolve contradicts it.
+	if flags.frozen && len(flags.pkgs) > 0 {
+		return fmt.Errorf("--frozen cannot be combined with a package to install (adding a dependency requires re-resolving)")
+	}
+	if flags.frozen && flags.force {
+		return fmt.Errorf("--frozen and --force are mutually exclusive (--force re-resolves from scratch)")
+	}
 
 	// `fglpkg install <pkg>` in a directory that isn't yet a project (no
 	// .fglpkg/, no fglpkg.json) is treated as local: the add-package branch
@@ -583,7 +591,13 @@ func cmdInstall(args []string) error {
 		}
 	}
 
-	instOpts := installer.Options{Production: flags.production, NoManifestFallback: flags.noManifestFallback}
+	// Prune only ever applies to a project-local .fglpkg/ — a global home is
+	// shared across projects (the same rule `remove` follows).
+	instOpts := installer.Options{
+		Production:         flags.production,
+		NoManifestFallback: flags.noManifestFallback,
+		Prune:              isLocal && !flags.noPrune,
+	}
 
 	if len(flags.pkgs) == 0 {
 		m, err := manifest.Load(".")
@@ -595,6 +609,11 @@ func cmdInstall(args []string) error {
 		}
 		if flags.production {
 			fmt.Println("Installing in production mode (devDependencies will be skipped)")
+		}
+		if flags.frozen {
+			if err := checkFrozen(m, projectDir); err != nil {
+				return err
+			}
 		}
 		if err := runHook(m, manifest.HookPreInstall, projectDir); err != nil {
 			return err
@@ -696,6 +715,33 @@ func cmdInstall(args []string) error {
 		return err
 	}
 	return runHook(m, manifest.HookPostInstall, projectDir)
+}
+
+// checkFrozen enforces --frozen: the committed lock must already agree with
+// fglpkg.json, so a CI or deployment install can never quietly re-resolve to
+// versions other than the ones that were reviewed and committed. A missing or
+// stale lock is a hard error rather than a re-resolve.
+//
+// On-disk state is deliberately not consulted (both dir arguments empty): a
+// fresh checkout has nothing installed yet, which is precisely the case a
+// frozen install exists to serve. The Genero version is skipped too — a
+// runtime mismatch is a warning elsewhere, not lock staleness.
+func checkFrozen(m *manifest.Manifest, projectDir string) error {
+	if !lockfile.Exists(projectDir) {
+		return fmt.Errorf("--frozen requires a committed %s, but none was found.\n"+
+			"  Run 'fglpkg install' without --frozen to create one, then commit it.",
+			lockfile.Filename)
+	}
+	lf, err := lockfile.Load(projectDir)
+	if err != nil {
+		return fmt.Errorf("--frozen: cannot read %s: %w", lockfile.Filename, err)
+	}
+	if vr := lf.Validate(m, "", "", ""); vr.NeedsResolve() {
+		return fmt.Errorf("--frozen: %s is out of date with %s — %s.\n"+
+			"  Run 'fglpkg install' (or 'fglpkg update') and commit the updated lock.",
+			lockfile.Filename, manifest.Filename, vr.StaleReason())
+	}
+	return nil
 }
 
 // runHook executes any operations declared for event in the project's
@@ -835,6 +881,8 @@ type installFlags struct {
 	production         bool
 	noManifestFallback bool
 	noVerifySignature  bool
+	noPrune            bool // --no-prune: keep artifacts the graph no longer requires
+	frozen             bool // --frozen: fail instead of re-resolving a stale lock
 	scope              manifest.Scope
 	registry           string // --registry <name>: restrict resolution to one repo and pin it
 	pkgs               []string
@@ -864,6 +912,10 @@ func parseInstallFlags(args []string) (installFlags, error) {
 			f.noManifestFallback = true
 		case "--no-verify-signature":
 			f.noVerifySignature = true
+		case "--no-prune":
+			f.noPrune = true
+		case "--frozen", "--frozen-lockfile":
+			f.frozen = true
 		case "--save-dev", "-D":
 			devSeen = true
 			f.scope = manifest.ScopeDev
@@ -963,7 +1015,12 @@ func cmdUpdate(args []string) error {
 	if err != nil {
 		return err
 	}
-	home, _, err := resolveHome(flags.local, flags.global)
+	// --frozen pins the lock; update exists to move it. Refusing beats silently
+	// ignoring the flag.
+	if flags.frozen {
+		return fmt.Errorf("--frozen is not valid for 'update' (update re-resolves by design); use 'fglpkg install --frozen'")
+	}
+	home, isLocal, err := resolveHome(flags.local, flags.global)
 	if err != nil {
 		return err
 	}
@@ -973,7 +1030,11 @@ func cmdUpdate(args []string) error {
 	}
 	projectDir, _ := os.Getwd()
 	fmt.Println("Ignoring lock file and re-resolving all dependencies...")
-	instOpts := installer.Options{Production: flags.production, NoManifestFallback: flags.noManifestFallback}
+	instOpts := installer.Options{
+		Production:         flags.production,
+		NoManifestFallback: flags.noManifestFallback,
+		Prune:              isLocal && !flags.noPrune,
+	}
 	inst, rs := buildInstaller(home, m)
 
 	// --registry <name> restricts this re-resolution to a single repository
@@ -1077,10 +1138,24 @@ func cmdEnv(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Diagnostics go to STDERR, never stdout: this command's stdout is consumed
+	// by `eval "$(fglpkg env)"` and, under --gst, must stay a strict VAR=value
+	// list Genero Studio can parse. Emitting them here — after the switch —
+	// covers every output mode, --gst included.
+	printEnvWarnings(g)
 	for _, line := range exports {
 		fmt.Println(line)
 	}
 	return nil
+}
+
+// printEnvWarnings writes an env Generator's diagnostics (basename collisions
+// between installed packages, unusable `profile` declarations, over-long
+// values) to stderr.
+func printEnvWarnings(g *env.Generator) {
+	for _, w := range g.Warnings() {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
 }
 
 // cmdRelink rebuilds the derived, PACKAGE-correct merged FGLLDPATH root(s)
@@ -2312,12 +2387,24 @@ func stagePackage(stageDir string, m *manifest.Manifest) error {
 	if err := stageIncludeFiles(stageDir, m, staged); err != nil {
 		return err
 	}
+	// Unconditional: a webcomponent-only package may legitimately ship a
+	// profile too.
+	profilePaths, err := stageProfileFiles(stageDir, m, staged)
+	if err != nil {
+		return err
+	}
 
 	// Always write the manifest last, using a publish-safe copy so the shipped
 	// fglpkg.json omits devDependencies and reflects the post-strip layout.
 	// This is authoritative — it overwrites any file already staged at
 	// fglpkg.json rather than colliding.
 	pub := m.PublishCopy()
+	// Rewrite `profile` to the paths the files actually occupy in the archive.
+	// Author-side entries are relative to `root`, but stagePathFor strips
+	// importRoot — without this, a package with importRoot "lib" would ship
+	// "lib/profiles/x.4gp" in its manifest while the file sits at
+	// "profiles/x.4gp", and env's existence check would silently drop it.
+	pub.Profile = profilePaths
 	if err := recordGeneroPackages(pub, staged, m.Programs); err != nil {
 		return err
 	}
@@ -2550,6 +2637,50 @@ func stageIncludeFiles(stageDir string, m *manifest.Manifest, staged map[string]
 	return nil
 }
 
+// stageProfileFiles stages each declared `profile` file, resolved against the
+// package root and rebased under importRoot like any other packaged file.
+// It returns the staged archive paths in declaration order, for the shipped
+// manifest.
+//
+// Profiles are always shipped, even when the `files` globs don't match them and
+// even when .fglpkgignore would exclude them — the same rule as `bin`, for the
+// same reason: a declared profile that never reaches the archive is a silently
+// broken package. The default globs (*.42m/*.42f/*.sch) would never match a
+// profile, so without this a declared profile could not ship at all.
+func stageProfileFiles(stageDir string, m *manifest.Manifest, staged map[string]string) ([]string, error) {
+	if len(m.Profile) == 0 {
+		return nil, nil
+	}
+	root := m.Root
+	if root == "" {
+		root = "."
+	}
+	var archivePaths []string
+	for _, profilePath := range m.Profile {
+		fullPath := filepath.Join(root, profilePath)
+		info, err := os.Stat(fullPath)
+		if err != nil {
+			return nil, fmt.Errorf("profile file %q not found: %w", profilePath, err)
+		}
+		if info.IsDir() {
+			return nil, fmt.Errorf("profile file %q is a directory, not a file", profilePath)
+		}
+		relPath, relErr := filepath.Rel(".", fullPath)
+		if relErr != nil {
+			relPath = fullPath
+		}
+		archivePath, err := stagePathFor(m.ImportRoot, relPath)
+		if err != nil {
+			return nil, err
+		}
+		if err := stageFile(stageDir, archivePath, fullPath, staged); err != nil {
+			return nil, err
+		}
+		archivePaths = append(archivePaths, filepath.ToSlash(archivePath))
+	}
+	return archivePaths, nil
+}
+
 // stagePathFor returns the archive path for a packaged file, rebased under
 // importRoot when set. It errors if the file lies outside importRoot (which
 // would otherwise produce a "../" escape) — the caller must fix root/importRoot
@@ -2745,24 +2876,25 @@ func cmdBdl(args []string) error {
 	}
 	g := env.New(home)
 
-	fglldpath, err := g.BuildFGLLDPATH()
+	// Set every variable `fglpkg env` manages, not just FGLLDPATH/CLASSPATH:
+	// a program launched through `fglpkg bdl` must find its package's forms,
+	// schemas, images and profile too. Driving this off RawEnv/RawEnvOrder
+	// keeps the child environment in step with the shell output automatically.
+	raw, err := g.RawEnv()
 	if err != nil {
 		return err
 	}
-	classpath, err := g.BuildJavaClasspath()
-	if err != nil {
-		return err
-	}
+	printEnvWarnings(g)
 
-	// Merge with existing env values.
-	fglldpath = env.MergeEnvVar(fglldpath, os.Getenv("FGLLDPATH"))
-	classpath = env.MergeEnvVar(classpath, os.Getenv("CLASSPATH"))
-
-	// Build the full environment, replacing FGLLDPATH and CLASSPATH.
 	cmdEnv := os.Environ()
-	cmdEnv = setEnvVar(cmdEnv, "FGLLDPATH", fglldpath)
-	if classpath != "" {
-		cmdEnv = setEnvVar(cmdEnv, "CLASSPATH", classpath)
+	for _, key := range env.RawEnvOrder {
+		// MergeEnvVar puts the package paths first. For the search-path
+		// variables that means fglpkg's entries win; for FGLPROFILE, applied
+		// left to right with the last winning, it means the user's own profile
+		// still overrides a package's.
+		if merged := env.MergeEnvVar(raw[key], os.Getenv(key)); merged != "" {
+			cmdEnv = setEnvVar(cmdEnv, key, merged)
+		}
 	}
 
 	// Execute fglrun.
@@ -3182,19 +3314,22 @@ func cmdRegistry(args []string) error {
 
 // registryEditFlags carries the parsed flags for `registry add`.
 type registryEditFlags struct {
-	name     string
-	url      string
-	typ      string
-	repoKey  string
-	auth     string
-	priority *int // nil = unset (auto-assign); an explicit value (incl. 0) is validated
-	packages []string
-	project  bool // write to the project fglpkg.json instead of the global config
+	name           string
+	url            string
+	typ            string
+	repoKey        string
+	repoKeyFromURL bool // repoKey was split off the pasted URL, not given via --repo-key
+	auth           string
+	priority       *int // nil = unset (auto-assign); an explicit value (incl. 0) is validated
+	packages       []string
+	project        bool // write to the project fglpkg.json instead of the global config
 }
 
 const registryAddUsage = "usage: fglpkg registry add <name> <url> " +
 	"[--type genero|artifactory] [--repo-key K] [--auth bearer|basic|apikey|anonymous] " +
-	"[--priority N] [--packages 'acme-*,foo-*'] [--project]"
+	"[--priority N] [--packages 'acme-*,foo-*'] [--project]\n" +
+	"       <url> may include the Artifactory repo key (https://acme.jfrog.io/artifactory/GeneroBDL), " +
+	"in which case --repo-key is optional"
 
 func parseRegistryAddFlags(args []string) (registryEditFlags, error) {
 	f := registryEditFlags{typ: config.TypeArtifactory}
@@ -3252,7 +3387,72 @@ func parseRegistryAddFlags(args []string) (registryEditFlags, error) {
 		return f, fmt.Errorf("registry add needs exactly <name> and <url>\n%s", registryAddUsage)
 	}
 	f.name, f.url = positional[0], positional[1]
+	if err := f.resolveRepoKey(); err != nil {
+		return f, err
+	}
 	return f, nil
+}
+
+// resolveRepoKey lets the repository URL be pasted exactly as Artifactory shows
+// it — with the generic-repo key still on the end — so --repo-key is optional.
+// The key is split off the URL and the base URL keeps only the /artifactory
+// context path, which is what the provider joins its paths onto.
+//
+// --repo-key stays supported and, when it agrees with the URL, the pasted key is
+// still stripped so both spellings yield the same descriptor. A key that
+// disagrees with the URL is a mistake worth surfacing rather than silently
+// resolving one way.
+func (f *registryEditFlags) resolveRepoKey() error {
+	if f.typ != config.TypeArtifactory {
+		return nil
+	}
+	base, key := splitArtifactoryURL(f.url)
+	switch {
+	case key == "":
+		return nil
+	case f.repoKey == "":
+		f.url, f.repoKey, f.repoKeyFromURL = base, key, true
+	case f.repoKey == key:
+		f.url = base
+	default:
+		return fmt.Errorf(
+			"--repo-key %q disagrees with the repo key %q in the URL %s\n"+
+				"pass the base URL %s with --repo-key %s, or drop --repo-key to use %s",
+			f.repoKey, key, f.url, base, f.repoKey, key,
+		)
+	}
+	return nil
+}
+
+// splitArtifactoryURL splits a pasted Artifactory repository URL into its base
+// URL and generic-repo key, e.g.
+//
+//	https://acme.jfrog.io/artifactory/GeneroBDL
+//	→ ("https://acme.jfrog.io/artifactory", "GeneroBDL")
+//
+// The inference is deliberately narrow: the key is recognised only as the single
+// segment following the /artifactory context path, since that is the one place
+// Artifactory puts it. Everything else — a bare base URL, a deeper path such as
+// /artifactory/api/storage/GeneroBDL, or a URL carrying a query/fragment — is
+// returned unchanged with an empty key, leaving --repo-key required.
+func splitArtifactoryURL(rawURL string) (base, repoKey string) {
+	trimmed := strings.TrimRight(rawURL, "/")
+	if strings.ContainsAny(trimmed, "?#") {
+		return rawURL, ""
+	}
+	scheme, rest := "", trimmed
+	if i := strings.Index(trimmed, "://"); i >= 0 {
+		scheme, rest = trimmed[:i+3], trimmed[i+3:]
+	}
+	// segs[0] is the host, so a host plus /artifactory/<key> is the minimum.
+	segs := strings.Split(rest, "/")
+	if len(segs) < 3 || !strings.EqualFold(segs[len(segs)-2], "artifactory") {
+		return rawURL, ""
+	}
+	if key := segs[len(segs)-1]; key != "" {
+		return scheme + strings.Join(segs[:len(segs)-1], "/"), key
+	}
+	return rawURL, ""
 }
 
 // flagValue resolves either "--flag value" (advancing i) or "--flag=value".
@@ -3276,6 +3476,23 @@ func cmdRegistryAdd(args []string) error {
 	}
 	if f.name == config.GIName {
 		return fmt.Errorf("%q is the built-in registry and cannot be redefined", config.GIName)
+	}
+	// config.Resolve would reject this too, but from here the message can name
+	// both ways to supply the key. (parseRegistryAddFlags has already tried to
+	// split one off the URL.)
+	if f.typ == config.TypeArtifactory && f.repoKey == "" {
+		return fmt.Errorf(
+			"registry %q (type=artifactory) needs a generic-repo key: paste the full repository URL "+
+				"(e.g. https://acme.jfrog.io/artifactory/GeneroBDL) or add --repo-key K",
+			f.name,
+		)
+	}
+	// Surface a key taken from the URL, so the recorded base URL and repo key are
+	// visible without a follow-up 'registry list'.
+	noteRepoKeySplit := func() {
+		if f.repoKeyFromURL {
+			fmt.Printf("  Inferred repo key %q from the URL; base URL recorded as %s\n", f.repoKey, f.url)
+		}
 	}
 
 	home, err := fglpkgHome()
@@ -3337,6 +3554,7 @@ func cmdRegistryAdd(args []string) error {
 			return err
 		}
 		fmt.Printf("✓ Added registry %q to %s\n", f.name, manifest.Filename)
+		noteRepoKeySplit()
 		return nil
 	}
 
@@ -3353,6 +3571,7 @@ func cmdRegistryAdd(args []string) error {
 		return err
 	}
 	fmt.Printf("✓ Added registry %q to %s\n", f.name, filepath.Join(home, config.GlobalFilename))
+	noteRepoKeySplit()
 	if r.Auth != config.AuthAnonymous {
 		fmt.Printf("  Run 'fglpkg login --registry %s' to store credentials.\n", f.name)
 	}

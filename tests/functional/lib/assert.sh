@@ -24,6 +24,19 @@ assert_match() {  # extended-regex match against $output (or $2)
 }
 assert_eq() { [[ "$1" == "$2" ]] || { _diag "expected equal: [$1] == [$2]"; return 1; }; }
 
+# --- path content (separator-agnostic) ---
+# Write the needle with forward slashes; both it and the haystack are normalised
+# before comparing, so one assertion covers the POSIX (a/b) and Windows (a\b)
+# rendering of the same path.
+assert_contains_path() {
+  local needle="${1//\\//}" hay="${2-$output}"
+  assert_contains "$needle" "${hay//\\//}"
+}
+assert_not_contains_path() {
+  local needle="${1//\\//}" hay="${2-$output}"
+  assert_not_contains "$needle" "${hay//\\//}"
+}
+
 # --- filesystem ---
 assert_file()     { [[ -f "$1" ]] || { _diag "file not found: $1"; return 1; }; }
 assert_dir()      { [[ -d "$1" ]] || { _diag "dir not found: $1"; return 1; }; }
