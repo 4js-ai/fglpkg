@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/4js-mikefolcher/fglpkg/internal/config"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 )
 
@@ -190,6 +191,36 @@ func TestValidateBinValid(t *testing.T) {
 	if err := m.Validate(); err != nil {
 		t.Fatalf("unexpected validation error: %v", err)
 	}
+}
+
+func TestValidateMavenMirror(t *testing.T) {
+	base := func(mm *config.MavenMirror) *manifest.Manifest {
+		return &manifest.Manifest{Name: "test", Version: "1.0.0", MavenMirror: mm}
+	}
+	t.Run("valid bearer mirror", func(t *testing.T) {
+		m := base(&config.MavenMirror{URL: "https://art.example/artifactory/libs", Auth: config.AuthBearer})
+		if err := m.Validate(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+	t.Run("empty auth defaults through", func(t *testing.T) {
+		m := base(&config.MavenMirror{URL: "https://art.example/artifactory/libs"})
+		if err := m.Validate(); err != nil {
+			t.Fatalf("unexpected error for empty auth: %v", err)
+		}
+	})
+	t.Run("empty url rejected", func(t *testing.T) {
+		m := base(&config.MavenMirror{URL: "  ", Auth: config.AuthBearer})
+		if err := m.Validate(); err == nil {
+			t.Fatal("expected error for empty mavenMirror url, got nil")
+		}
+	})
+	t.Run("unknown auth scheme rejected", func(t *testing.T) {
+		m := base(&config.MavenMirror{URL: "https://art.example/artifactory/libs", Auth: "token"})
+		if err := m.Validate(); err == nil {
+			t.Fatal("expected error for unknown mavenMirror auth, got nil")
+		}
+	})
 }
 
 func TestValidateRejectsSelfDependency(t *testing.T) {

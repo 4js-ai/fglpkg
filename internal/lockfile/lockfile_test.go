@@ -49,7 +49,7 @@ func makeRoot() *manifest.Manifest {
 // ─── FromPlan ────────────────────────────────────────────────────────────────
 
 func TestFromPlanPackageCount(t *testing.T) {
-	lf := lockfile.FromPlan(makePlan(), makeRoot())
+	lf := lockfile.FromPlan(makePlan(), makeRoot(), "")
 	if len(lf.Packages) != 2 {
 		t.Errorf("expected 2 packages, got %d", len(lf.Packages))
 	}
@@ -59,7 +59,7 @@ func TestFromPlanPackageCount(t *testing.T) {
 }
 
 func TestFromPlanPackagesSortedByName(t *testing.T) {
-	lf := lockfile.FromPlan(makePlan(), makeRoot())
+	lf := lockfile.FromPlan(makePlan(), makeRoot(), "")
 	for i := 1; i < len(lf.Packages); i++ {
 		if lf.Packages[i].Name < lf.Packages[i-1].Name {
 			t.Errorf("packages not sorted: %s before %s",
@@ -69,7 +69,7 @@ func TestFromPlanPackagesSortedByName(t *testing.T) {
 }
 
 func TestFromPlanJARsSortedByKey(t *testing.T) {
-	lf := lockfile.FromPlan(makePlan(), makeRoot())
+	lf := lockfile.FromPlan(makePlan(), makeRoot(), "")
 	for i := 1; i < len(lf.JARs); i++ {
 		if lf.JARs[i].Key < lf.JARs[i-1].Key {
 			t.Errorf("JARs not sorted: %s before %s",
@@ -79,7 +79,7 @@ func TestFromPlanJARsSortedByKey(t *testing.T) {
 }
 
 func TestFromPlanPreservesChecksums(t *testing.T) {
-	lf := lockfile.FromPlan(makePlan(), makeRoot())
+	lf := lockfile.FromPlan(makePlan(), makeRoot(), "")
 	byName := make(map[string]lockfile.LockedPackage)
 	for _, p := range lf.Packages {
 		byName[p.Name] = p
@@ -90,7 +90,7 @@ func TestFromPlanPreservesChecksums(t *testing.T) {
 }
 
 func TestFromPlanGeneroVersion(t *testing.T) {
-	lf := lockfile.FromPlan(makePlan(), makeRoot())
+	lf := lockfile.FromPlan(makePlan(), makeRoot(), "")
 	if lf.GeneroVersion != "4.01.12" {
 		t.Errorf("GeneroVersion = %q, want %q", lf.GeneroVersion, "4.01.12")
 	}
@@ -98,7 +98,7 @@ func TestFromPlanGeneroVersion(t *testing.T) {
 
 func TestFromPlanRootManifest(t *testing.T) {
 	root := makeRoot()
-	lf := lockfile.FromPlan(makePlan(), root)
+	lf := lockfile.FromPlan(makePlan(), root, "")
 	if lf.RootManifest.Name != root.Name {
 		t.Errorf("RootManifest.Name = %q, want %q", lf.RootManifest.Name, root.Name)
 	}
@@ -108,7 +108,7 @@ func TestFromPlanRootManifest(t *testing.T) {
 }
 
 func TestFromPlanJARDownloadURL(t *testing.T) {
-	lf := lockfile.FromPlan(makePlan(), makeRoot())
+	lf := lockfile.FromPlan(makePlan(), makeRoot(), "")
 	for _, jar := range lf.JARs {
 		if jar.DownloadURL == "" {
 			t.Errorf("JAR %s has empty DownloadURL", jar.Key)
@@ -125,11 +125,30 @@ func TestFromPlanJARDownloadURL(t *testing.T) {
 	}
 }
 
+// TestFromPlanJARMirrorURL verifies that a non-empty mirror base is baked into
+// each locked JAR's DownloadURL (GIS-365), so the pinned URL replays through the
+// same Maven mirror rather than public Maven Central.
+func TestFromPlanJARMirrorURL(t *testing.T) {
+	const base = "https://artifactory.acme.example/artifactory/libs-release"
+	lf := lockfile.FromPlan(makePlan(), makeRoot(), base)
+	for _, jar := range lf.JARs {
+		if jar.ArtifactID == "gson" {
+			want := base + "/com/google/code/gson/gson/2.10.1/gson-2.10.1.jar"
+			if jar.DownloadURL != want {
+				t.Errorf("gson DownloadURL = %q, want mirror URL %q", jar.DownloadURL, want)
+			}
+		}
+		if !strings.HasPrefix(jar.DownloadURL, base+"/") {
+			t.Errorf("JAR %s DownloadURL = %q, want prefix %q", jar.Key, jar.DownloadURL, base)
+		}
+	}
+}
+
 // ─── Save / Load round-trip ──────────────────────────────────────────────────
 
 func TestSaveAndLoad(t *testing.T) {
 	dir := t.TempDir()
-	original := lockfile.FromPlan(makePlan(), makeRoot())
+	original := lockfile.FromPlan(makePlan(), makeRoot(), "")
 
 	if err := original.Save(dir); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -158,7 +177,7 @@ func TestSaveAndLoad(t *testing.T) {
 
 func TestSaveProducesValidJSON(t *testing.T) {
 	dir := t.TempDir()
-	lf := lockfile.FromPlan(makePlan(), makeRoot())
+	lf := lockfile.FromPlan(makePlan(), makeRoot(), "")
 	if err := lf.Save(dir); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -186,7 +205,7 @@ func TestExists(t *testing.T) {
 	if lockfile.Exists(dir) {
 		t.Error("Exists() should be false before Save()")
 	}
-	lf := lockfile.FromPlan(makePlan(), makeRoot())
+	lf := lockfile.FromPlan(makePlan(), makeRoot(), "")
 	lf.Save(dir) //nolint:errcheck
 	if !lockfile.Exists(dir) {
 		t.Error("Exists() should be true after Save()")
@@ -198,7 +217,7 @@ func TestExists(t *testing.T) {
 func TestValidateClean(t *testing.T) {
 	dir := t.TempDir()
 	root := makeRoot()
-	lf := lockfile.FromPlan(makePlan(), root)
+	lf := lockfile.FromPlan(makePlan(), root, "")
 	lf.Save(dir) //nolint:errcheck
 
 	result := lf.Validate(root, "4.01.12", "", "")
@@ -214,7 +233,7 @@ func TestValidateClean(t *testing.T) {
 
 func TestValidateGeneroMismatch(t *testing.T) {
 	root := makeRoot()
-	lf := lockfile.FromPlan(makePlan(), root) // locked at 4.01.12
+	lf := lockfile.FromPlan(makePlan(), root, "") // locked at 4.01.12
 
 	result := lf.Validate(root, "3.20.05", "", "") // now running 3.20
 	if result.GeneroMismatch == nil {
@@ -234,7 +253,7 @@ func TestValidateGeneroMismatch(t *testing.T) {
 
 func TestValidateManifestNameMismatch(t *testing.T) {
 	root := makeRoot()
-	lf := lockfile.FromPlan(makePlan(), root)
+	lf := lockfile.FromPlan(makePlan(), root, "")
 
 	changedRoot := makeRoot()
 	changedRoot.Name = "otherapp"
@@ -250,7 +269,7 @@ func TestValidateManifestNameMismatch(t *testing.T) {
 
 func TestValidateManifestVersionMismatch(t *testing.T) {
 	root := makeRoot()
-	lf := lockfile.FromPlan(makePlan(), root)
+	lf := lockfile.FromPlan(makePlan(), root, "")
 
 	changedRoot := makeRoot()
 	changedRoot.Version = "2.0.0"
@@ -267,7 +286,7 @@ func TestValidateManifestVersionMismatch(t *testing.T) {
 func TestValidateMissingPackages(t *testing.T) {
 	dir := t.TempDir()
 	root := makeRoot()
-	lf := lockfile.FromPlan(makePlan(), root)
+	lf := lockfile.FromPlan(makePlan(), root, "")
 
 	// packagesDir exists but is empty — all packages are "missing"
 	result := lf.Validate(root, "4.01.12", dir, "")
@@ -280,7 +299,7 @@ func TestValidateMissingPackages(t *testing.T) {
 func TestValidatePresentPackages(t *testing.T) {
 	dir := t.TempDir()
 	root := makeRoot()
-	lf := lockfile.FromPlan(makePlan(), root)
+	lf := lockfile.FromPlan(makePlan(), root, "")
 
 	// Create stub package directories to simulate a successful install.
 	for _, pkg := range lf.Packages {
@@ -295,7 +314,7 @@ func TestValidatePresentPackages(t *testing.T) {
 
 func TestValidateSchemaVersionMismatch(t *testing.T) {
 	root := makeRoot()
-	lf := lockfile.FromPlan(makePlan(), root)
+	lf := lockfile.FromPlan(makePlan(), root, "")
 	lf.Version = 99 // future/unknown schema
 
 	result := lf.Validate(root, "4.01.12", "", "")
@@ -310,7 +329,7 @@ func TestValidateSchemaVersionMismatch(t *testing.T) {
 // ─── ToInstallList ────────────────────────────────────────────────────────────
 
 func TestToInstallList(t *testing.T) {
-	lf := lockfile.FromPlan(makePlan(), makeRoot())
+	lf := lockfile.FromPlan(makePlan(), makeRoot(), "")
 	pkgs, jars, wcs := lf.ToInstallList()
 
 	if len(pkgs) != 2 {
@@ -345,7 +364,7 @@ func TestFromPlanCarriesScope(t *testing.T) {
 			"g:dev-jar":  manifest.ScopeDev,
 		},
 	}
-	lf := lockfile.FromPlan(plan, makeRoot())
+	lf := lockfile.FromPlan(plan, makeRoot(), "")
 	want := map[string]string{"a": "", "b": "dev", "c": "optional"}
 	for _, p := range lf.Packages {
 		if got := want[p.Name]; p.Scope != got {
@@ -384,7 +403,7 @@ func TestFilterForProduction(t *testing.T) {
 			"g:j2": manifest.ScopeDev,
 		},
 	}
-	lf := lockfile.FromPlan(plan, makeRoot())
+	lf := lockfile.FromPlan(plan, makeRoot(), "")
 	pkgs, jars, _ := lf.FilterForProduction()
 
 	if len(pkgs) != 2 {
@@ -416,7 +435,7 @@ func TestAddManifestJARs(t *testing.T) {
 		{GroupID: "g", ArtifactID: "existing", Version: "1.0.0"},
 	}
 
-	if !lf.AddManifestJARs(deps) {
+	if !lf.AddManifestJARs(deps, "") {
 		t.Fatal("AddManifestJARs should report an addition")
 	}
 	if len(lf.JARs) != 2 {
@@ -431,7 +450,7 @@ func TestAddManifestJARs(t *testing.T) {
 	}
 
 	// Idempotent: re-adding the same coordinate is a no-op.
-	if lf.AddManifestJARs(deps) {
+	if lf.AddManifestJARs(deps, "") {
 		t.Error("second AddManifestJARs call should report no additions")
 	}
 }
