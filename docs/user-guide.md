@@ -643,6 +643,17 @@ If no Genero version can be detected (no `fglcomp`, no `$FGLDIR`, no override), 
 runs — every result shows `?` and the header explains how to set the version. Results from
 secondary (non-GI) repositories are not graded and always show `?`.
 
+When you have [secondary repositories](#secondary-repositories-jfrog-artifactory) configured,
+`fglpkg search` fans out to all of them by default. Scope it to a single source with
+`--registry <name>` — matching the flag `install`, `update`, and `publish` already accept:
+
+```bash
+$ fglpkg search json --registry acme      # only the "acme" registry; results still source-tagged
+```
+
+An unknown or unconfigured registry name is a hard error (it lists the configured names), the
+same way `install --registry` behaves.
+
 ## Publishing a Package
 
 ### Package Structure
@@ -1634,7 +1645,7 @@ declared, so they resolve from the intended repository automatically. A pin in
 your own `fglpkg.json` always overrides a package's declared pin.
 
 `fglpkg search <term>` fans out to every configured repository and tags each
-result with its source repo.
+result with its source repo; add `--registry <name>` to scope the search to one.
 
 ### 4. Publish packages
 

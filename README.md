@@ -259,6 +259,7 @@ eval "$(fglpkg env --global)"
 | `docs` | No | Glob patterns for documentation files to include (e.g., `["README.md", "docs/**/*.md"]`) |
 | `dependencies.fgl` | No | BDL production package dependencies. Each value is either a version-constraint string (`"^1.0.0"`) or an object pinning the source repository: `{ "version": "^1.0.0", "registry": "acme" }` (see [Secondary Package Repositories](#secondary-package-repositories-jfrog-artifactory)) |
 | `dependencies.java` | No | Java JAR production dependencies (Maven coordinates) |
+| `mavenMirror` | No | Route JAR downloads through an internal Maven mirror (e.g. a JFrog Artifactory Maven repo) instead of Maven Central: `{ "url": "…", "auth": "bearer" }`. A per-dependency `url` still wins. See [Routing JARs through an internal Maven mirror](docs/user-guide.md#routing-jars-through-an-internal-maven-mirror) |
 | `registries` | No | Additional package repositories (e.g. a JFrog Artifactory instance) consulted alongside the built-in GI registry. See [Secondary Package Repositories](#secondary-package-repositories-jfrog-artifactory) |
 | `defaultRegistry` | No | Name of the repository `fglpkg publish` targets when no `--registry` is given (publish-only; does not affect where packages are consumed from) |
 | `devDependencies` | No | Test / tooling deps (fgl + java), skipped with `--production` |
@@ -276,6 +277,7 @@ eval "$(fglpkg env --global)"
 | `FGLPKG_REGISTRY` | GI registry URL — used by `install`, `search`, `audit`, `info`, `outdated`, `whoami`, `login`, `publish`. Default: `https://service.generointelligence.ai` |
 | `FGLPKG_TOKEN` | Bearer token for the **GI** registry. Takes precedence over stored OAuth/PAT credentials, and cannot be cleared by `fglpkg logout` (unset it to fully log out). Does not authenticate secondary repositories |
 | `FGLPKG_PUBLISH_REGISTRY` | Name of the repository `fglpkg publish` targets when no `--registry` is given. Overrides the manifest's `defaultRegistry`. See [Secondary Package Repositories](#secondary-package-repositories-jfrog-artifactory) |
+| `FGLPKG_MAVEN_URL` | Base URL of a Maven mirror for JAR downloads (replaces `https://repo1.maven.org/maven2`). Highest-precedence override of the `mavenMirror` config; a per-dependency `url` still wins |
 | `FGLPKG_GENERO_VERSION` | Override Genero version detection |
 | `FGLPKG_INSTALL_CONCURRENCY` | Cap parallel downloads during install (default 4) |
 | `FGLPKG_SIGNING` | Layer 1 signature enforcement: `require`, `warn`, or `off`. Overrides `signing.enforce` in `config.json` |
@@ -377,6 +379,7 @@ fglpkg search --all                      # List every package in the registry
                                          #   a STATUS column appears only when a match is
                                          #   deprecated, e.g. "chart-3d  1.2.3  deprecated -> chart-3d-ng  3D charts"
 fglpkg search json --genero 4.01         # Grade results against a specific Genero version
+fglpkg search json --registry acme       # Search only one configured registry (results stay source-tagged)
 fglpkg audit signatures                  # Verify registry signatures of locked packages
 fglpkg bdl <pkg> <module> [args...]      # Run a BDL program from a package
 fglpkg bdl --list                        # List available BDL programs

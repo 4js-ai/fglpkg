@@ -48,8 +48,8 @@ project root, drives every fglpkg operation:
 |---|---|
 | `fglpkg install` | The dependency graph (`dependencies`, `devDependencies`, `optionalDependencies`) to resolve, lock, and download. |
 | `fglpkg install <pkg>` / `fglpkg remove` | The manifest is rewritten in place to record the change. |
-| `fglpkg pack` / `fglpkg publish` | Identity (`name`, `version`), the file-selection rules (`root`, `importRoot`, `files`, `include`, `docs`, `bin`), and registry metadata (`description`, `license`, `repository`, `author`, `visibility`, `keywords`). |
-| `fglpkg env` | Combined with the lock file to build `FGLLDPATH` / `CLASSPATH`. |
+| `fglpkg pack` / `fglpkg publish` | Identity (`name`, `version`), the file-selection rules (`root`, `importRoot`, `files`, `include`, `docs`, `bin`, `profile`), and registry metadata (`description`, `license`, `repository`, `author`, `visibility`, `keywords`). |
+| `fglpkg env` | Combined with the lock file to build `FGLLDPATH` / `CLASSPATH` and the resource paths (`FGLRESOURCEPATH`, `FGLDBPATH`, `FGLIMAGEPATH`, `FGLPROFILE`). |
 | `fglpkg bdl` | The list of runnable `programs`. |
 | Install/publish lifecycle | The declarative `hooks` to run around each event. |
 | Registry search & `fglpkg info` | `description`, `author`, `license`, `repository`. (`keywords` is advisory only — not currently matched by `fglpkg search`.) |
@@ -373,6 +373,24 @@ the package root, e.g. `{ "migrate": "scripts/migrate.sh" }`. Rules:
   `.fglpkgignore` pattern would otherwise exclude them — dropping a declared
   script would silently break the package. Scripts are marked executable on
   install.
+
+#### `profile` — array of string
+Genero **configuration files** (`FGLPROFILE` entries) this package ships, as
+paths **relative to `root`**, e.g. `["profiles/poiapi.4gp"]`. These are file
+paths — **not** glob patterns and **not** directories.
+
+- Declared profiles are **always** included in the published archive, even when
+  the `files` globs would not match them (the default globs never do). A declared
+  profile that cannot be found fails `pack` fast, because a profile missing from
+  the archive would silently break the installed package.
+- After install, `fglpkg env` puts each shipped file on **`FGLPROFILE`** *ahead
+  of* any existing value. Genero applies `FGLPROFILE` entries left to right with
+  the **last one winning**, so a project- or user-level profile still overrides a
+  package's defaults. (`fglpkg env` emits packages back-to-front so this ordering
+  holds across scopes — see the [user guide](user-guide.md#profile).)
+- On publish, the shipped manifest's `profile` paths are rewritten to their
+  archive-relative form so the installed copy resolves.
+- Entries must be unique.
 
 ### 6.5 Dependencies
 
@@ -823,6 +841,7 @@ authority (see [§5](#5-parsing--validation-rules)).
 | `include` | string[] | No | Extra files folded into the archive root by basename. |
 | `docs` | string[] | No | Globs of docs to package (no default). |
 | `bin` | map | No | Command name → script path. |
+| `profile` | string[] | No | `FGLPROFILE` config files to ship; always packed, placed ahead of any existing `FGLPROFILE`. |
 | `dependencies` | bucket | No | Production deps (`fgl` + `java`). |
 | `devDependencies` | bucket | No | Dev-only deps; not transitive; stripped on publish. |
 | `optionalDependencies` | bucket | No | Best-effort deps; failure warns. |
