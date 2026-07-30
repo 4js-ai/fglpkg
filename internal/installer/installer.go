@@ -344,7 +344,7 @@ func (i *Installer) InstallAllWithOptions(m *manifest.Manifest, projectDir strin
 			if err := lf.CheckRegistries(i.configuredRegistries); err != nil {
 				return err
 			}
-			vr := lf.Validate(m, gv.String(), i.packagesDir, i.webcomponentsDir)
+			vr := lf.Validate(m, gv.String(), i.packagesDir, i.webcomponentsDir, i.jarsDir)
 			if vr.NeedsResolve() {
 				fmt.Printf("Lock file is stale (%v) — re-resolving...\n", vr.ManifestMismatch)
 			} else {

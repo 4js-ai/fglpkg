@@ -403,6 +403,10 @@ type ValidationResult struct {
 	// MissingWebcomponents lists webcomponent packages in the lock whose
 	// install does not appear under the webcomponents directory.
 	MissingWebcomponents []string
+
+	// MissingJARs lists the keys ("groupId:artifactId") of locked Java JARs
+	// whose file is absent from the jars directory.
+	MissingJARs []string
 }
 
 // IsClean returns true when there are no errors or mismatches at all.
@@ -411,7 +415,8 @@ func (vr *ValidationResult) IsClean() bool {
 		vr.GeneroMismatch == nil &&
 		vr.ManifestMismatch == nil &&
 		len(vr.MissingPackages) == 0 &&
-		len(vr.MissingWebcomponents) == 0
+		len(vr.MissingWebcomponents) == 0 &&
+		len(vr.MissingJARs) == 0
 }
 
 // NeedsResolve returns true when a full re-resolution is required before
@@ -451,9 +456,10 @@ func (e *ManifestMismatchError) Error() string {
 
 // Validate checks whether the lock file is consistent with the current
 // environment and manifest. currentGenero may be "" to skip that check.
-// packagesDir / webcomponentsDir are used to check which BDL and webcomponent
-// installs are actually present on disk; pass "" to skip either check.
-func (lf *LockFile) Validate(root *manifest.Manifest, currentGenero, packagesDir, webcomponentsDir string) *ValidationResult {
+// packagesDir / webcomponentsDir / jarsDir are used to check which BDL
+// installs, webcomponent installs and Java JARs are actually present on disk;
+// pass "" to skip any of those checks.
+func (lf *LockFile) Validate(root *manifest.Manifest, currentGenero, packagesDir, webcomponentsDir, jarsDir string) *ValidationResult {
 	result := &ValidationResult{}
 
 	// Schema version check.
@@ -507,6 +513,21 @@ func (lf *LockFile) Validate(root *manifest.Manifest, currentGenero, packagesDir
 			entries, err := os.ReadDir(webcomponentsDir)
 			if err != nil || len(entries) == 0 {
 				result.MissingWebcomponents = append(result.MissingWebcomponents, wc.Name)
+			}
+		}
+	}
+
+	// JAR presence check — a locked JAR lands in jarsDir under the same
+	// artifactId-version.jar name the installer writes, so a deleted or
+	// never-fetched JAR is detectable by a plain stat.
+	if jarsDir != "" {
+		for _, jar := range lf.JARs {
+			dep := manifest.JavaDependency{
+				GroupID: jar.GroupID, ArtifactID: jar.ArtifactID, Version: jar.Version,
+			}
+			path := filepath.Join(jarsDir, dep.JarFileName())
+			if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+				result.MissingJARs = append(result.MissingJARs, jar.Key)
 			}
 		}
 	}
