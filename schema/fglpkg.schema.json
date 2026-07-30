@@ -156,6 +156,10 @@
     "defaultRegistry": {
       "type": "string",
       "description": "Name of the repository that `fglpkg publish` targets when no --registry flag is given (and FGLPKG_PUBLISH_REGISTRY is unset). Lets a team that publishes to their own Artifactory avoid passing --registry every time. Omit (or use \"gi\") to publish to the Genero Intelligence registry. Publish-only: does not affect which repository packages are consumed from."
+    },
+    "mavenMirror": {
+      "$ref": "#/definitions/mavenMirror",
+      "description": "Maven repository (typically a JFrog Artifactory Maven remote/virtual repo) that replaces Maven Central as the source for Java/JAR downloads. Committed with the project so teammates fetch JARs from the team mirror on clone; credentials stay per-developer in ~/.fglpkg/credentials.json. Overridden by FGLPKG_MAVEN_URL; overrides the global config.json mavenMirror. Omit to use public Maven Central. A per-dependency \"url\" still overrides the mirror."
     }
   },
   "definitions": {
@@ -308,6 +312,23 @@
       },
       "if": { "properties": { "type": { "const": "artifactory" } } },
       "then": { "required": ["repoKey"] }
+    },
+    "mavenMirror": {
+      "type": "object",
+      "description": "A Maven mirror descriptor for JAR downloads. Carries no secrets — credentials live in ~/.fglpkg/credentials.json, keyed by url.",
+      "additionalProperties": false,
+      "required": ["url"],
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "Base URL of the Maven repository serving the standard Maven2 layout, e.g. \"https://artifactory.acme.example/artifactory/libs-release\". Replaces \"https://repo1.maven.org/maven2\" as the JAR download base."
+        },
+        "auth": {
+          "type": "string",
+          "enum": ["bearer", "basic", "apikey", "anonymous"],
+          "description": "Authentication scheme used against the mirror. Defaults to \"bearer\"."
+        }
+      }
     }
   }
 }

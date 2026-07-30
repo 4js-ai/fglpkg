@@ -125,6 +125,14 @@ type Manifest struct {
 	// time. Empty ("" or "gi") preserves the default of publishing to GI. This
 	// is a publish-only default; it does not bias consume-side routing.
 	DefaultRegistry string `json:"defaultRegistry,omitempty"`
+	// MavenMirror, when set, reroutes Java/JAR downloads from Maven Central to
+	// the given Maven repository (typically a JFrog Artifactory Maven
+	// remote/virtual repo). Committed with the project so teammates fetch JARs
+	// from the team mirror on clone; credentials stay per-developer in
+	// ~/.fglpkg/credentials.json. Overridden by FGLPKG_MAVEN_URL; overrides the
+	// global config.json mavenMirror. nil preserves the default (Maven Central).
+	// See specs/artifactory-secondary-repository.md (GIS-365).
+	MavenMirror *config.MavenMirror `json:"mavenMirror,omitempty"`
 }
 
 // HasWebcomponents reports whether the manifest declares one or more
@@ -399,10 +407,19 @@ type JavaDependency struct {
 	URL string `json:"url,omitempty"`
 }
 
-// MavenURL returns the Maven Central download URL for this JAR.
-func (j JavaDependency) MavenURL() string {
+// MavenURL returns the download URL for this JAR. The per-dependency URL
+// override wins outright; otherwise the standard Maven2 layout is built against
+// mirrorBase. An empty mirrorBase falls back to public Maven Central
+// (config.DefaultMavenBase), so callers that pass "" get today's behavior
+// unchanged. An Artifactory Maven repo serves the identical Maven2 layout, so
+// only the base differs (GIS-365).
+func (j JavaDependency) MavenURL(mirrorBase string) string {
 	if j.URL != "" {
 		return j.URL
+	}
+	base := strings.TrimRight(mirrorBase, "/")
+	if base == "" {
+		base = config.DefaultMavenBase
 	}
 	// Convert groupId dots to slashes for the URL path
 	groupPath := ""
@@ -418,8 +435,8 @@ func (j JavaDependency) MavenURL() string {
 		jar = fmt.Sprintf("%s-%s.jar", j.ArtifactID, j.Version)
 	}
 	return fmt.Sprintf(
-		"https://repo1.maven.org/maven2/%s/%s/%s/%s",
-		groupPath, j.ArtifactID, j.Version, jar,
+		"%s/%s/%s/%s/%s",
+		base, groupPath, j.ArtifactID, j.Version, jar,
 	)
 }
 
@@ -809,6 +826,24 @@ func (m *Manifest) Validate() error {
 					"java dependency missing required fields (groupId, artifactId, version): %+v", dep,
 				)
 			}
+		}
+	}
+	// A mavenMirror block must carry a URL and a recognised auth scheme.
+	// Without this, an empty url is silently ignored (JARs quietly fall back
+	// to Maven Central) and a typo'd auth (e.g. "token") downgrades to
+	// anonymous — surfacing later as a confusing 403 even when logged in.
+	if m.MavenMirror != nil {
+		if strings.TrimSpace(m.MavenMirror.URL) == "" {
+			return fmt.Errorf("mavenMirror requires a non-empty 'url'")
+		}
+		switch m.MavenMirror.Auth {
+		case "", config.AuthBearer, config.AuthBasic, config.AuthAPIKey, config.AuthAnonymous:
+			// ok — empty defaults to bearer downstream
+		default:
+			return fmt.Errorf(
+				"mavenMirror has unknown auth %q (expected bearer|basic|apikey|anonymous)",
+				m.MavenMirror.Auth,
+			)
 		}
 	}
 	for cmd, scriptPath := range m.Bin {

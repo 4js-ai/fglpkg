@@ -1198,7 +1198,7 @@ func searchDeprecatedStatus(deprecated bool, movedTo string) string {
 }
 
 func cmdSearch(args []string) error {
-	term, all, generoFlag, err := parseSearchArgs(args)
+	term, all, generoFlag, reg, err := parseSearchArgs(args)
 	if err != nil {
 		return err
 	}
@@ -1219,7 +1219,14 @@ func cmdSearch(args []string) error {
 		m = mm
 	}
 	if rs, _, _, rErr := buildRepositorySet(home, m); rErr == nil && rs != nil {
-		return searchAcrossProviders(rs, term, all, target)
+		return searchAcrossProviders(rs, term, all, target, reg)
+	}
+
+	// Single-registry (only the built-in GI repository is configured). --registry
+	// gi is a harmless no-op; any other name cannot be honoured — mirror the
+	// install/update UX exactly (cli.go cmdUpdate).
+	if reg != "" && reg != config.GIName {
+		return fmt.Errorf("--registry %q: no repository named %q is configured (add it to fglpkg.json or ~/.fglpkg/config.json)", reg, reg)
 	}
 
 	results, err := registry.Search(term)
@@ -1402,7 +1409,25 @@ func printSearchTable(rows []searchRow, target *genero.Version, showSource bool)
 // FetchInfo, so those rows render "-"/"?" (unknown). On a name collision the
 // constraint (like the version/description) comes from the highest-priority
 // source. The columns match the single-registry search layout.
-func searchAcrossProviders(rs *provider.RepositorySet, term string, all bool, target *genero.Version) error {
+func searchAcrossProviders(rs *provider.RepositorySet, term string, all bool, target *genero.Version, restrict string) error {
+	// A --registry <name> scopes the fan-out to a single repository. Search
+	// queries providers directly (it does not route through RepositorySet.route),
+	// so the restriction is applied here by filtering the provider loop; validate
+	// the name up front and error like the routing layer does for an unknown pin.
+	if restrict != "" {
+		found := false
+		names := make([]string, 0, len(rs.Providers()))
+		for _, p := range rs.Providers() {
+			names = append(names, p.Name())
+			if p.Name() == restrict {
+				found = true
+			}
+		}
+		if !found {
+			return fmt.Errorf("--registry %q: no repository named %q is configured.\n"+
+				"  Configured registries: %s", restrict, restrict, strings.Join(names, ", "))
+		}
+	}
 	// Gather in provider priority order so the first-seen version/description
 	// for a colliding name comes from the highest-priority repository.
 	type merged struct {
@@ -1417,6 +1442,9 @@ func searchAcrossProviders(rs *provider.RepositorySet, term string, all bool, ta
 	var order []string
 	byName := map[string]*merged{}
 	for _, p := range rs.Providers() {
+		if restrict != "" && p.Name() != restrict {
+			continue
+		}
 		rr, err := p.Search(term)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: search in %q failed: %v\n", p.Name(), err)
@@ -1483,11 +1511,12 @@ func searchAcrossProviders(rs *provider.RepositorySet, term string, all bool, ta
 	return nil
 }
 
-// parseSearchArgs returns the keyword term, the --all flag, and an optional
-// --genero <version> override used to grade result compatibility. Errors on
-// `search` with no args + no --all (the historical "missing keyword" error),
-// and on conflicting `search --all <term>`.
-func parseSearchArgs(args []string) (term string, all bool, generoFlag string, err error) {
+// parseSearchArgs returns the keyword term, the --all flag, an optional
+// --genero <version> override used to grade result compatibility, and an
+// optional --registry <name> that scopes the search to a single repository.
+// Errors on `search` with no args + no --all (the historical "missing keyword"
+// error), and on conflicting `search --all <term>`.
+func parseSearchArgs(args []string) (term string, all bool, generoFlag string, registry string, err error) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -1495,29 +1524,40 @@ func parseSearchArgs(args []string) (term string, all bool, generoFlag string, e
 			all = true
 		case a == "--genero":
 			if i+1 >= len(args) {
-				return "", false, "", fmt.Errorf("--genero requires a version argument (e.g. --genero 4.01)")
+				return "", false, "", "", fmt.Errorf("--genero requires a version argument (e.g. --genero 4.01)")
 			}
 			i++
 			generoFlag = args[i]
 		case strings.HasPrefix(a, "--genero="):
 			generoFlag = strings.TrimPrefix(a, "--genero=")
 			if generoFlag == "" {
-				return "", false, "", fmt.Errorf("--genero requires a version argument (e.g. --genero 4.01)")
+				return "", false, "", "", fmt.Errorf("--genero requires a version argument (e.g. --genero 4.01)")
+			}
+		case a == "--registry":
+			if i+1 >= len(args) {
+				return "", false, "", "", fmt.Errorf("--registry requires a value")
+			}
+			i++
+			registry = args[i]
+		case strings.HasPrefix(a, "--registry="):
+			registry = strings.TrimPrefix(a, "--registry=")
+			if registry == "" {
+				return "", false, "", "", fmt.Errorf("--registry requires a value")
 			}
 		default:
 			if term != "" {
-				return "", false, "", fmt.Errorf("unexpected extra argument %q", a)
+				return "", false, "", "", fmt.Errorf("unexpected extra argument %q", a)
 			}
 			term = a
 		}
 	}
 	if all && term != "" {
-		return "", false, "", fmt.Errorf("--all and <term> are mutually exclusive")
+		return "", false, "", "", fmt.Errorf("--all and <term> are mutually exclusive")
 	}
 	if !all && term == "" {
-		return "", false, "", fmt.Errorf("usage: fglpkg search <term>   |   fglpkg search --all")
+		return "", false, "", "", fmt.Errorf("usage: fglpkg search <term>   |   fglpkg search --all")
 	}
-	return term, all, generoFlag, nil
+	return term, all, generoFlag, registry, nil
 }
 
 // ─── publish ──────────────────────────────────────────────────────────────────
@@ -3490,18 +3530,39 @@ func cmdRegistryList() error {
 	if m, err := manifest.Load("."); err == nil {
 		projRegs = m.Registries
 	}
-	regs, err := config.Load(home, os.Getenv("FGLPKG_REGISTRY"), projRegs)
+	fglpkgRegistry := os.Getenv("FGLPKG_REGISTRY")
+	regs, err := config.Load(home, fglpkgRegistry, projRegs)
 	if err != nil {
 		return err
 	}
 	creds, _ := credentials.Load(home)
+	source := registrySources(home, fglpkgRegistry, projRegs)
 
-	fmt.Printf("%-16s %-12s %-4s %-9s %-6s %s\n", "NAME", "TYPE", "PRIO", "AUTH", "LOGIN", "URL")
+	fmt.Printf("%-16s %-12s %-4s %-9s %-6s %-7s %s\n", "NAME", "TYPE", "PRIO", "AUTH", "LOGIN", "SOURCE", "URL")
 	for _, r := range regs {
-		fmt.Printf("%-16s %-12s %-4d %-9s %-6s %s\n",
-			r.Name, r.Type, r.Priority, r.Auth, registryLoginStatus(creds, r), r.URL)
+		fmt.Printf("%-16s %-12s %-4d %-9s %-6s %-7s %s\n",
+			r.Name, r.Type, r.Priority, r.Auth, registryLoginStatus(creds, r), source[r.Name], r.URL)
 	}
 	return nil
+}
+
+// registrySources maps each registry name to the config layer that ultimately
+// defined it, using the same increasing-precedence order as config.Resolve:
+// built-in GI ("builtin") ⊕ the machine-wide config.json ("global") ⊕ the
+// project fglpkg.json ("project"), later wins. It lets `registry list` show
+// which entries came from the committed project config vs. a per-user machine.
+func registrySources(home, fglpkgRegistry string, projRegs []config.Registry) map[string]string {
+	src := map[string]string{}
+	src[config.BuiltinGI(fglpkgRegistry).Name] = "builtin"
+	if global, err := config.LoadGlobal(home); err == nil {
+		for _, r := range global {
+			src[r.Name] = "global"
+		}
+	}
+	for _, r := range projRegs {
+		src[r.Name] = "project"
+	}
+	return src
 }
 
 // registryLoginStatus reports whether usable credentials exist for a registry.
@@ -4086,6 +4147,9 @@ ENVIRONMENT:
                            stored login; cannot be cleared by 'fglpkg logout'.
   FGLPKG_PUBLISH_REGISTRY  Name of the repository 'fglpkg publish' targets when no
                            --registry is given (overrides fglpkg.json defaultRegistry)
+  FGLPKG_MAVEN_URL         Maven mirror base URL for JAR downloads (e.g. a JFrog
+                           Artifactory Maven repo). Overrides fglpkg.json/config.json
+                           mavenMirror. Default: https://repo1.maven.org/maven2
   FGLPKG_GENERO_VERSION    Override Genero version detection
   FGLPKG_INSTALL_CONCURRENCY  Cap parallel downloads during install (default 4)
 
@@ -4136,11 +4200,43 @@ func buildInstaller(home string, m *manifest.Manifest) (*installer.Installer, *p
 	registryToken, _ := credentials.ActiveBearer(context.Background(), globalHome, registryURL, oauth.Refresh)
 	inst := installer.New(home, githubToken, registryToken, registryURL)
 
+	// Resolve the Maven mirror (GIS-365): env FGLPKG_MAVEN_URL → project
+	// fglpkg.json → global config.json. When set, JAR downloads reroute to it
+	// (WithMavenBase) and its URL prefix is registered in repoAuth so downloads
+	// carry credentials via matchRepoAuth — independent of whether any secondary
+	// FGL registry is configured (Tyler may pull FGL packages from GI but JARs
+	// from Artifactory).
+	mavenBase, mavenAuth := resolveMavenMirror(globalHome, m)
+	var mirrorAuth []installer.RepoAuth
+	if mavenBase != "" {
+		inst = inst.WithMavenBase(mavenBase)
+		creds, _ := credentials.Load(globalHome)
+		var headers map[string]string
+		if creds != nil {
+			// Resolve the mirror credential by URL prefix, not exact key: a
+			// login to the enclosing Artifactory base (".../artifactory") must
+			// cover a mirror nested under it (".../artifactory/<repo>"), since
+			// `fglpkg login` keys credentials by the registry base, not the
+			// mirror URL (GIS-365).
+			headers = creds.AuthHeadersForURL(mavenBase, mavenAuth)
+		}
+		// Only register a mirror auth entry when it actually carries
+		// credentials. An empty entry would shadow a broader registry
+		// credential whose prefix already covers the mirror URL, because
+		// matchRepoAuth picks the longest-prefix match regardless of whether it
+		// has headers. JAR downloads never receive the GI bearer (InstallJar
+		// passes it empty), so no anonymous placeholder is needed here.
+		if len(headers) > 0 {
+			mirrorAuth = []installer.RepoAuth{{URLPrefix: mavenBase, Headers: headers}}
+		}
+	}
+
 	// Engage multi-provider routing only when repositories beyond the built-in
 	// GI registry are configured — otherwise the single-registry path stays
 	// byte-identical (no Source stamped in the lockfile).
 	var set *provider.RepositorySet
-	if rs, repoAuth, regNames, err := buildRepositorySet(globalHome, m); err != nil {
+	rs, repoAuth, regNames, err := buildRepositorySet(globalHome, m)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: ignoring registries config: %v\n", err)
 	} else {
 		// Record the configured names in every case (even single-registry) so a
@@ -4148,8 +4244,14 @@ func buildInstaller(home string, m *manifest.Manifest) (*installer.Installer, *p
 		inst = inst.WithConfiguredRegistries(regNames)
 		if rs != nil {
 			set = rs
-			inst = inst.WithFetchers(rs.Versions, rs.Info).WithRepoAuth(repoAuth).WithPinDeclarer(rs)
+			inst = inst.WithFetchers(rs.Versions, rs.Info).WithPinDeclarer(rs)
 		}
+	}
+	// Attach download auth: the secondary FGL repos (if any) plus the Maven
+	// mirror. Skipped entirely when neither is present, keeping the pure-GI path
+	// byte-identical.
+	if repoAuth = append(repoAuth, mirrorAuth...); len(repoAuth) > 0 {
+		inst = inst.WithRepoAuth(repoAuth)
 	}
 
 	// Layer 1 signature verification. The keys manifest is cached in the
@@ -4259,6 +4361,35 @@ func resolveDefaultPublishRegistry(home string, m *manifest.Manifest) string {
 		return v
 	}
 	return ""
+}
+
+// resolveMavenMirror returns the Maven mirror base URL and its auth scheme for
+// JAR downloads (GIS-365), in decreasing precedence: FGLPKG_MAVEN_URL, the
+// project manifest's mavenMirror, then the global config's mavenMirror. Returns
+// ("", "") when none is set — the caller then fetches JARs from public Maven
+// Central anonymously, exactly as before. The env var overrides only the URL;
+// the auth scheme comes from whichever config object supplied a mirror
+// (defaulting to bearer), since a bare URL carries no scheme.
+func resolveMavenMirror(home string, m *manifest.Manifest) (base, authScheme string) {
+	// Establish the configured mirror (manifest wins over global) first, so its
+	// auth scheme survives even when the env var overrides just the URL.
+	var mm *config.MavenMirror
+	if m != nil && m.MavenMirror != nil && strings.TrimSpace(m.MavenMirror.URL) != "" {
+		mm = m.MavenMirror
+	} else if g, err := config.GlobalMavenMirror(home); err == nil && g != nil && strings.TrimSpace(g.URL) != "" {
+		mm = g
+	}
+	if mm != nil {
+		base = strings.TrimRight(strings.TrimSpace(mm.URL), "/")
+		authScheme = mm.Auth
+	}
+	if v := strings.TrimSpace(os.Getenv("FGLPKG_MAVEN_URL")); v != "" {
+		base = strings.TrimRight(v, "/")
+	}
+	if base != "" && authScheme == "" {
+		authScheme = config.AuthBearer
+	}
+	return base, authScheme
 }
 
 func parsePackageArg(arg string) (name, version string, err error) {

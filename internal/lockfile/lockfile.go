@@ -212,8 +212,10 @@ type LockedJAR struct {
 
 // FromPlan builds a LockFile from a resolved Plan and the root manifest.
 // Packages with variant "webcomponent" land in the Webcomponents array;
-// everything else lands in Packages.
-func FromPlan(plan *resolver.Plan, root *manifest.Manifest) *LockFile {
+// everything else lands in Packages. mavenBase is the resolved Maven mirror
+// base ("" for public Maven Central) recorded into each JAR's DownloadURL so
+// the pinned URL replays through the same source (GIS-365).
+func FromPlan(plan *resolver.Plan, root *manifest.Manifest, mavenBase string) *LockFile {
 	pkgs := make([]LockedPackage, 0, len(plan.Packages))
 	wcs := make([]LockedWebcomponent, 0)
 	for _, p := range plan.Packages {
@@ -267,7 +269,7 @@ func FromPlan(plan *resolver.Plan, root *manifest.Manifest) *LockFile {
 			GroupID:     dep.GroupID,
 			ArtifactID:  dep.ArtifactID,
 			Version:     dep.Version,
-			DownloadURL: dep.MavenURL(),
+			DownloadURL: dep.MavenURL(mavenBase),
 			Checksum:    dep.Checksum,
 			Scope:       scopeLockString(plan.JARScopes[dep.Key()]),
 		})
@@ -303,8 +305,9 @@ func normalizeSource(source string) string {
 // "manifest". Coordinates already present (by key) are left untouched, so an
 // entry the resolver already recorded is never downgraded to manifest-sourced.
 // The list is re-sorted by key so diffs stay stable. Returns true if at least
-// one new entry was added.
-func (lf *LockFile) AddManifestJARs(deps []manifest.JavaDependency) bool {
+// one new entry was added. mavenBase is the resolved Maven mirror base ("" for
+// public Maven Central) baked into each new JAR's DownloadURL (GIS-365).
+func (lf *LockFile) AddManifestJARs(deps []manifest.JavaDependency, mavenBase string) bool {
 	existing := make(map[string]bool, len(lf.JARs))
 	for _, j := range lf.JARs {
 		existing[j.Key] = true
@@ -319,7 +322,7 @@ func (lf *LockFile) AddManifestJARs(deps []manifest.JavaDependency) bool {
 			GroupID:     dep.GroupID,
 			ArtifactID:  dep.ArtifactID,
 			Version:     dep.Version,
-			DownloadURL: dep.MavenURL(),
+			DownloadURL: dep.MavenURL(mavenBase),
 			Checksum:    dep.Checksum,
 			Source:      "manifest",
 		})
