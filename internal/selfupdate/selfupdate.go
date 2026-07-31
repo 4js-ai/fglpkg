@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -74,6 +75,23 @@ func Run(opts Options) error {
 			return errors.New("this registry does not provide fglpkg release information yet")
 		}
 		return fmt.Errorf("could not check for updates: %w", err)
+	}
+	// Scope is latest-stable only. The endpoint contract says `version` is the
+	// latest STABLE release, but enforce it client-side too: if the server ever
+	// serves an rc, semver ordering would rank it newer and self-update would
+	// happily install it. Checked BEFORE --check and --force so neither can slip
+	// a pre-release past the scope. Advisory, not an error — the tool is working
+	// as designed, there is simply nothing installable.
+	lv, lerr := semver.Parse(lr.Version)
+	switch {
+	case lerr != nil:
+		fmt.Fprintf(opts.Stdout, "The registry reported %q as the latest version, which is not a valid release number; nothing to install.\n", lr.Version)
+		fmt.Fprintf(opts.Stdout, "fglpkg is up to date (v%s)\n", opts.Current)
+		return nil
+	case lv.PreRelease != "":
+		fmt.Fprintf(opts.Stdout, "The registry's latest release (%s) is a pre-release; self-update installs stable releases only.\n", lr.Version)
+		fmt.Fprintf(opts.Stdout, "fglpkg is up to date (v%s)\n", opts.Current)
+		return nil
 	}
 	isNewer := versionNewer(opts.Current, lr.Version)
 	if opts.Check {
@@ -204,12 +222,17 @@ func managedBy(exePath string) string {
 	return ""
 }
 
-// versionNewer reports whether latest is a newer release than current.
-// Unparseable versions are treated as not newer (fail safe).
+// versionNewer reports whether latest is a newer STABLE release than current.
+// Unparseable versions are treated as not newer (fail safe), and so is a
+// pre-release: latest-stable-only is the documented scope, so an rc is never an
+// upgrade target no matter how semver orders it.
 func versionNewer(current, latest string) bool {
 	c, err1 := semver.Parse(current)
 	l, err2 := semver.Parse(latest)
 	if err1 != nil || err2 != nil {
+		return false
+	}
+	if l.PreRelease != "" {
 		return false
 	}
 	return l.GreaterThan(c)
@@ -229,11 +252,50 @@ func recoveryErr(lr *registry.LatestRelease, msg string) error {
 	return errors.New(b.String())
 }
 
+// Bounds on the network step. self-update is a foreground, security-sensitive
+// command fetching attacker-influenceable *content* (not trust anchors), so a
+// slow or hostile server must not be able to hang it forever or hand it an
+// unbounded body. Vars, not consts, so tests can shrink them.
+var (
+	// metaTimeout covers a whole metadata exchange: checksums.txt, its
+	// signature, and keys.json are all a few KB, so 30s is generous.
+	metaTimeout = 30 * time.Second
+	// downloadTimeout bounds the binary download. Generous — a ~20 MB binary on
+	// a poor link is legitimate — but not unbounded.
+	downloadTimeout = 15 * time.Minute
+	// maxMetaBytes caps the small signed-metadata reads.
+	maxMetaBytes int64 = 1 << 20 // 1 MiB
+	// maxBinaryBytes caps the download so a broken or hostile server cannot fill
+	// the disk. Well above any real fglpkg binary; overshoot would fail the
+	// SHA-256 gate anyway, but the disk should never get there.
+	maxBinaryBytes int64 = 512 << 20 // 512 MiB
+)
+
+// newTransport returns a transport with per-phase timeouts, so a stalled dial,
+// handshake, or missing response header fails fast independently of the overall
+// client deadline. ForceAttemptHTTP2 is required because setting DialContext
+// disables the automatic HTTP/2 upgrade http.DefaultTransport would have done.
+func newTransport() *http.Transport {
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+}
+
 // fetchURL GETs url and returns the body, erroring on a non-2xx status. Used for
 // release assets on GitHub (not registry endpoints), so it is unauthenticated
-// and follows redirects (http.DefaultClient default).
+// and follows redirects (the client default). The read is capped at
+// maxMetaBytes: an oversized body is rejected rather than truncated, because a
+// silently truncated checksums file deserves a clear error, not a confusing
+// downstream signature failure.
 func fetchURL(url string) ([]byte, error) {
-	resp, err := http.Get(url)
+	client := &http.Client{Timeout: metaTimeout, Transport: newTransport()}
+	resp, err := client.Get(url)
 	if err != nil {
 		return nil, err
 	}
@@ -241,12 +303,20 @@ func fetchURL(url string) ([]byte, error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxMetaBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxMetaBytes {
+		return nil, fmt.Errorf("response exceeds the %d-byte limit for release metadata", maxMetaBytes)
+	}
+	return data, nil
 }
 
-// downloadTo streams url into w.
+// downloadTo streams url into w, bounded by downloadTimeout and maxBinaryBytes.
 func downloadTo(w io.Writer, url string) error {
-	resp, err := http.Get(url)
+	client := &http.Client{Timeout: downloadTimeout, Transport: newTransport()}
+	resp, err := client.Get(url)
 	if err != nil {
 		return err
 	}
@@ -254,6 +324,12 @@ func downloadTo(w io.Writer, url string) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	_, err = io.Copy(w, resp.Body)
-	return err
+	n, err := io.Copy(w, io.LimitReader(resp.Body, maxBinaryBytes+1))
+	if err != nil {
+		return err
+	}
+	if n > maxBinaryBytes {
+		return fmt.Errorf("download exceeds the %d-byte limit", maxBinaryBytes)
+	}
+	return nil
 }

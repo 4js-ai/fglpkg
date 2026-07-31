@@ -110,8 +110,8 @@ installed them.
 
 ### Update notices
 
-fglpkg also tells you, passively, when a newer version is out. At most once every 24 hours,
-after a command finishes, it prints a short notice to standard error:
+fglpkg also tells you, passively, when a newer version is out. After a command finishes, it
+prints a short notice to standard error:
 
 ```
 ─────────────────────────────────────────────
@@ -120,9 +120,11 @@ after a command finishes, it prints a short notice to standard error:
 ─────────────────────────────────────────────
 ```
 
-The check runs in the background and never blocks your command, changes its exit code, or
-reports network errors. It is automatically silent for `dev` builds, in CI, and when output is
-piped or redirected (not an interactive terminal).
+The notice appears on every command while a newer release is known, and comes from a remembered
+answer — so it is instant and works offline. fglpkg asks the registry at most once every 24 hours,
+in the background, and that refresh never blocks your command, changes its exit code, or reports
+network errors. The whole feature is automatically silent for `dev` builds, in CI, and when output
+is piped or redirected (not an interactive terminal).
 
 To turn it off, set `FGLPKG_NO_UPDATE_CHECK=1`, or configure it in `~/.fglpkg/config.json`:
 

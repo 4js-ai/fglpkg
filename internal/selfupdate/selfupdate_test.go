@@ -149,6 +149,11 @@ func TestVersionNewer(t *testing.T) {
 	if versionNewer("dev", "3.9.0") {
 		t.Error("unparseable current should be treated as not-newer")
 	}
+	// Latest-stable-only is the scope: an rc is never an upgrade target, even
+	// though semver orders 3.9.0-rc1 above 3.8.0.
+	if versionNewer("3.8.0", "3.9.0-rc1") {
+		t.Error("a pre-release must not count as newer")
+	}
 }
 
 func TestRecoveryErr(t *testing.T) {
@@ -297,5 +302,162 @@ func TestRunUpToDateAndCheck(t *testing.T) {
 func TestRunRefusesDevBuild(t *testing.T) {
 	if err := Run(Options{Current: "dev", Stdout: &bytes.Buffer{}}); err == nil {
 		t.Error("dev build must refuse self-update")
+	}
+}
+
+// TestRunRefusesPreRelease pins issue #21 item 7: if the endpoint ever serves a
+// pre-release as `latest`, self-update must not install it — not even with
+// --force, which only overrides the already-latest check.
+func TestRunRefusesPreRelease(t *testing.T) {
+	rootPriv, rootPub := keyFromSeed(0x01)
+	_, workPub := keyFromSeed(0x02)
+	keysJSON := signedManifest(t, rootPriv, "root-1", "work-1", workPub)
+	srv := releaseServer(t, "3.9.0-rc1", nil, nil, nil, keysJSON)
+	defer srv.Close()
+	t.Setenv("FGLPKG_REGISTRY", srv.URL)
+
+	exe := filepath.Join(t.TempDir(), "fglpkg")
+	if err := os.WriteFile(exe, []byte("OLD"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	roots := []signing.Root{{KeyID: "root-1", PubB64: rootPub}}
+	now := time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)
+
+	for _, tc := range []struct {
+		name string
+		opts Options
+	}{
+		{"plain", Options{Current: "3.8.0", Yes: true}},
+		{"force", Options{Current: "3.8.0", Yes: true, Force: true}},
+		{"check", Options{Current: "3.8.0", Check: true}},
+	} {
+		var out bytes.Buffer
+		opts := tc.opts
+		opts.Stdout = &out
+		opts.exePath = exe
+		opts.roots = roots
+		opts.now = now
+		if err := Run(opts); err != nil {
+			t.Errorf("%s: Run: %v", tc.name, err)
+			continue
+		}
+		if !strings.Contains(out.String(), "pre-release") {
+			t.Errorf("%s: expected a pre-release explanation, got %q", tc.name, out.String())
+		}
+		if got, _ := os.ReadFile(exe); string(got) != "OLD" {
+			t.Errorf("%s: binary must be untouched, got %q", tc.name, got)
+		}
+	}
+}
+
+// TestRunRejectsUnparseableLatest: a garbage `version` is reported as unusable
+// rather than as a pre-release, and nothing is installed.
+func TestRunRejectsUnparseableLatest(t *testing.T) {
+	rootPriv, rootPub := keyFromSeed(0x01)
+	_, workPub := keyFromSeed(0x02)
+	keysJSON := signedManifest(t, rootPriv, "root-1", "work-1", workPub)
+	srv := releaseServer(t, "not-a-version", nil, nil, nil, keysJSON)
+	defer srv.Close()
+	t.Setenv("FGLPKG_REGISTRY", srv.URL)
+
+	exe := filepath.Join(t.TempDir(), "fglpkg")
+	if err := os.WriteFile(exe, []byte("OLD"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err := Run(Options{
+		Current: "3.8.0", Yes: true, Force: true, Stdout: &out,
+		exePath: exe,
+		roots:   []signing.Root{{KeyID: "root-1", PubB64: rootPub}},
+		now:     time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(out.String(), "not a valid release number") {
+		t.Errorf("expected an unusable-version message, got %q", out.String())
+	}
+	if got, _ := os.ReadFile(exe); string(got) != "OLD" {
+		t.Errorf("binary must be untouched, got %q", got)
+	}
+}
+
+// TestFetchURLTimesOut: a server that accepts the request and then never sends
+// response headers must not hang self-update forever (issue #21 item 3).
+func TestFetchURLTimesOut(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block // never responds
+	}))
+	defer srv.Close()
+	defer close(block)
+
+	old := metaTimeout
+	metaTimeout = 150 * time.Millisecond
+	defer func() { metaTimeout = old }()
+
+	done := make(chan error, 1)
+	go func() { _, err := fetchURL(srv.URL); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected a timeout error from a server that never responds")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("fetchURL hung on an unresponsive server")
+	}
+}
+
+// TestTransportKeepsHTTP2 guards the same regression as the registry client: a
+// custom DialContext disables HTTP/2 unless ForceAttemptHTTP2 is set.
+func TestTransportKeepsHTTP2(t *testing.T) {
+	if !newTransport().ForceAttemptHTTP2 {
+		t.Error("ForceAttemptHTTP2 is false: a custom DialContext disables HTTP/2 without it")
+	}
+}
+
+// TestFetchURLRejectsOversizedBody: the signed-metadata files are a few KB, so an
+// unbounded body is rejected outright rather than read into memory or silently
+// truncated.
+func TestFetchURLRejectsOversizedBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(bytes.Repeat([]byte("A"), 4096))
+	}))
+	defer srv.Close()
+
+	old := maxMetaBytes
+	maxMetaBytes = 1024
+	defer func() { maxMetaBytes = old }()
+
+	if _, err := fetchURL(srv.URL); err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Errorf("want a size-limit error, got %v", err)
+	}
+
+	// At the limit it still succeeds — the cap must not be off by one.
+	maxMetaBytes = 4096
+	data, err := fetchURL(srv.URL)
+	if err != nil {
+		t.Fatalf("body exactly at the limit should be accepted: %v", err)
+	}
+	if len(data) != 4096 {
+		t.Errorf("read %d bytes, want 4096", len(data))
+	}
+}
+
+// TestDownloadToRejectsOversizedBody: a broken or hostile server must not be able
+// to fill the disk, even though a wrong body would also fail the checksum gate.
+func TestDownloadToRejectsOversizedBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(bytes.Repeat([]byte("B"), 4096))
+	}))
+	defer srv.Close()
+
+	old := maxBinaryBytes
+	maxBinaryBytes = 1024
+	defer func() { maxBinaryBytes = old }()
+
+	var buf bytes.Buffer
+	if err := downloadTo(&buf, srv.URL); err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Errorf("want a size-limit error, got %v", err)
 	}
 }

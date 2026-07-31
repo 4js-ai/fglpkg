@@ -221,9 +221,15 @@ func Execute() error {
 	return err
 }
 
-// startUpdateCheck starts the passive "a new version is available" check for
-// this invocation (GIS-255). It returns nil when the check should not run; a
-// nil *Pending is safe to Finish.
+// startUpdateCheck sets up the passive "a new version is available" check for
+// this invocation (GIS-255): a notice from the cached version, plus a background
+// refresh when the interval has elapsed. It returns nil when the feature is off
+// for this run; a nil *Pending is safe to Finish.
+//
+// Both TTY flags are supplied because they answer different questions: stdout is
+// the command's data stream, so a redirected stdout means scripted use and
+// suppresses the whole feature (no network, no chatter); stderr is where the
+// notice is written, so it decides whether printing it can be seen at all.
 func startUpdateCheck(cmd string) *updatecheck.Pending {
 	home, err := fglpkgHome()
 	if err != nil {
@@ -237,30 +243,46 @@ func startUpdateCheck(cmd string) *updatecheck.Pending {
 		CI:          os.Getenv("CI") != "",
 		NoCheckEnv:  os.Getenv("FGLPKG_NO_UPDATE_CHECK") != "",
 		StdoutIsTTY: isTerminal(os.Stdout),
+		StderrIsTTY: isTerminal(os.Stderr),
 		Enabled:     settings.Enabled,
 		Interval:    settings.Interval,
 		Now:         time.Now(),
 		LastCheck:   state.LastCheck,
 	}
-	return updatecheck.Start(home, env, state.LatestKnown, fetchLatestVersion)
+	return updatecheck.Begin(home, env, state, fetchLatestVersion)
 }
 
-// fetchLatestVersion returns the latest published fglpkg version from the
+// fetchLatestVersion returns the latest published STABLE fglpkg version from the
 // registry — the network call behind the passive check.
+//
+// A pre-release is discarded here, at the point the value enters the cache, not
+// just where the notice is printed: caching an rc would overwrite a genuinely
+// newer stable version and silence the notice for the rest of the interval. An
+// empty result is treated by updatecheck as "no answer", so the previous cached
+// version survives.
 func fetchLatestVersion() (string, error) {
 	lr, err := registry.FetchLatestFGLPkg()
 	if err != nil {
 		return "", err
 	}
+	if v, perr := semver.Parse(lr.Version); perr != nil || v.PreRelease != "" {
+		return "", nil
+	}
 	return lr.Version, nil
 }
 
-// semverNewer reports whether latest is a newer release than current.
-// Unparseable versions (e.g. a "dev" build) are treated as not newer.
+// semverNewer reports whether latest is a newer STABLE release than current.
+// Unparseable versions (e.g. a "dev" build) are treated as not newer, and so is
+// a pre-release: the notice advertises `fglpkg self-update`, which installs
+// latest-stable only, so announcing an rc would point at an upgrade the tool
+// then refuses to perform.
 func semverNewer(current, latest string) bool {
 	c, err1 := semver.Parse(current)
 	l, err2 := semver.Parse(latest)
 	if err1 != nil || err2 != nil {
+		return false
+	}
+	if l.PreRelease != "" {
 		return false
 	}
 	return l.GreaterThan(c)

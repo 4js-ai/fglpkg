@@ -12,10 +12,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 	"github.com/4js-mikefolcher/fglpkg/internal/semver"
@@ -810,6 +812,36 @@ func pickArtifact(arts []apiArtifact, generoMajor string) *apiArtifact {
 
 // ─── Internal: HTTP ──────────────────────────────────────────────────────────
 
+// httpClient is the shared client for every registry call. It carries
+// transport-level timeouts only — deliberately NO Client.Timeout, which is a
+// deadline on the whole exchange and would abort a legitimately long publish
+// upload or package download. What is bounded here is a connection that stalls:
+// a dial or TLS handshake that never completes, a server that accepts the request
+// and then never sends response headers. Transfers that keep making progress run
+// as long as they need.
+//
+// Endpoints whose response is small AND whose caller blocks the user in the
+// foreground get a bounded read on top of that, via httpGetAuthedBounded —
+// ResponseHeaderTimeout does not help against a server that sends headers and
+// then dribbles the body forever.
+//
+// ForceAttemptHTTP2 is required: setting DialContext on a custom Transport
+// disables the automatic HTTP/2 upgrade that http.DefaultTransport performs, so
+// without it every registry call would silently drop to HTTP/1.1.
+var httpClient = &http.Client{Transport: newTransport()}
+
+func newTransport() *http.Transport {
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+}
+
 func registryBase() string {
 	if r := os.Getenv("FGLPKG_REGISTRY"); r != "" {
 		return strings.TrimRight(r, "/")
@@ -834,12 +866,32 @@ func httpGetAuthed(u string) ([]byte, error) {
 	return finalise(body, status)
 }
 
+// httpGetAuthedBounded is httpGetAuthed with an overall deadline and a capped
+// response size. For small, foreground-blocking lookups (the self-update
+// latest-release endpoint) an unbounded exchange is never legitimate: there is no
+// slow-but-progressing case for a few hundred bytes of JSON, and a server that
+// stalls mid-body would otherwise hang the command forever.
+func httpGetAuthedBounded(u string, timeout time.Duration, maxBytes int64) ([]byte, error) {
+	client := &http.Client{Timeout: timeout, Transport: httpClient.Transport}
+	body, status, err := authedGetLimited(u, Bearer(), client, maxBytes)
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusUnauthorized && TryRefresh() {
+		body, status, err = authedGetLimited(u, Bearer(), client, maxBytes)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return finalise(body, status)
+}
+
 // httpGetPublisher performs an unauthenticated GET against the publisher
 // registry. The current publisher commands keep their PAT-based auth in cli;
 // this helper exists for the few endpoints (e.g. /config, /packages/<name>/versions)
 // that are world-readable today.
 func httpGetPublisher(u string) ([]byte, error) {
-	resp, err := http.Get(u)
+	resp, err := httpClient.Get(u)
 	if err != nil {
 		return nil, fmt.Errorf("registry request failed: %w", err)
 	}
@@ -872,7 +924,7 @@ func publishJSON(method, u string, body []byte) (int, []byte, error) {
 		if b := Bearer(); b != "" {
 			req.Header.Set("Authorization", "Bearer "+b)
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			return 0, nil, fmt.Errorf("registry request failed: %w", err)
 		}
@@ -904,7 +956,7 @@ func putBytes(u, contentType, bearer string, body io.Reader) (int, []byte, error
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return 0, nil, fmt.Errorf("registry upload failed: %w", err)
 	}
@@ -914,6 +966,14 @@ func putBytes(u, contentType, bearer string, body io.Reader) (int, []byte, error
 }
 
 func authedGet(u, bearer string) ([]byte, int, error) {
+	return authedGetLimited(u, bearer, httpClient, 0)
+}
+
+// authedGetLimited is authedGet with an explicit client and an optional response
+// size cap (maxBytes <= 0 means unlimited, the default for package payloads).
+// An oversized body is an error rather than a truncation — a half-read JSON
+// document would fail somewhere far less informative.
+func authedGetLimited(u, bearer string, client *http.Client, maxBytes int64) ([]byte, int, error) {
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
 		return nil, 0, err
@@ -922,14 +982,21 @@ func authedGet(u, bearer string) ([]byte, int, error) {
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, fmt.Errorf("registry request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	var r io.Reader = resp.Body
+	if maxBytes > 0 {
+		r = io.LimitReader(resp.Body, maxBytes+1)
+	}
+	body, err := io.ReadAll(r)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to read registry response: %w", err)
+	}
+	if maxBytes > 0 && int64(len(body)) > maxBytes {
+		return nil, 0, fmt.Errorf("registry response exceeds the %d-byte limit", maxBytes)
 	}
 	return body, resp.StatusCode, nil
 }

@@ -181,9 +181,17 @@ No `--version` / `--pre` / downgrade — latest stable only, per scope.
    fail cleanly.
 2. **Resolve latest** via `registry.FetchLatestFGLPkg()`. Compare to `cli.Version` using
    [`internal/semver`](../internal/semver). If not newer and not `--force`, print
-   `fglpkg is up to date (vX.Y.Z)` and exit.
+   `fglpkg is up to date (vX.Y.Z)` and exit. The contract says `version` is the latest *stable*
+   release; enforce that **client-side** too — if it carries a pre-release segment, say so and exit
+   without installing. Checked before `--check` and `--force`, neither of which may widen the scope,
+   and mirrored in the passive notice so it never advertises an rc that self-update would then refuse.
 3. **Select the asset** matching `runtime.GOOS`/`runtime.GOARCH`. If none, print the GI-provided
    `manualUrl` + `instructions` and exit non-zero.
+   All network steps are **bounded**: the small signed-metadata GETs carry a 30s deadline and a 1 MiB
+   read cap (an oversized body is rejected, not truncated), the binary download a generous overall
+   deadline plus a size cap, and every request per-phase dial/TLS/response-header timeouts. The
+   registry client shares the same transport-level timeouts but no overall deadline, so long
+   legitimate uploads and downloads still stream.
 4. **Fetch + authenticate `checksums.txt`.** GET `checksumsUrl`, then GET `checksumsSigUrl` and the
    release-signing working-key manifest, and verify the Ed25519 signature chain back to the **pinned
    root** (see [§ Release signing & verification](#release-signing--verification)). **Only after the
@@ -200,8 +208,8 @@ No `--version` / `--pre` / downgrade — latest stable only, per scope.
    temp, print `manualUrl` + `instructions`, abort, exit non-zero. This is the integrity gate on top of
    step 4's authenticity gate — never install an unverified binary.
 8. **Swap atomically** (see below), preserving the original file mode; `chmod +x` on Unix.
-9. Print `Updated fglpkg vCUR → vNEW`. Refresh `config.json`'s cached latest so the passive check
-   goes quiet immediately.
+9. Print `Updated fglpkg vCUR → vNEW`. Refresh the cached latest in `update-check.json` so the passive
+   notice goes quiet immediately.
 
 ### Atomic swap
 
@@ -218,24 +226,41 @@ No `--version` / `--pre` / downgrade — latest stable only, per scope.
 
 ### Model
 
-Piggybacked on command runs — **no daemon, no cron**. In `Execute`, after the invoked command
-returns, a check runs subject to throttling. To avoid ever slowing a command down, the network call
-runs in a goroutine kicked off at command start; the notice is printed at the end **only if the
-result is already back** — otherwise it is skipped and the freshly-fetched result is cached for next
-time. The check never blocks, never changes exit codes, and never emits errors to the user (network
-failures are swallowed silently).
+Piggybacked on command runs — **no daemon, no cron**. **Notifying and refreshing are separate
+concerns** (the npm/brew pattern):
+
+- **Notify** — every allowed run prints the notice from the cached `latestKnownVersion`, after the
+  invoked command's output. No network involved, so the notice is instant, works offline, and appears
+  on throttled runs too.
+- **Refresh** — when `updateCheckInterval` has elapsed, a goroutine kicked off at command start
+  fetches the latest version and updates the cache. The attempt time is persisted **synchronously,
+  before the fetch starts**: a fast local command (`list`, `env`) exits in tens of milliseconds and
+  Go does not wait for the goroutine, so a `lastUpdateCheck` written only on completion would never
+  land and every invocation would fire a fresh registry request. If the refresh does come back before
+  the command finishes, its fresher answer supersedes the cached one for this run's notice — never
+  two notices.
+
+The check never blocks, never changes exit codes, and never emits errors to the user (network
+failures are swallowed silently; a failed fetch keeps the previously cached version and still counts
+as an attempt, so a flaky endpoint is not hammered).
 
 ### When it does *not* run
 
 - `Version == "dev"` (source build).
 - Any of these is set: `CI`, `FGLPKG_NO_UPDATE_CHECK=1`, or `updateCheck: false` in `config.json`.
-- Less than `updateCheckInterval` (default **24h**) since `lastUpdateCheck` in `config.json`.
 - The command is itself `self-update` or `version` (they surface version info directly).
-- stdout is not a TTY (don't pollute piped/scripted output) — the notice is advisory UX, not data.
+- stdout is not a TTY — the whole feature is off, network included. stdout is the command's data
+  stream, so a redirected stdout is the signal that this run is scripted, and a scripted run should
+  neither reach the network nor emit advisory chatter.
+- Less than `updateCheckInterval` (default **24h**) since `lastUpdateCheck`: this throttles the
+  **refresh only**. A cached known-newer version is still announced.
 
 ### The notice
 
-Printed to **stderr** (keeps stdout clean for piping), one block, after the command's output:
+Printed to **stderr** (keeps stdout clean for piping), one block, after the command's output. It is
+suppressed when stderr is not a TTY — that is where it would be written, so a redirected stderr means
+nobody would see it. (Both streams are consulted, and they answer different questions: stdout decides
+whether the feature acts at all, stderr whether the notice can be seen.)
 
 ```
 ─────────────────────────────────────────────
@@ -244,28 +269,45 @@ Printed to **stderr** (keeps stdout clean for piping), one block, after the comm
 ─────────────────────────────────────────────
 ```
 
-## Config & state (`config.json`)
+## Config & state
 
-New file in the fglpkg home (`~/.fglpkg/config.json`), same load/save discipline as
-[credentials.go](../internal/credentials/credentials.go) — mode 0600, unknown fields preserved,
-absent file treated as defaults. A new `internal/config` package owns it.
+**User settings** live in `~/.fglpkg/config.json` ([internal/config](../internal/config)), which the
+user also hand-edits to declare registries. They are **read-only** to this feature:
 
 ```json
 {
   "updateCheck": true,
-  "updateCheckInterval": "24h",
+  "updateCheckInterval": "24h"
+}
+```
+
+- `updateCheck` (default `true`) — master opt-out; `FGLPKG_NO_UPDATE_CHECK=1` overrides to off.
+- `updateCheckInterval` (default `24h`) — Go duration string; throttles the refresh.
+
+Both are `omitempty`, so the read-modify-write cycle in `registry add`/`remove` can never inject them
+into a config that did not set them. An explicit `false` still round-trips.
+
+**Mutable state** lives in a separate tool-managed `~/.fglpkg/update-check.json`
+([internal/updatecheck](../internal/updatecheck)) — mode 0600, written atomically via a per-writer
+temp file + rename, so concurrent invocations cannot corrupt it and an advisory feature never
+reformats the user's hand-edited config:
+
+```json
+{
   "lastUpdateCheck": "2026-07-14T09:00:00Z",
   "latestKnownVersion": "3.4.0"
 }
 ```
 
-- `updateCheck` (default `true`) — master opt-out; `FGLPKG_NO_UPDATE_CHECK=1` overrides to off.
-- `updateCheckInterval` (default `24h`) — Go duration string; throttles the passive check.
-- `lastUpdateCheck` / `latestKnownVersion` — throttle bookkeeping + last result, so a notice can be
-  shown from cache without a network call when within the interval.
+- `lastUpdateCheck` — the last refresh *attempt* (written before the fetch, and on failure too), so
+  the throttle holds regardless of how the run ends.
+- `latestKnownVersion` — the last result, so a notice can be shown from cache with no network call.
+  Refreshed on a successful `self-update` so the notice goes quiet immediately. Only ever a **stable**
+  version: a pre-release is discarded before it reaches the cache, because storing one would displace a
+  genuinely newer stable release and silence the notice for the rest of the interval.
 
-A `fglpkg config` surface (get/set) is **out of scope**; for now the file is edited by hand or the
-env var, and self-update maintains the cache fields. (A future `config` command can wrap it.)
+A `fglpkg config` surface (get/set) is **out of scope**; for now the settings are edited by hand or via
+the env var, and the tool maintains the state file. (A future `config` command can wrap it.)
 
 ## Platform notes
 
@@ -310,9 +352,21 @@ env var, and self-update maintains the cache fields. (A future `config` command 
   mismatch, permission error) prints the GI-served `manualUrl` + `instructions` verbatim.
 - **atomic swap**: temp written in target dir; original mode preserved; Windows `.old` path
   exercised behind a GOOS guard.
-- **throttle logic**: check skipped when `<interval`, when `CI`/env/`updateCheck:false`, when `dev`,
-  and when stdout is not a TTY; runs when stale. Pure function over (now, config, env) — no network.
-- **config.json**: defaults when absent; unknown fields round-trip; mode 0600.
+- **gating logic**: the feature is off entirely for `CI`/env/`updateCheck:false`/`dev`/non-TTY stdout;
+  the refresh is additionally skipped within the interval, while a cached notice is not. Pure
+  functions over (now, config, env) — no network.
+- **throttle durability**: the attempt time is on disk as soon as the check begins, so a command that
+  exits before the fetch returns still throttles the next invocation.
+- **notice source**: printed from cache on a throttled run; a fresh result supersedes the cached one;
+  never printed twice; suppressed when stderr is not a TTY.
+- **pre-release guard**: a `latest` carrying a pre-release segment is never installed, not even with
+  `--force`, and is never advertised by the notice.
+- **bounded network**: an unresponsive server times out rather than hanging; an oversized metadata
+  body or download is rejected at the cap.
+- **config.json**: defaults when absent; unknown fields rejected; the two update fields are never
+  injected by `registry add`/`remove`, and an explicit `false` round-trips.
+- **update-check.json**: absent/corrupt treated as zero; concurrent writers cannot corrupt it or
+  leave temp files behind; mode 0600.
 
 ## Rollout
 
