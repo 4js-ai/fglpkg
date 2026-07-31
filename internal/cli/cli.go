@@ -736,7 +736,7 @@ func checkFrozen(m *manifest.Manifest, projectDir string) error {
 	if err != nil {
 		return fmt.Errorf("--frozen: cannot read %s: %w", lockfile.Filename, err)
 	}
-	if vr := lf.Validate(m, "", "", ""); vr.NeedsResolve() {
+	if vr := lf.Validate(m, "", "", "", ""); vr.NeedsResolve() {
 		return fmt.Errorf("--frozen: %s is out of date with %s — %s.\n"+
 			"  Run 'fglpkg install' (or 'fglpkg update') and commit the updated lock.",
 			lockfile.Filename, manifest.Filename, vr.StaleReason())
