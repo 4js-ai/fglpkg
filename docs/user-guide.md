@@ -160,28 +160,88 @@ source ~/.bashrc
 
 Use `--global` in your shell profile so it always includes all globally installed packages, regardless of your current directory.
 
+### Windows (PowerShell)
+
+Pass `--shell powershell` and pipe into `Invoke-Expression`:
+
+```powershell
+fglpkg env --global --shell powershell | Invoke-Expression
+```
+
+To make it permanent, add that line to your PowerShell profile (`$PROFILE`).
+
+The flag is required. Without it, `fglpkg env` emits Command Prompt syntax on
+Windows, which PowerShell cannot run: `SET` is an alias for `Set-Variable`, not
+cmd's `set`, and `%VAR%` is not variable expansion. `--shell powershell` emits
+assignments PowerShell understands:
+
+```powershell
+$env:FGLLDPATH = 'C:\Users\you\.fglpkg\merged' + $(if ($env:FGLLDPATH) { ';' + $env:FGLLDPATH })
+$env:CLASSPATH = 'C:\Users\you\.fglpkg\jars\poi-5.2.3.jar' + $(if ($env:CLASSPATH) { ';' + $env:CLASSPATH })
+```
+
 ### Windows (cmd.exe)
 
-Run before building, or add to a `setup-env.bat` script:
+Write the output to a batch file and `call` it:
 
 ```cmd
-@echo off
-FOR /F "tokens=*" %%i IN ('fglpkg env --global') DO %%i
+fglpkg env --global --shell cmd > setup-env.bat
+call setup-env.bat
 ```
 
-To run directly at the command prompt (single `%`):
+`--shell cmd` is the default on Windows, so it can be omitted; naming it is
+clearer in a script that another shell might later run.
 
-```cmd
-FOR /F "tokens=*" %i IN ('fglpkg env --global') DO %i
-```
+Prefer this over `FOR /F "tokens=*" %i IN ('fglpkg env --global') DO %i`. That
+recipe looks convenient but silently loses your existing values: the `%VAR%`
+reference in the generated line arrives on stdout as literal text, and `FOR /F`
+does not re-expand it. A batch file is parsed line by line as it executes, so the
+reference resolves correctly.
 
-On Windows, `fglpkg env` outputs `SET` commands:
+`fglpkg env --shell cmd` outputs `SET` commands:
 
 ```
 SET FGLLDPATH=C:\Users\you\.fglpkg\merged;%FGLLDPATH%
 SET CLASSPATH=C:\Users\you\.fglpkg\jars\poi-5.2.3.jar;%CLASSPATH%
 SET FGLRESOURCEPATH=C:\Users\you\.fglpkg\packages\poiapi\com\fourjs\poiapi;%FGLRESOURCEPATH%
 ```
+
+### Windows (Git Bash / WSL)
+
+Use `--shell sh`, because the default on Windows is Command Prompt syntax that a
+POSIX shell cannot `eval`:
+
+```bash
+eval "$(fglpkg env --global --shell sh)"
+```
+
+The path separator stays `;` — it is what the Genero runtime you are configuring
+expects on Windows, whichever shell sets the variable.
+
+### Paths with spaces and other special characters
+
+`fglpkg env` quotes a value when it contains a character the target shell would
+otherwise split on or interpret, and leaves it unquoted otherwise. A path made of
+ordinary characters is emitted exactly as earlier releases emitted it, so existing
+shell profiles and Genero Studio settings keep working unchanged.
+
+```bash
+# no special characters — unquoted, as before
+export FGLLDPATH=/home/you/.fglpkg/merged"${FGLLDPATH:+:$FGLLDPATH}"
+
+# contains a space — quoted
+export FGLIMAGEPATH='/Users/jane doe/proj/.fglpkg'"${FGLIMAGEPATH:+:$FGLIMAGEPATH}"
+```
+
+Two characters cannot be represented in Command Prompt syntax at all: a literal
+`%` (cmd expands it, and `%%` is an escape only inside a `.bat` file) and a
+literal `"`. If a package path contains either, `fglpkg env --shell cmd` warns on
+stderr and still prints the line — use `--shell powershell` instead, or rename the
+directory. PowerShell and POSIX shells can represent any path.
+
+Genero Studio output (`--gst`) is never quoted: it is a file format Genero Studio
+parses, not shell syntax, so `--shell` does not apply to it and is rejected if
+combined with it.
 
 ### Genero Studio
 
@@ -201,10 +261,23 @@ Genero Studio translates `$(ProjectDir)` to the actual project path and `;` to t
 
 | Command | Scope | Format | Use case |
 |---|---|---|---|
-| `fglpkg env` | Auto (local if in project) | Shell (Unix) or SET (Windows) | Project-specific builds |
-| `fglpkg env --global` | All global packages | Shell (Unix) or SET (Windows) | Shell profile setup |
-| `fglpkg env --local` | Local `.fglpkg/` only | Shell (Unix) or SET (Windows) | Force local scope |
+| `fglpkg env` | Auto (local if in project) | Shell syntax (see `--shell`) | Project-specific builds |
+| `fglpkg env --global` | All global packages | Shell syntax (see `--shell`) | Shell profile setup |
+| `fglpkg env --local` | Local `.fglpkg/` only | Shell syntax (see `--shell`) | Force local scope |
 | `fglpkg env --gst` | Local `.fglpkg/` only | Genero Studio format | Genero Studio projects |
+| `fglpkg env --gwa` | Local, then global | `--webcomponent` flags | Splice into `gwabuildtool` |
+
+`--shell` selects which shell syntax the first three emit:
+
+| `--shell` | Aliases | Emits | Load with |
+|---|---|---|---|
+| `sh` | `bash`, `zsh` | `export VAR=…"${VAR:+:$VAR}"` | `eval "$(fglpkg env)"` |
+| `powershell` | `pwsh` | `$env:VAR = … + $(if …)` | `fglpkg env --shell powershell \| Invoke-Expression` |
+| `cmd` | — | `SET "VAR=…;%VAR%"` | `fglpkg env --shell cmd > setup-env.bat && call setup-env.bat` |
+
+The default is `cmd` on Windows and `sh` everywhere else — the same two shapes
+earlier releases produced, so omitting `--shell` changes nothing. `--shell` does
+not apply to `--gst` or `--gwa` and is rejected if combined with either.
 
 Key points:
 - Existing values are preserved — fglpkg **prepends** its paths, never replaces them
@@ -1707,13 +1780,32 @@ eval "$(fglpkg env --global)"
 
 Restart your shell or run `source ~/.bashrc` after adding it.
 
+**Windows (PowerShell)** — run before building, or add to `$PROFILE`:
+
+```powershell
+fglpkg env --global --shell powershell | Invoke-Expression
+```
+
 **Windows (cmd.exe)** — run before building:
 
 ```cmd
-FOR /F "tokens=*" %i IN ('fglpkg env --global') DO %i
+fglpkg env --global --shell cmd > setup-env.bat
+call setup-env.bat
+```
+
+**Windows (Git Bash / WSL)** — `--shell sh` is required, since the Windows default
+is Command Prompt syntax:
+
+```bash
+eval "$(fglpkg env --global --shell sh)"
 ```
 
 **Genero Studio** — paste the output of `fglpkg env --gst` into your project's environment settings.
+
+If `fglpkg env` printed the variables but Genero still cannot find the files,
+check that they actually reached your environment — a PowerShell session fed
+Command Prompt syntax reports `'%FGLLDPATH%' is not recognized` and sets nothing.
+Use `--shell powershell` there.
 
 ### Stale lock file
 

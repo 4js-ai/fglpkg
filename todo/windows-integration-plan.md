@@ -43,13 +43,14 @@ if runtime.GOOS == "windows" {
 
 ## Low Priority
 
-### Help text assumes bash
+### ~~Help text assumes bash~~ — DONE (issue #60)
 
-**File:** `internal/cli/cli.go` (printUsage, ~line 1505)
+`printUsage()` is now OS-aware and names a working recipe for each Windows shell.
 
-`printUsage()` says `Add to ~/.bashrc: eval "$(fglpkg env --global)"`. On Windows this is meaningless.
-
-**Fix:** Add OS-aware setup instructions. For PowerShell: `fglpkg env --global | Invoke-Expression`, or for Command Prompt: `fglpkg env --global` and set the displayed variables manually.
+Note the fix proposed here was itself wrong: `fglpkg env --global | Invoke-Expression`
+does not work, because the Windows output was cmd syntax that PowerShell cannot
+execute. That is the bug issue #60 fixed, by adding a real PowerShell emitter
+behind `--shell powershell`.
 
 ### Credential file permissions
 
@@ -69,7 +70,11 @@ Writes with mode `0600` which is correct on Unix but ignored on Windows. Credent
 
 ## Already Handled
 
-- `fglpkg env` output — `env.go` already branches on `runtime.GOOS == "windows"` to emit `SET` instead of `export`
+- `fglpkg env` output — `--shell sh|powershell|cmd` selects the syntax explicitly
+  (issue #60), defaulting to `cmd` on Windows and `sh` elsewhere. Values are quoted
+  when they contain a character the shell would split on. Branching on
+  `runtime.GOOS` alone was NOT sufficient: it covered cmd but left PowerShell —
+  the default Windows shell — with no working path at all.
 - `chmod +x` after install — `installer.go` already skips on Windows
 - Installer tests — already `t.Skip` on Windows
 - GST paths — Genero Studio uses `$(variable)/path` with `;` separators regardless of OS and translates to the target OS

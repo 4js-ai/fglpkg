@@ -58,7 +58,10 @@ func TestGenerateLocalIncludesFGLIMAGEPATH(t *testing.T) {
 		t.Fatalf("GenerateLocal: %v", err)
 	}
 	joined := strings.Join(exports, "\n")
-	if !strings.Contains(joined, "FGLIMAGEPATH=") {
+	// envValue rather than a raw "FGLIMAGEPATH=" substring: the question is "was
+	// the variable emitted", and the substring form silently misses PowerShell's
+	// `$env:FGLIMAGEPATH = ` spelling.
+	if _, ok := envValue(t, exports, "FGLIMAGEPATH"); !ok {
 		t.Errorf("expected FGLIMAGEPATH export in:\n%s", joined)
 	}
 	if !strings.Contains(joined, "WEB_COMPONENT_DIRECTORY") {

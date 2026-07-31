@@ -1101,37 +1101,110 @@ func cmdList(args []string) error {
 
 // ─── env ──────────────────────────────────────────────────────────────────────
 
+// envFlags holds the parsed arguments of `fglpkg env`.
+type envFlags struct {
+	local  bool
+	global bool
+	gst    bool
+	gwa    bool
+
+	// shell is the syntax to render, defaulting to env.DefaultShell().
+	shell env.Shell
+	// shellGiven distinguishes an explicit --shell from the default, which is
+	// always present. The --gst/--gwa conflict checks must gate on this, or
+	// --gst would fail on every platform.
+	shellGiven bool
+}
+
+// parseEnvFlags parses `fglpkg env`'s arguments.
+//
+// env gets its own parser rather than the shared parseFlags because --shell
+// takes a VALUE, in both the `--shell sh` and `--shell=sh` spellings, which
+// parseFlags cannot express: it matches extraAllowed as exact tokens, so
+// `--shell=sh` would fall into its leading-"-" branch and be rejected as an
+// unknown flag. Teaching the shared parser about flags-with-values for one flag
+// on one command would put ~10 other commands' argument handling at risk, and
+// its reject-unknown-flag behaviour is a deliberate safety property.
+//
+// Unknown arguments are rejected, as in parseAuditFlags/parseSbomFlags. Note
+// this makes `fglpkg env somejunk` and `fglpkg env --force` errors where they
+// were previously accepted and silently ignored.
+func parseEnvFlags(args []string) (envFlags, error) {
+	f := envFlags{shell: env.DefaultShell()}
+	setShell := func(v string) error {
+		sh, ok := env.ParseShell(v)
+		if !ok {
+			return fmt.Errorf("invalid --shell %q (want: %s)", v, env.ShellValues)
+		}
+		f.shell, f.shellGiven = sh, true
+		return nil
+	}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--local", a == "-l":
+			f.local = true
+		case a == "--global", a == "-g":
+			f.global = true
+		case a == "--gst":
+			f.gst = true
+		case a == "--gwa":
+			f.gwa = true
+		case a == "--shell":
+			if i+1 >= len(args) {
+				return f, fmt.Errorf("--shell requires a value (want: %s)", env.ShellValues)
+			}
+			i++
+			if err := setShell(args[i]); err != nil {
+				return f, err
+			}
+		case strings.HasPrefix(a, "--shell="):
+			if err := setShell(strings.TrimPrefix(a, "--shell=")); err != nil {
+				return f, err
+			}
+		default:
+			return f, fmt.Errorf("unknown argument %q", a)
+		}
+	}
+	if f.local && f.global {
+		return f, fmt.Errorf("--local and --global are mutually exclusive")
+	}
+	if f.gst && f.gwa {
+		return f, fmt.Errorf("--gst and --gwa are mutually exclusive")
+	}
+	// --shell, --gst and --gwa all select an output format, and only one of them
+	// can win. Silence here would teach the wrong model twice: once now, and
+	// again when the pasted output does not work.
+	if f.shellGiven && f.gst {
+		return f, fmt.Errorf("--shell does not apply to --gst: Genero Studio output is a fixed file format, not shell syntax")
+	}
+	if f.shellGiven && f.gwa {
+		return f, fmt.Errorf("--shell does not apply to --gwa: it emits gwabuildtool flags, not shell statements")
+	}
+	return f, nil
+}
+
 func cmdEnv(args []string) error {
-	_, forceLocal, forceGlobal, _, err := parseFlags(args, "--gst", "--gwa")
+	f, err := parseEnvFlags(args)
 	if err != nil {
 		return err
-	}
-	gst := false
-	gwa := false
-	for _, a := range args {
-		if a == "--gst" {
-			gst = true
-		}
-		if a == "--gwa" {
-			gwa = true
-		}
 	}
 
 	home, err := fglpkgHome()
 	if err != nil {
 		return err
 	}
-	g := env.New(home)
+	g := env.New(home).WithShell(f.shell)
 
 	// --gwa emits gwabuildtool --webcomponent flags and exits — it's an
 	// orthogonal output mode, not an additional export line.
-	if gwa {
-		flags, err := g.GenerateGWA()
+	if f.gwa {
+		wcFlags, err := g.GenerateGWA()
 		if err != nil {
 			return err
 		}
-		for _, f := range flags {
-			fmt.Println(f)
+		for _, wc := range wcFlags {
+			fmt.Println(wc)
 		}
 		return nil
 	}
@@ -1139,16 +1212,16 @@ func cmdEnv(args []string) error {
 	// Determine if we should use local-only output.
 	// --gst always implies local. Otherwise, context-aware: if inside a
 	// project directory (has .fglpkg/ or fglpkg.json), default to local.
-	useLocal := forceLocal || gst
-	if !forceGlobal && !useLocal {
+	useLocal := f.local || f.gst
+	if !f.global && !useLocal {
 		useLocal = isProjectDir()
 	}
 
 	var exports []string
 	switch {
-	case gst:
+	case f.gst:
 		exports, err = g.GenerateGST()
-	case forceGlobal:
+	case f.global:
 		// Explicit --global emits the global scope only, never merging in the
 		// current project's local .fglpkg/ packages (GIS-290).
 		exports, err = g.GenerateGlobal()
@@ -4352,14 +4425,27 @@ ENVIRONMENT:
 
 `)
 	if runtime.GOOS == "windows" {
+		// --shell is required for PowerShell: the default on Windows is cmd
+		// syntax, which PowerShell cannot execute (SET is an alias for
+		// Set-Variable, and %VAR% is not expansion).
+		//
+		// cmd goes through a .bat file rather than `FOR /F ... DO %i`, because
+		// a %VAR% arriving on stdout is not re-expanded by FOR /F — the
+		// inherited value is lost. A .bat is parsed line by line at execution,
+		// so it is.
 		fmt.Print(`SETUP:
-  PowerShell:    fglpkg env --global | Invoke-Expression
-  Command Prompt: run "fglpkg env --global" and set the displayed variables
+  PowerShell:      fglpkg env --global --shell powershell | Invoke-Expression
+  Command Prompt:  fglpkg env --global --shell cmd > setup-env.bat
+                   call setup-env.bat
 
 `)
 	} else {
+		// pwsh runs on Linux and macOS too, and --shell powershell works there:
+		// the emitted syntax is a property of the shell, not of the platform.
+		// The separator stays ':' because that is what fglrun expects here.
 		fmt.Print(`SETUP:
   Add to ~/.bashrc:  eval "$(fglpkg env --global)"
+  PowerShell (pwsh): fglpkg env --global --shell powershell | Invoke-Expression
 
 `)
 	}

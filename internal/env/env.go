@@ -2,6 +2,11 @@
 // fglpkg packages resolvable, and renders them for a shell (`eval`), for
 // Genero Studio, or for a child process.
 //
+// Shell rendering is selected explicitly — sh, PowerShell or cmd — and quotes
+// values only when they would otherwise be mis-parsed; see shell.go, which also
+// explains why the target shell and the path separator are separate decisions.
+// The Genero Studio and child-process paths are never shell-quoted.
+//
 // Six variables are managed, in two shapes:
 //
 //   - FGLLDPATH resolves program modules (*.42m/.42r/.42x) by NAMESPACE PATH,
@@ -130,6 +135,12 @@ type Generator struct {
 	jarsDir          string
 	webcomponentsDir string
 
+	// shell selects the syntax Generate/GenerateLocal/GenerateGlobal render.
+	// The zero value means DefaultShell(), so a Generator built the old way —
+	// env.New(home) — renders exactly what it rendered before --shell existed.
+	// GenerateGST and the raw accessors ignore it entirely; see their comments.
+	shell Shell
+
 	// warnings holds the diagnostics from the most recent Generate*/RawEnv
 	// call. Reset at the top of each, so Warnings() is never stale or
 	// cumulative. This package never prints; the CLI writes these to stderr.
@@ -144,6 +155,26 @@ func New(home string) *Generator {
 		jarsDir:          filepath.Join(home, "jars"),
 		webcomponentsDir: filepath.Join(home, "webcomponents"),
 	}
+}
+
+// WithShell selects the shell syntax the Generate* renderers emit, and returns
+// g so it composes at the call site: env.New(home).WithShell(f.shell).
+//
+// A setter rather than a New parameter or per-shell methods: New has ~20 call
+// sites that do not care about shells, and most of them are tests whose subject
+// is which PATHS get emitted, not how they are wrapped.
+func (g *Generator) WithShell(sh Shell) *Generator {
+	g.shell = sh
+	return g
+}
+
+// targetShell resolves the zero value lazily, so New's signature — and every
+// existing caller — stays untouched.
+func (g *Generator) targetShell() Shell {
+	if g.shell == "" {
+		return DefaultShell()
+	}
+	return g.shell
 }
 
 // Warnings returns the diagnostics accumulated by the most recent
@@ -639,39 +670,56 @@ func collectJars(dir string) ([]string, error) {
 
 // ─── rendering ────────────────────────────────────────────────────────────────
 
-// renderShell emits prepending export/SET statements plus the GAS hint comment,
-// in the canonical variable order. A variable with no value is skipped
-// entirely, except FGLLDPATH when alwaysLD is set (the historical behaviour of
-// the default `fglpkg env` mode).
+// renderShell emits prepending assignment statements plus the GAS hint comment,
+// in the canonical variable order, in the syntax of the target shell. A variable
+// with no value is skipped entirely, except FGLLDPATH when alwaysLD is set (the
+// historical behaviour of the default `fglpkg env` mode).
+//
+// The shell and the path separator are independent: the shell is whoever will
+// execute these lines, the separator is what the Genero runtime that parses the
+// values expects. See internal/env/shell.go's header.
 func (g *Generator) renderShell(p *envPlan, alwaysLD bool) []string {
-	sep := pathSeparator()
+	sh, sep := g.targetShell(), pathSeparator()
 	var lines []string
+
+	// emit records any shell-specific representation problem before appending
+	// the statement. The statement is emitted either way: it is still the user's
+	// best copy/paste source, and a variable silently missing is worse than one
+	// the shell complains about.
+	emit := func(v envVar, value string) {
+		for _, w := range shellLimitWarnings(sh, string(v), value) {
+			p.warn("%s", w)
+		}
+		lines = append(lines, prependLine(sh, string(v), value, sep))
+	}
 
 	ld := strings.Join(p.ldpath, sep)
 	if ld != "" || alwaysLD {
-		lines = append(lines, g.prependExportLine(string(varLD), ld))
+		emit(varLD, ld)
 	}
 	if cp := strings.Join(p.classpath, sep); cp != "" {
-		lines = append(lines, g.prependExportLine(string(varClass), cp))
+		emit(varClass, cp)
 	}
 	for _, v := range assetVarOrder {
 		value := strings.Join(p.assets[v], sep)
 		if value == "" {
 			continue
 		}
-		lines = append(lines, g.prependExportLine(string(v), value))
+		emit(v, value)
 		// The GAS hint describes webcomponent directories, so it belongs to
 		// FGLIMAGEPATH only when webcomponents are what put it there. Once
 		// packaged images can populate the same variable, gating on a non-empty
 		// FGLIMAGEPATH would print a hint pointing at <imagedir>/webcomponents.
 		if v == varImage && len(p.wcParents) > 0 {
-			lines = append(lines, g.gasHintComment(p.wcParents))
+			lines = append(lines, gasHintComment(sh, sep, p.wcParents))
 		}
 	}
 	if prof := strings.Join(p.profiles, sep); prof != "" {
-		lines = append(lines, g.prependExportLine(string(varProfile), prof))
+		emit(varProfile, prof)
 	}
 
+	// Deliberately the UNQUOTED join: the platform's environment-block limit
+	// applies to the value the OS ends up storing, not to the statement text.
 	p.checkValueLengths(sep)
 	return lines
 }
@@ -680,6 +728,11 @@ func (g *Generator) renderShell(p *envPlan, alwaysLD bool) []string {
 // forward slashes, and $(ProjectDir)-relative paths. No comment lines are
 // produced — GST output is a strict VAR=value list Genero Studio parses, so
 // diagnostics go to stderr instead.
+//
+// This is a FILE FORMAT, not a shell: it is never quoted, never shell-dependent
+// (--shell does not apply, and the CLI rejects the combination), and always uses
+// ";" regardless of platform. Quote characters here would be stored verbatim in
+// the user's project environment settings.
 //
 // Paths outside the local scope have no $(ProjectDir) representation and are
 // dropped, which is exactly today's local-only GST behaviour.
@@ -753,20 +806,19 @@ func (p *envPlan) checkValueLengths(sep string) {
 // It is derived from the webcomponents parents specifically, NOT from the whole
 // FGLIMAGEPATH value: that variable now also carries packaged image
 // directories, which GAS must not be told about.
-func (g *Generator) gasHintComment(wcParents []string) string {
-	sep := pathSeparator()
+//
+// The value is NOT quoted: this is a comment for a human to copy into an .xcf,
+// not a statement any shell will execute, so shell quoting would only put stray
+// characters into what the user pastes.
+func gasHintComment(sh Shell, sep string, wcParents []string) string {
 	wcDirs := make([]string, 0, len(wcParents))
 	for _, p := range wcParents {
 		// wcParents holds the PARENT of webcomponents/ — for GAS, point at
 		// webcomponents/ directly.
 		wcDirs = append(wcDirs, filepath.Join(p, "webcomponents"))
 	}
-	prefix := "# "
-	if runtime.GOOS == "windows" {
-		prefix = "REM "
-	}
 	return fmt.Sprintf("%sFor GAS: add to your .xcf's <WEB_COMPONENT_DIRECTORY>: %s",
-		prefix, strings.Join(wcDirs, sep))
+		commentPrefix(sh), strings.Join(wcDirs, sep))
 }
 
 // ─── output modes ─────────────────────────────────────────────────────────────
@@ -783,11 +835,19 @@ func (g *Generator) run(includeLocal, includeGlobal, includeWorkspace bool) (*en
 	return p, scopes, nil
 }
 
-// Generate returns a slice of shell export lines suitable for eval, covering
+// Generate returns a slice of shell statements suitable for eval, covering
 // workspace members plus the local and global scopes.
 //
-// On Unix:  export VAR=value"${VAR:+:$VAR}"
-// On Windows: SET VAR=value;%VAR%
+// The syntax is the Generator's target shell (WithShell, defaulting to
+// DefaultShell()):
+//
+//	sh:         export VAR=value"${VAR:+:$VAR}"
+//	powershell: $env:VAR = 'value' + $(if ($env:VAR) { ';' + $env:VAR })
+//	cmd:        SET "VAR=value;%VAR%"
+//
+// Values are quoted only when they contain a character the shell would otherwise
+// split on or interpret, so a path of ordinary characters is emitted exactly as
+// it was before --shell existed. See internal/env/shell.go.
 //
 // The generated statements PREPEND fglpkg-managed paths to any existing value,
 // so user or system entries are never lost. For the search-path variables that
@@ -892,6 +952,11 @@ func (g *Generator) GenerateGWA() ([]string, error) {
 // are raw — no export prefix, and not merged with the inherited value; absent
 // variables are omitted. Callers merge with MergeEnvVar and should apply the
 // keys in RawEnvOrder.
+//
+// Values are NEVER SHELL-QUOTED, and must not be: these feed cmd.Env in
+// `fglpkg bdl`, which hands them to exec.Command. No shell is involved there, so
+// a quote character would land literally inside the child process's variable and
+// break Genero's path resolution. Shell quoting belongs to renderShell alone.
 func (g *Generator) RawEnv() (map[string]string, error) {
 	p, _, err := g.run(true, true, true)
 	if err != nil {
@@ -916,8 +981,9 @@ func (g *Generator) RawEnv() (map[string]string, error) {
 	return out, nil
 }
 
-// BuildFGLLDPATH returns the raw FGLLDPATH value (no export prefix).
-// Useful for programmatically setting the environment (e.g., fglpkg bdl).
+// BuildFGLLDPATH returns the raw FGLLDPATH value (no export prefix, never
+// shell-quoted — see RawEnv). Useful for programmatically setting the
+// environment (e.g., fglpkg bdl).
 func (g *Generator) BuildFGLLDPATH() (string, error) {
 	p, _, err := g.run(true, true, true)
 	if err != nil {
@@ -927,7 +993,8 @@ func (g *Generator) BuildFGLLDPATH() (string, error) {
 	return strings.Join(p.ldpath, pathSeparator()), nil
 }
 
-// BuildJavaClasspath returns the raw CLASSPATH value (no export prefix).
+// BuildJavaClasspath returns the raw CLASSPATH value (no export prefix, never
+// shell-quoted — see RawEnv).
 func (g *Generator) BuildJavaClasspath() (string, error) {
 	p, _, err := g.run(true, true, true)
 	if err != nil {
@@ -940,6 +1007,9 @@ func (g *Generator) BuildJavaClasspath() (string, error) {
 // MergeEnvVar prepends fglpkgValue to existingValue using the OS path
 // separator. Returns just fglpkgValue if existingValue is empty, and
 // vice versa.
+//
+// Pure joining, never shell-quoted — see RawEnv: the result is destined for
+// cmd.Env, not for a shell.
 func MergeEnvVar(fglpkgValue, existingValue string) string {
 	if fglpkgValue == "" {
 		return existingValue
@@ -950,31 +1020,12 @@ func MergeEnvVar(fglpkgValue, existingValue string) string {
 	return fglpkgValue + pathSeparator() + existingValue
 }
 
-// prependExportLine emits a shell statement that prepends value to the
-// existing variable, so that user/system entries are never lost.
-//
-// Unix output:    export VAR=/new/paths"${VAR:+:$VAR}"
-// Windows output: SET VAR=/new/paths;%VAR%
-//
-// KNOWN LIMITATION: value is NOT quoted. A path containing a space, or any
-// other character the shell splits on, produces a line that `eval` mis-parses.
-// This predates the resource variables (FGLLDPATH has always been emitted this
-// way) but they widen the exposure, since image and form directories are likelier
-// than a module root to sit under a path with a space in it. Fixing it means
-// changing an already-shipped output format that users have wired into shell
-// profiles and Genero Studio settings, so it is deliberately tracked separately
-// rather than folded into a feature change. Anything added here inherits the
-// same flaw — do not read the absence of quoting as evidence that the values
-// are known-safe.
-func (g *Generator) prependExportLine(key, value string) string {
-	if runtime.GOOS == "windows" {
-		return fmt.Sprintf("SET %s=%s;%%%s%%", key, value, key)
-	}
-	// The ${VAR:+:$VAR} construct expands to ":$VAR" only when VAR is
-	// non-empty, avoiding a trailing colon when the variable is unset.
-	return fmt.Sprintf("export %s=%s\"${%s:+:%s}\"", key, value, key, "$"+key)
-}
-
+// pathSeparator is the separator the GENERO RUNTIME expects inside a value:
+// fglrun and fglcomp split FGLLDPATH and FGLPROFILE on ";" on Windows and ":"
+// elsewhere, whichever shell set them. It is therefore a platform property and
+// stays GOOS-derived even under `--shell sh` — Git Bash on Windows configures a
+// Windows fglrun and still needs ";". The shell only decides the syntax that
+// wraps the value; see internal/env/shell.go.
 func pathSeparator() string {
 	if runtime.GOOS == "windows" {
 		return ";"

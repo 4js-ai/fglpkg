@@ -131,21 +131,81 @@ _er_gst_has_no_comments() {
   # Genero Studio parses stdout as a strict VAR=value list: no comments, and no
   # GAS hint even though a webcomponent is installed.
   assert_not_contains "WEB_COMPONENT_DIRECTORY" "$out"
-  assert_not_contains "#" "$out"
+  # Line-anchored: a bare assert_not_contains "#" would also fire on any sandbox
+  # path containing a "#", and would not actually test "no comment LINES".
+  assert_not_match '^(#|REM )' "$out"
 }
 it "env --gst keeps stdout comment-free while warning on stderr" _er_gst_has_no_comments
 
 # The end-to-end contract: the output really is safe to eval, and really does
 # set the variable.
+#
+# --shell sh is explicit because this suite runs under Git Bash even on Windows,
+# where the DEFAULT output is cmd syntax a POSIX shell cannot eval. Asking for the
+# shell we are actually in is what lets this assertion run on every platform
+# instead of skipping on Windows.
 _er_eval_sets_resourcepath() {
   _er_namespaced_pkg
-  run env --local
+  run env --local --shell sh
   assert_success
-  if env_output_is_windows_style "$output"; then
-    skip "eval \"\$(fglpkg env --local)\" sets FGLRESOURCEPATH" "output is cmd.exe SET syntax"
-    return 0
-  fi
-  eval "$("$FGLPKG" env --local 2>/dev/null)"
+  eval "$("$FGLPKG" env --local --shell sh 2>/dev/null)"
   assert_contains_path "packages/poiapi/com/fourjs/poiapi" "${FGLRESOURCEPATH:-}"
 }
-it "eval \"\$(fglpkg env --local)\" sets FGLRESOURCEPATH" _er_eval_sets_resourcepath
+it "eval \"\$(fglpkg env --local --shell sh)\" sets FGLRESOURCEPATH" _er_eval_sets_resourcepath
+
+# The quoting contract, end to end: a project under a path with a space in it is
+# the case the unquoted format mis-parsed, and it is likelier for the asset
+# variables than for a module root.
+_er_eval_survives_spaced_path() {
+  mkdir -p "space dir"
+  cd "space dir" || return 1
+  _er_namespaced_pkg
+  run env --local --shell sh
+  assert_success
+  local before="${FGLRESOURCEPATH:-}"
+  eval "$("$FGLPKG" env --local --shell sh 2>/dev/null)" \
+    || { _diag "eval of quoted output failed"; return 1; }
+  assert_contains_path "space dir" "${FGLRESOURCEPATH:-}"
+  assert_contains_path "packages/poiapi/com/fourjs/poiapi" "${FGLRESOURCEPATH:-}"
+  [[ "${FGLRESOURCEPATH:-}" != "$before" ]] \
+    || { _diag "FGLRESOURCEPATH was not set"; return 1; }
+  # The quote characters belong to the shell syntax, not to the value.
+  assert_not_contains "'" "${FGLRESOURCEPATH:-}"
+}
+it "eval of env output sets a path containing a space" _er_eval_survives_spaced_path
+
+# --shell selects syntax and nothing else: the paths must be identical whichever
+# shell asked for them. Guards against quoting leaking into path collection.
+_er_shell_changes_syntax_only() {
+  _er_namespaced_pkg
+  local sh_out ps_out cmd_out
+  sh_out="$("$FGLPKG" env --local --shell sh 2>/dev/null)"
+  ps_out="$("$FGLPKG" env --local --shell powershell 2>/dev/null)"
+  cmd_out="$("$FGLPKG" env --local --shell cmd 2>/dev/null)"
+  assert_match '^export FGLRESOURCEPATH=' "$sh_out"
+  assert_match '^\$env:FGLRESOURCEPATH = ' "$ps_out"
+  assert_match '^SET "?FGLRESOURCEPATH=' "$cmd_out"
+  local p="packages/poiapi/com/fourjs/poiapi"
+  assert_contains_path "$p" "$sh_out"
+  assert_contains_path "$p" "$ps_out"
+  assert_contains_path "$p" "$cmd_out"
+}
+it "env --shell changes syntax without changing the paths" _er_shell_changes_syntax_only
+
+# --shell is an output-format selector, like --gst and --gwa; combining two of
+# them has no meaning and must not be silently ignored.
+_er_shell_rejects_bad_values() {
+  _er_namespaced_pkg
+  run env --local --shell tcsh
+  assert_failure
+  assert_contains "invalid --shell"
+  assert_contains "powershell"   # the error names the accepted values
+  run env --gst --shell sh
+  assert_failure
+  assert_contains "--shell does not apply to --gst"
+  # --gst alone must keep working: the conflict check gates on an EXPLICIT
+  # --shell, not on the always-present default.
+  run env --gst
+  assert_success
+}
+it "env rejects an unknown --shell and --shell with --gst" _er_shell_rejects_bad_values

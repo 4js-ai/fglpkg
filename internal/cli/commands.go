@@ -148,16 +148,31 @@ global ~/.fglpkg/ is shared across projects.
 	{
 		Name:    "env",
 		Summary: "Print environment variable exports",
-		Usage:   "fglpkg env [--local|--global|--gst|--gwa]",
+		Usage:   "fglpkg env [--local|--global|--gst|--gwa] [--shell sh|powershell|cmd]",
 		Long: `FLAGS:
   --local, -l              Force local project directory (.fglpkg/)
   --global, -g             Force global home directory (~/.fglpkg/)
   --gst                    Output in Genero Studio format (implies --local)
   --gwa                    Emit --webcomponent flags for gwabuildtool, one
                            per installed COMPONENTTYPE
+  --shell <name>           Shell syntax to emit: sh (aliases bash, zsh),
+                           powershell (alias pwsh), or cmd. Defaults to cmd on
+                           Windows and sh elsewhere. Not valid with --gst/--gwa.
 
-Prints shell export lines. Evaluate the output to load them, e.g.
-  eval "$(fglpkg env --global)"
+Prints shell statements that prepend the package paths. Load them with:
+  sh / bash / zsh    eval "$(fglpkg env --global)"
+  PowerShell         fglpkg env --global --shell powershell | Invoke-Expression
+  Command Prompt     fglpkg env --global --shell cmd > setup-env.bat
+                     call setup-env.bat
+
+Use --shell sh under Git Bash or WSL on Windows. Values are quoted only when
+they contain a character the shell would otherwise split on, so paths of
+ordinary characters are emitted exactly as earlier releases emitted them.
+
+Command Prompt cannot represent a path containing a literal '%' or '"'; fglpkg
+warns on stderr and emits the line anyway. Use --shell powershell for those.
+Prefer a .bat file over 'FOR /F ... DO %i': a %VAR% reference read from stdout
+is not re-expanded, so that recipe silently loses the inherited value.
 
 VARIABLES (each emitted only when a package ships matching files):
   FGLLDPATH                program modules — .42m/.42r/.42x

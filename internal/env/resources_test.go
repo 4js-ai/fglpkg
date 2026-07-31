@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -12,27 +11,81 @@ import (
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 // envValue extracts the fglpkg-managed value of key from rendered shell lines,
-// stripping the platform's prepend wrapper. Substring matching on the joined
-// output is not good enough for these tests: a package's store root is a path
-// PREFIX of every leaf directory inside it, so `strings.Contains(out, storeRoot)`
-// is true even when the store root itself was never emitted.
+// stripping the prepend wrapper. Substring matching on the joined output is not
+// good enough for these tests: a package's store root is a path PREFIX of every
+// leaf directory inside it, so `strings.Contains(out, storeRoot)` is true even
+// when the store root itself was never emitted.
+//
+// Renders in the default shell, which is what the Generate* helpers here use.
 func envValue(t *testing.T, lines []string, key string) (string, bool) {
 	t.Helper()
-	unixPrefix, winPrefix := "export "+key+"=", "SET "+key+"="
-	unixSuffix := fmt.Sprintf("\"${%s:+:$%s}\"", key, key)
-	winSuffix := fmt.Sprintf(";%%%s%%", key)
-	for _, line := range lines {
-		switch {
-		case strings.HasPrefix(line, unixPrefix):
-			return strings.TrimSuffix(strings.TrimPrefix(line, unixPrefix), unixSuffix), true
-		case strings.HasPrefix(line, winPrefix):
-			return strings.TrimSuffix(strings.TrimPrefix(line, winPrefix), winSuffix), true
+	line, ok := envLine(t, DefaultShell(), lines, key)
+	return line.value, ok
+}
+
+// renderedLine is one emitted statement, split into the whole line and the
+// fglpkg-managed value inside it.
+type renderedLine struct{ full, value string }
+
+// envLine finds key's statement among lines and recovers the value from it.
+//
+// The wrapper is DERIVED by rendering a sentinel through prependLine, not
+// restated here. A hand-copied prefix/suffix pair is how this helper used to
+// know the format, and it could silently disagree with the emitter — including
+// for any shell nobody remembered to add a branch for. Deriving it also means
+// these tests keep working if the checkout itself sits under a path with a space
+// in it, which would otherwise flip every value onto the quoted branch.
+//
+// Two probes are needed because quoting is conditional: the spaced sentinel
+// reproduces the quoted form, the inert one the bare form.
+//
+// The QUOTED probe must be tried first. For sh, quoting only adds characters
+// INSIDE the value region, so a quoted line still matches the bare template's
+// prefix and suffix — trying the bare probe first would match a quoted line and
+// hand back a value with the wrapper's quotes still attached. The quoted
+// template's prefix ends in the opening quote, which a bare line cannot match, so
+// this order is unambiguous in both directions.
+func envLine(t *testing.T, sh Shell, lines []string, key string) (renderedLine, bool) {
+	t.Helper()
+	sep := pathSeparator()
+	for _, probe := range []struct {
+		sentinel string
+		unescape func(string) string
+	}{
+		{"FGLPKG SENTINEL", func(s string) string {
+			switch sh {
+			case ShellPowerShell:
+				return strings.ReplaceAll(s, "''", "'")
+			case ShellCmd:
+				return s // cmd's quotes belong to the wrapper, not the value
+			default:
+				return strings.ReplaceAll(s, `'\''`, "'")
+			}
+		}},
+		{"FGLPKGSENTINEL", func(s string) string { return s }},
+	} {
+		tpl := prependLine(sh, key, probe.sentinel, sep)
+		i := strings.Index(tpl, probe.sentinel)
+		if i < 0 {
+			t.Fatalf("prependLine did not embed the sentinel verbatim: %q", tpl)
+		}
+		prefix, suffix := tpl[:i], tpl[i+len(probe.sentinel):]
+		for _, line := range lines {
+			if len(line) >= len(prefix)+len(suffix) &&
+				strings.HasPrefix(line, prefix) && strings.HasSuffix(line, suffix) {
+				value := line[len(prefix) : len(line)-len(suffix)]
+				return renderedLine{full: line, value: probe.unescape(value)}, true
+			}
 		}
 	}
-	return "", false
+	return renderedLine{}, false
 }
 
 // envParts returns key's value split into individual path entries.
+//
+// Splits on pathSeparator() — still correct after --shell, because the separator
+// inside a value is a property of the Genero runtime that parses it, not of the
+// shell that set it.
 func envParts(t *testing.T, lines []string, key string) []string {
 	t.Helper()
 	value, ok := envValue(t, lines, key)
@@ -534,23 +587,42 @@ func TestFGLPROFILEEmitsDeclaredFilesInOrder(t *testing.T) {
 	// FGLPROFILE is applied left to right with the LAST definition winning, so
 	// the package's files must sit ahead of the inherited value — which is what
 	// makes a user's own profile still override a package's defaults.
-	var raw string
-	for _, l := range lines {
-		if strings.Contains(l, "FGLPROFILE=") {
-			raw = l
+	//
+	// Asserted for every shell rather than branching on runtime.GOOS: the
+	// ordering is the load-bearing claim and it must hold in all three syntaxes.
+	// The inherited-value reference is derived from the emitter (see envLine)
+	// instead of spelled out, so no shell can be silently left uncovered.
+	for _, sh := range []Shell{ShellSh, ShellPowerShell, ShellCmd} {
+		shLines := mustGenerateLocal(t, New(t.TempDir()).WithShell(sh))
+		line, ok := envLine(t, sh, shLines, "FGLPROFILE")
+		if !ok {
+			t.Fatalf("%s: no FGLPROFILE statement in %v", sh, shLines)
+		}
+		inherited := inheritedRef(t, sh, "FGLPROFILE")
+		iValue, iInherited := strings.Index(line.full, wantA), strings.Index(line.full, inherited)
+		if iInherited < 0 {
+			t.Fatalf("%s: FGLPROFILE line should preserve any inherited value: %q", sh, line.full)
+		}
+		if iValue < 0 {
+			t.Fatalf("%s: FGLPROFILE line should contain the package profile: %q", sh, line.full)
+		}
+		if iValue > iInherited {
+			t.Errorf("%s: package profiles must precede the inherited value: %q", sh, line.full)
 		}
 	}
-	inherited := `"${FGLPROFILE:+:$FGLPROFILE}"`
-	if runtime.GOOS == "windows" {
-		inherited = "%FGLPROFILE%"
+}
+
+// inheritedRef returns the part of key's emitted statement that references the
+// variable's pre-existing value, derived from prependLine rather than restated.
+func inheritedRef(t *testing.T, sh Shell, key string) string {
+	t.Helper()
+	const sentinel = "FGLPKGSENTINEL"
+	tpl := prependLine(sh, key, sentinel, pathSeparator())
+	i := strings.Index(tpl, sentinel)
+	if i < 0 {
+		t.Fatalf("prependLine did not embed the sentinel verbatim: %q", tpl)
 	}
-	iValue, iInherited := strings.Index(raw, wantA), strings.Index(raw, inherited)
-	if iInherited < 0 {
-		t.Fatalf("FGLPROFILE line should preserve any inherited value: %q", raw)
-	}
-	if iValue > iInherited {
-		t.Errorf("package profiles must precede the inherited value: %q", raw)
-	}
+	return tpl[i+len(sentinel):]
 }
 
 // TestFGLPROFILESkipsMissingFile: a declared profile that is not installed is
@@ -630,17 +702,48 @@ func TestGenerateGSTEmitsNoCommentLines(t *testing.T) {
 		envTestWrite(t, ".fglpkg/packages/"+pkg+"/forms/Customer.42f", "FORM")
 	}
 
-	g := New(t.TempDir())
-	lines, err := g.GenerateGST()
-	if err != nil {
-		t.Fatalf("GenerateGST: %v", err)
+	// Asked for in every shell, because --shell must not reach GST at all: it is
+	// a Genero Studio file format, not shell syntax. The comment markers are
+	// taken from commentPrefix so a shell added later cannot sneak one in.
+	for _, sh := range []Shell{ShellSh, ShellPowerShell, ShellCmd} {
+		g := New(t.TempDir()).WithShell(sh)
+		lines, err := g.GenerateGST()
+		if err != nil {
+			t.Fatalf("%s: GenerateGST: %v", sh, err)
+		}
+		if len(g.Warnings()) == 0 {
+			t.Fatalf("%s: expected the collision to be reported out-of-band", sh)
+		}
+		for _, l := range lines {
+			if strings.HasPrefix(l, commentPrefix(sh)) || strings.Contains(l, "WEB_COMPONENT_DIRECTORY") {
+				t.Errorf("%s: GST output must contain no comment lines: %q", sh, l)
+			}
+		}
 	}
-	if len(g.Warnings()) == 0 {
-		t.Fatal("expected the collision to be reported out-of-band")
-	}
-	for _, l := range lines {
-		if strings.HasPrefix(l, "#") || strings.HasPrefix(l, "REM ") || strings.Contains(l, "WEB_COMPONENT_DIRECTORY") {
-			t.Errorf("GST output must contain no comment lines: %q", l)
+}
+
+// TestGenerateGSTIgnoresShell: --shell selects shell syntax, and GST output is
+// not shell syntax. The CLI rejects the combination, but the library must be
+// inert about it too, since GST values land verbatim in a user's project
+// settings and a stray quote character would be stored there.
+func TestGenerateGSTIgnoresShell(t *testing.T) {
+	chdirTemp(t)
+	envTestWrite(t, ".fglpkg/packages/poiapi/fglpkg.json",
+		`{ "name": "poiapi", "version": "1.0.0", "dependencies": { "fgl": {} } }`)
+	envTestWrite(t, ".fglpkg/packages/poiapi/forms/Customer.42f", "FORM")
+
+	var want []string
+	for _, sh := range []Shell{ShellSh, ShellPowerShell, ShellCmd} {
+		lines, err := New(t.TempDir()).WithShell(sh).GenerateGST()
+		if err != nil {
+			t.Fatalf("%s: GenerateGST: %v", sh, err)
+		}
+		if want == nil {
+			want = lines
+			continue
+		}
+		if strings.Join(lines, "\n") != strings.Join(want, "\n") {
+			t.Errorf("--shell %s changed GST output:\n got: %v\nwant: %v", sh, lines, want)
 		}
 	}
 }
