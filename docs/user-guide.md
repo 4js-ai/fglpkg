@@ -221,11 +221,13 @@ Key points:
 | `CLASSPATH` | Java JARs | one entry per `*.jar` | `.fglpkg/jars/` |
 | `FGLRESOURCEPATH` | program resources (`*.42f`, `*.42s`, `*.4ad`, `*.4st`, `*.4sm`, `*.4tb`, `*.4tm`, `*.iem`) | directories | every directory in a package that holds one |
 | `FGLDBPATH` | database schemas (`*.sch`, `*.val`, `*.att`) | directories | every directory in a package that holds one |
-| `FGLIMAGEPATH` | webcomponents, images (`*.png`, `*.jpg`, `*.jpeg`, `*.gif`, `*.svg`, `*.bmp`, `*.ico`, `*.tiff`), icon fonts (`*.ttf`) | directories | `.fglpkg/` (for webcomponents) + every image directory in a package |
+| `FGLIMAGEPATH` | webcomponents, images (`*.png`, `*.jpg`, `*.jpeg`, `*.gif`, `*.svg`, `*.bmp`, `*.ico`, `*.tiff`, `*.tif`), icon fonts (`*.ttf`) | directories | `.fglpkg/` (for webcomponents) + every image directory in a package |
 | `FGLPROFILE` | configuration | **files**, not directories | each package's declared [`profile`](#profile) entries |
 
 The file kinds above are the complete lists from the Genero reference manual, not a
-sample. Three are easy to overlook when packaging:
+sample — plus `*.jpeg` and `*.tif`, the alternate spellings of two image formats the
+manual's table lists only as `*.jpg` and `*.tiff`. Three kinds are easy to overlook
+when packaging:
 
 - **`.iem`** — compiled message files (`fglmkmsg`), used by `OPTIONS HELP FILE`. Neither
   `fglcomp` nor `fglform` produces one, so it is often missing from build scripts.
