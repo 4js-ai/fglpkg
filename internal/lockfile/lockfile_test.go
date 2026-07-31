@@ -647,7 +647,7 @@ func TestValidateDependencyRemovedIsStale(t *testing.T) {
 	// The user deletes poiapi from fglpkg.json by hand.
 	edited := rootWithDeps(map[string]string{"utils": "^1.0.0"})
 
-	result := lf.Validate(edited, "4.01.12", "", "")
+	result := lf.Validate(edited, "4.01.12", "", "", "")
 	if result.ManifestMismatch == nil {
 		t.Fatal("removing a dependency from the manifest should make the lock stale")
 	}
@@ -664,7 +664,7 @@ func TestValidateDependencyAddedIsStale(t *testing.T) {
 	lf := lockfile.FromPlan(makePlan(), rootWithDeps(map[string]string{"utils": "^1.0.0"}), "")
 	edited := rootWithDeps(map[string]string{"utils": "^1.0.0", "newdep": "^3.0.0"})
 
-	result := lf.Validate(edited, "4.01.12", "", "")
+	result := lf.Validate(edited, "4.01.12", "", "", "")
 	if result.ManifestMismatch == nil {
 		t.Fatal("adding a dependency by hand should make the lock stale")
 	}
@@ -678,7 +678,7 @@ func TestValidateConstraintChangeIsStale(t *testing.T) {
 	lf := lockfile.FromPlan(makePlan(), rootWithDeps(map[string]string{"utils": "^1.0.0"}), "")
 	edited := rootWithDeps(map[string]string{"utils": "^2.0.0"})
 
-	result := lf.Validate(edited, "4.01.12", "", "")
+	result := lf.Validate(edited, "4.01.12", "", "", "")
 	if result.ManifestMismatch == nil {
 		t.Fatal("widening a version constraint should make the lock stale")
 	}
@@ -694,7 +694,7 @@ func TestValidateUnchangedDependenciesStayClean(t *testing.T) {
 	// Same declarations, independently constructed — must not report staleness
 	// just because the maps are different objects.
 	result := lf.Validate(rootWithDeps(map[string]string{"poiapi": "^2.0.0", "utils": "^1.0.0"}),
-		"4.01.12", "", "")
+		"4.01.12", "", "", "")
 	if result.ManifestMismatch != nil {
 		t.Errorf("unchanged declarations should stay clean, got: %v", result.ManifestMismatch)
 	}
@@ -709,7 +709,7 @@ func TestValidateScopeMoveIsStale(t *testing.T) {
 	moved := makeRoot()
 	moved.DevDependencies.FGL = map[string]string{"tester": "^1.0.0"}
 
-	if result := lf.Validate(moved, "4.01.12", "", ""); result.ManifestMismatch == nil {
+	if result := lf.Validate(moved, "4.01.12", "", "", ""); result.ManifestMismatch == nil {
 		t.Error("moving a dependency between scopes should make the lock stale")
 	}
 }
@@ -726,7 +726,7 @@ func TestValidateJavaDependencyChangeIsStale(t *testing.T) {
 		{GroupID: "com.google.code.gson", ArtifactID: "gson", Version: "2.11.0"},
 	}
 
-	if result := lf.Validate(bumped, "4.01.12", "", ""); result.ManifestMismatch == nil {
+	if result := lf.Validate(bumped, "4.01.12", "", "", ""); result.ManifestMismatch == nil {
 		t.Error("a changed Java coordinate should make the lock stale")
 	}
 }
@@ -739,7 +739,7 @@ func TestValidateRegistryPinChangeIsStale(t *testing.T) {
 	repinned := rootWithDeps(map[string]string{"utils": "^1.0.0"})
 	repinned.Dependencies.FGLPins = map[string]string{"utils": "acme"}
 
-	if result := lf.Validate(repinned, "4.01.12", "", ""); result.ManifestMismatch == nil {
+	if result := lf.Validate(repinned, "4.01.12", "", "", ""); result.ManifestMismatch == nil {
 		t.Error("re-pinning a dependency to another repository should make the lock stale")
 	}
 }
@@ -750,7 +750,7 @@ func TestValidateNoDependenciesStaysClean(t *testing.T) {
 	root := makeRoot()
 	lf := lockfile.FromPlan(makePlan(), root, "")
 
-	if result := lf.Validate(makeRoot(), "4.01.12", "", ""); result.ManifestMismatch != nil {
+	if result := lf.Validate(makeRoot(), "4.01.12", "", "", ""); result.ManifestMismatch != nil {
 		t.Errorf("a dependency-less project should be clean, got: %v", result.ManifestMismatch)
 	}
 }
@@ -781,7 +781,7 @@ func TestLegacyLockWithoutDeclaredIsStale(t *testing.T) {
 	if loaded.RootManifest.Declared != nil {
 		t.Fatal("legacy lock should parse with a nil Declared snapshot")
 	}
-	result := loaded.Validate(makeRoot(), "4.01.12", "", "")
+	result := loaded.Validate(makeRoot(), "4.01.12", "", "", "")
 	if result.ManifestMismatch == nil || !result.NeedsResolve() {
 		t.Error("a lock with no declared snapshot must be treated as stale")
 	}
@@ -791,7 +791,7 @@ func TestLegacyLockWithoutDeclaredIsStale(t *testing.T) {
 	if rewritten.RootManifest.Declared == nil {
 		t.Fatal("FromPlan must record the declared snapshot")
 	}
-	if rewritten.Validate(makeRoot(), "4.01.12", "", "").ManifestMismatch != nil {
+	if rewritten.Validate(makeRoot(), "4.01.12", "", "", "").ManifestMismatch != nil {
 		t.Error("a freshly written lock should validate clean against its own manifest")
 	}
 }
@@ -814,7 +814,7 @@ func TestDeclaredSurvivesSaveLoad(t *testing.T) {
 	if got := loaded.RootManifest.Declared.Prod.FGL["utils"]; got != "^1.0.0" {
 		t.Errorf("round-tripped constraint = %q, want %q", got, "^1.0.0")
 	}
-	if loaded.Validate(root, "4.01.12", "", "").ManifestMismatch != nil {
+	if loaded.Validate(root, "4.01.12", "", "", "").ManifestMismatch != nil {
 		t.Error("round-tripped lock should validate clean against the same manifest")
 	}
 }
