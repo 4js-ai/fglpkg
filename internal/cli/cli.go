@@ -221,9 +221,15 @@ func Execute() error {
 	return err
 }
 
-// startUpdateCheck starts the passive "a new version is available" check for
-// this invocation (GIS-255). It returns nil when the check should not run; a
-// nil *Pending is safe to Finish.
+// startUpdateCheck sets up the passive "a new version is available" check for
+// this invocation (GIS-255): a notice from the cached version, plus a background
+// refresh when the interval has elapsed. It returns nil when the feature is off
+// for this run; a nil *Pending is safe to Finish.
+//
+// Both TTY flags are supplied because they answer different questions: stdout is
+// the command's data stream, so a redirected stdout means scripted use and
+// suppresses the whole feature (no network, no chatter); stderr is where the
+// notice is written, so it decides whether printing it can be seen at all.
 func startUpdateCheck(cmd string) *updatecheck.Pending {
 	home, err := fglpkgHome()
 	if err != nil {
@@ -237,30 +243,46 @@ func startUpdateCheck(cmd string) *updatecheck.Pending {
 		CI:          os.Getenv("CI") != "",
 		NoCheckEnv:  os.Getenv("FGLPKG_NO_UPDATE_CHECK") != "",
 		StdoutIsTTY: isTerminal(os.Stdout),
+		StderrIsTTY: isTerminal(os.Stderr),
 		Enabled:     settings.Enabled,
 		Interval:    settings.Interval,
 		Now:         time.Now(),
 		LastCheck:   state.LastCheck,
 	}
-	return updatecheck.Start(home, env, state.LatestKnown, fetchLatestVersion)
+	return updatecheck.Begin(home, env, state, fetchLatestVersion)
 }
 
-// fetchLatestVersion returns the latest published fglpkg version from the
+// fetchLatestVersion returns the latest published STABLE fglpkg version from the
 // registry — the network call behind the passive check.
+//
+// A pre-release is discarded here, at the point the value enters the cache, not
+// just where the notice is printed: caching an rc would overwrite a genuinely
+// newer stable version and silence the notice for the rest of the interval. An
+// empty result is treated by updatecheck as "no answer", so the previous cached
+// version survives.
 func fetchLatestVersion() (string, error) {
 	lr, err := registry.FetchLatestFGLPkg()
 	if err != nil {
 		return "", err
 	}
+	if v, perr := semver.Parse(lr.Version); perr != nil || v.PreRelease != "" {
+		return "", nil
+	}
 	return lr.Version, nil
 }
 
-// semverNewer reports whether latest is a newer release than current.
-// Unparseable versions (e.g. a "dev" build) are treated as not newer.
+// semverNewer reports whether latest is a newer STABLE release than current.
+// Unparseable versions (e.g. a "dev" build) are treated as not newer, and so is
+// a pre-release: the notice advertises `fglpkg self-update`, which installs
+// latest-stable only, so announcing an rc would point at an upgrade the tool
+// then refuses to perform.
 func semverNewer(current, latest string) bool {
 	c, err1 := semver.Parse(current)
 	l, err2 := semver.Parse(latest)
 	if err1 != nil || err2 != nil {
+		return false
+	}
+	if l.PreRelease != "" {
 		return false
 	}
 	return l.GreaterThan(c)
@@ -1225,9 +1247,16 @@ func cmdEnv(args []string) error {
 // printEnvWarnings writes an env Generator's diagnostics (basename collisions
 // between installed packages, unusable `profile` declarations, over-long
 // values) to stderr.
+//
+// One Warnings() entry is one logical warning, but the collision warning spans
+// several physical lines. Every line carries the prefix so a reader who greps
+// stderr for "warning:" gets the whole diagnostic rather than its first line;
+// the continuation lines keep the indent the message itself supplies.
 func printEnvWarnings(g *env.Generator) {
 	for _, w := range g.Warnings() {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		for _, line := range strings.Split(w, "\n") {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", line)
+		}
 	}
 }
 
@@ -2565,7 +2594,7 @@ func stageBDLFiles(stageDir string, m *manifest.Manifest, ignore *ignoreSet, sta
 			if ignore.shouldExclude(relPath, false) {
 				return nil
 			}
-			archivePath, err := stagePathFor(m.ImportRoot, relPath)
+			archivePath, err := stagePathFor(m.ImportRoot, relPath, kindFile)
 			if err != nil {
 				return err
 			}
@@ -2592,7 +2621,7 @@ func stageBDLFiles(stageDir string, m *manifest.Manifest, ignore *ignoreSet, sta
 		if relErr != nil {
 			relPath = fullPath
 		}
-		archivePath, err := stagePathFor(m.ImportRoot, relPath)
+		archivePath, err := stagePathFor(m.ImportRoot, relPath, kindFile)
 		if err != nil {
 			return err
 		}
@@ -2742,7 +2771,7 @@ func stageProfileFiles(stageDir string, m *manifest.Manifest, staged map[string]
 		if relErr != nil {
 			relPath = fullPath
 		}
-		archivePath, err := stagePathFor(m.ImportRoot, relPath)
+		archivePath, err := stagePathFor(m.ImportRoot, relPath, kindProfile)
 		if err != nil {
 			return nil, err
 		}
@@ -2754,11 +2783,28 @@ func stageProfileFiles(stageDir string, m *manifest.Manifest, staged map[string]
 	return archivePaths, nil
 }
 
+// pathKind carries the caller-specific wording for stagePathFor's
+// outside-importRoot error. The remedy differs by kind: folding a file in via
+// `include` genuinely fixes a stray module or bin script, but cannot fix a
+// profile (see kindProfile), and offering it there sends the author down a dead
+// end.
+type pathKind struct{ label, remedy string }
+
+var (
+	kindFile = pathKind{"file",
+		"fix root/importRoot/files or add it to include"}
+	// A profile cannot be rescued by `include`: stageIncludeFiles folds entries
+	// into the archive root under their BASENAME, and `include` does not feed
+	// the shipped `profile` rewrite in stagePackage — so the declared path would
+	// still resolve outside importRoot and fail here anyway.
+	kindProfile = pathKind{"profile file",
+		"adjust root/importRoot so it resolves inside importRoot (include cannot help here: it folds files into the archive root by basename and does not feed the shipped profile path)"}
+)
+
 // stagePathFor returns the archive path for a packaged file, rebased under
 // importRoot when set. It errors if the file lies outside importRoot (which
-// would otherwise produce a "../" escape) — the caller must fix root/importRoot
-// or fold the file in via `include`.
-func stagePathFor(importRoot, relPath string) (string, error) {
+// would otherwise produce a "../" escape); kind supplies the remedy to suggest.
+func stagePathFor(importRoot, relPath string, kind pathKind) (string, error) {
 	base := importRoot
 	if base == "" {
 		base = "."
@@ -2769,7 +2815,10 @@ func stagePathFor(importRoot, relPath string) (string, error) {
 	}
 	rel = filepath.ToSlash(rel)
 	if rel == ".." || strings.HasPrefix(rel, "../") {
-		return "", fmt.Errorf("file %q is outside importRoot %q — fix root/importRoot/files or add it to include", relPath, importRoot)
+		// Report the path slash-separated, the way the author spelled it in
+		// fglpkg.json — relPath is OS-native, so on Windows a raw %q would echo
+		// back "cfg\\app.4gp" for a manifest entry that reads "cfg/app.4gp".
+		return "", fmt.Errorf("%s %q is outside importRoot %q — %s", kind.label, filepath.ToSlash(relPath), importRoot, kind.remedy)
 	}
 	return rel, nil
 }

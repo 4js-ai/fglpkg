@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // LatestRelease is the client's view of GET /registry/fglpkg/latest — the
@@ -29,14 +30,24 @@ type ReleaseAsset struct {
 	URL  string `json:"url"`
 }
 
+// Bounds on the latest-release lookup. It is a few hundred bytes of JSON, and
+// both callers are latency-sensitive: `self-update` blocks the user on it, and the
+// passive check runs it from a goroutine that should never outlive the command by
+// much. Vars, not consts, so tests can shrink them.
+var (
+	latestFetchTimeout       = 30 * time.Second
+	maxLatestBytes     int64 = 1 << 20 // 1 MiB
+)
+
 // FetchLatestFGLPkg queries the registry's latest-release endpoint. The endpoint
 // is public (auth, if present, only lifts rate limits), so this uses the normal
-// authenticated GET which also works unauthenticated. A registry that predates
-// the endpoint returns 404, surfaced as ErrNotFound so callers can treat it as
-// "no update info" (a silent no-op for the passive check).
+// authenticated GET which also works unauthenticated — bounded here, because
+// unlike a package download there is no legitimate slow case. A registry that
+// predates the endpoint returns 404, surfaced as ErrNotFound so callers can treat
+// it as "no update info" (a silent no-op for the passive check).
 func FetchLatestFGLPkg() (*LatestRelease, error) {
 	u := registryBase() + "/registry/fglpkg/latest"
-	data, err := httpGetAuthed(u)
+	data, err := httpGetAuthedBounded(u, latestFetchTimeout, maxLatestBytes)
 	if err != nil {
 		return nil, err // ErrNotFound on 404
 	}

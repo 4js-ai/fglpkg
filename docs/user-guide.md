@@ -110,8 +110,8 @@ installed them.
 
 ### Update notices
 
-fglpkg also tells you, passively, when a newer version is out. At most once every 24 hours,
-after a command finishes, it prints a short notice to standard error:
+fglpkg also tells you, passively, when a newer version is out. After a command finishes, it
+prints a short notice to standard error:
 
 ```
 ─────────────────────────────────────────────
@@ -120,9 +120,11 @@ after a command finishes, it prints a short notice to standard error:
 ─────────────────────────────────────────────
 ```
 
-The check runs in the background and never blocks your command, changes its exit code, or
-reports network errors. It is automatically silent for `dev` builds, in CI, and when output is
-piped or redirected (not an interactive terminal).
+The notice appears on every command while a newer release is known, and comes from a remembered
+answer — so it is instant and works offline. fglpkg asks the registry at most once every 24 hours,
+in the background, and that refresh never blocks your command, changes its exit code, or reports
+network errors. The whole feature is automatically silent for `dev` builds, in CI, and when output
+is piped or redirected (not an interactive terminal).
 
 To turn it off, set `FGLPKG_NO_UPDATE_CHECK=1`, or configure it in `~/.fglpkg/config.json`:
 
@@ -294,11 +296,13 @@ Key points:
 | `CLASSPATH` | Java JARs | one entry per `*.jar` | `.fglpkg/jars/` |
 | `FGLRESOURCEPATH` | program resources (`*.42f`, `*.42s`, `*.4ad`, `*.4st`, `*.4sm`, `*.4tb`, `*.4tm`, `*.iem`) | directories | every directory in a package that holds one |
 | `FGLDBPATH` | database schemas (`*.sch`, `*.val`, `*.att`) | directories | every directory in a package that holds one |
-| `FGLIMAGEPATH` | webcomponents, images (`*.png`, `*.jpg`, `*.jpeg`, `*.gif`, `*.svg`, `*.bmp`, `*.ico`, `*.tiff`), icon fonts (`*.ttf`) | directories | `.fglpkg/` (for webcomponents) + every image directory in a package |
+| `FGLIMAGEPATH` | webcomponents, images (`*.png`, `*.jpg`, `*.jpeg`, `*.gif`, `*.svg`, `*.bmp`, `*.ico`, `*.tiff`, `*.tif`), icon fonts (`*.ttf`) | directories | `.fglpkg/` (for webcomponents) + every image directory in a package |
 | `FGLPROFILE` | configuration | **files**, not directories | each package's declared [`profile`](#profile) entries |
 
 The file kinds above are the complete lists from the Genero reference manual, not a
-sample. Three are easy to overlook when packaging:
+sample — plus `*.jpeg` and `*.tif`, the alternate spellings of two image formats the
+manual's table lists only as `*.jpg` and `*.tiff`. Three kinds are easy to overlook
+when packaging:
 
 - **`.iem`** — compiled message files (`fglmkmsg`), used by `OPTIONS HELP FILE`. Neither
   `fglcomp` nor `fglform` produces one, so it is often missing from build scripts.
@@ -340,10 +344,13 @@ is nothing to disambiguate them with — so fglpkg cannot prevent it, and instea
 ```
 $ eval "$(fglpkg env --local)"
 warning: FGLRESOURCEPATH: "Customer.42f" is shipped by both "poiapi" (local) and "reportkit" (global).
-  These variables are searched by basename, first match wins: the copy in
-  /home/you/proj/.fglpkg/packages/poiapi/com/fourjs/poiapi will be used and reportkit's is shadowed.
-  Rename one of the two files, or set FGLRESOURCEPATH yourself to pick a winner.
+warning:   These variables are searched by basename, first match wins: the copy in
+warning:   /home/you/proj/.fglpkg/packages/poiapi/com/fourjs/poiapi will be used and reportkit's is shadowed.
+warning:   Rename one of the two files, or set FGLRESOURCEPATH yourself to pick a winner.
 ```
+
+Every physical line carries the `warning:` prefix, so grepping stderr for it gives you the
+whole diagnostic rather than just its first line.
 
 The order is deterministic, so the winner is reproducible rather than an accident:
 

@@ -3,6 +3,11 @@
 // designed to never block the command, never change its exit code, and never
 // surface an error to the user (network failures are swallowed).
 //
+// Notifying and refreshing are separate concerns: every allowed run announces a
+// known-newer version straight from the cache (instant, works offline), while the
+// network refresh happens at most once per interval and only ever feeds the cache
+// for later runs.
+//
 // User settings (opt-out, interval) live in config.json and are read-only. The
 // mutable cache — last check time and last seen version — lives here, in a
 // tool-managed ~/.fglpkg/update-check.json (mode 0600, atomic writes), so the
@@ -51,31 +56,48 @@ func LoadState(home string) State {
 // sibling temp file and is renamed into place, so a process killed mid-write
 // (e.g. a fast command exiting before the background fetch returns) leaves the
 // existing cache intact rather than a truncated file.
+//
+// The home directory is created if missing: atomicfile requires an existing
+// parent, and on a fresh install nothing else has created ~/.fglpkg yet. Without
+// this the throttle could never engage for a brand-new user — every run would
+// fail to record its attempt and re-check.
 func SaveState(home string, s State) error {
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		return err
+	}
 	return atomicfile.WriteFile(statePath(home), data, 0o600)
 }
 
-// Env captures every input to the throttle decision, so ShouldCheck is a pure
-// function — testable without a real environment, TTY, or clock.
+// Env captures every input to the gating decisions, so Allowed and ShouldCheck
+// are pure functions — testable without a real environment, TTY, or clock.
 type Env struct {
 	Version     string        // cli.Version; "" or "dev" disables (source build)
 	Command     string        // the invoked subcommand
 	CI          bool          // $CI is set
 	NoCheckEnv  bool          // $FGLPKG_NO_UPDATE_CHECK is set
-	StdoutIsTTY bool          // don't pollute piped/scripted output
+	StdoutIsTTY bool          // stdout is the data stream: not a TTY => scripted use, stay out of it
+	StderrIsTTY bool          // the notice goes to stderr; don't write it into a redirected stream
 	Enabled     bool          // config.json updateCheck
 	Interval    time.Duration // config.json updateCheckInterval
 	Now         time.Time
 	LastCheck   time.Time // from the cached State
 }
 
-// ShouldCheck reports whether the passive check should run this invocation.
-func ShouldCheck(e Env) bool {
+// Allowed reports whether the passive feature may act at all this invocation,
+// ignoring the interval: a released build, no opt-out, and interactive use.
+// It gates both halves — the cached notice and the background refresh.
+//
+// The TTY condition is deliberately about STDOUT even though the notice is
+// written to stderr: stdout is the command's data stream, so a redirected stdout
+// is the signal that this run is scripted, and a scripted run should neither
+// touch the network nor emit advisory chatter. Whether the notice can actually
+// be seen is a separate question, decided by StderrIsTTY at print time.
+func Allowed(e Env) bool {
 	if e.Version == "" || e.Version == "dev" {
 		return false
 	}
@@ -89,64 +111,96 @@ func ShouldCheck(e Env) bool {
 	case "self-update", "upgrade", "version", "--version", "-v", "-V":
 		return false
 	}
+	return true
+}
+
+// ShouldCheck reports whether the network refresh should run this invocation —
+// Allowed plus a stale cache. A notice can still be printed from cache when this
+// is false; that is the point of the split.
+func ShouldCheck(e Env) bool {
+	if !Allowed(e) {
+		return false
+	}
 	if !e.LastCheck.IsZero() && e.Now.Sub(e.LastCheck) < e.Interval {
 		return false
 	}
 	return true
 }
 
-// Pending is a handle to an in-flight background check.
+// Pending is this invocation's passive-check handle: the version already known
+// from cache, plus (when the interval elapsed) an in-flight background refresh.
 type Pending struct {
-	current string
-	ch      chan string
+	current   string
+	cached    string      // LatestKnown from the cache; printed if no fresh result arrives
+	stderrTTY bool        // print only into a real terminal
+	ch        chan string // nil when the refresh was throttled
 }
 
-// Start kicks off a background update check when ShouldCheck(e) is true. fetch
-// returns the latest version string (registry.FetchLatestFGLPkg().Version in
-// production); prevLatest is the previously cached version, preserved on a fetch
-// failure. It never blocks. When the check should not run it returns nil, and
-// Finish on a nil *Pending is a no-op.
+// Begin sets up the passive update check for this invocation. It never blocks
+// and returns nil when the feature is not allowed at all (a nil *Pending is safe
+// to Finish).
 //
-// The cache is updated by the background goroutine as soon as the fetch returns
-// (recording the attempt time even on failure, so a missing/flaky endpoint is
-// not hammered), independently of whether Finish ends up printing a notice.
-func Start(home string, e Env, prevLatest string, fetch func() (string, error)) *Pending {
-	if !ShouldCheck(e) {
+// Two independent concerns, per specs/self-update.md:
+//
+//   - Notify: the cached LatestKnown is carried into the returned handle, so a
+//     known-newer version is announced by Finish immediately — no network, works
+//     offline, and works on throttled runs.
+//   - Refresh: when the interval has elapsed, the attempt time is persisted
+//     SYNCHRONOUSLY here, before the fetch starts, and only then is the fetch
+//     backgrounded. Recording the attempt up front is what makes the throttle
+//     hold for fast commands: `fglpkg list` can exit before the goroutine gets a
+//     chance to write, and a LastCheck written only by the goroutine would leave
+//     every fast invocation looking stale and firing a fresh request.
+//
+// fetch returns the latest version string (registry.FetchLatestFGLPkg().Version
+// in production). On failure the previously cached version is kept, so a flaky
+// endpoint neither clears the cache nor gets hammered.
+func Begin(home string, e Env, state State, fetch func() (string, error)) *Pending {
+	if !Allowed(e) {
 		return nil
 	}
-	p := &Pending{current: e.Version, ch: make(chan string, 1)}
+	p := &Pending{current: e.Version, cached: state.LatestKnown, stderrTTY: e.StderrIsTTY}
+	if !ShouldCheck(e) {
+		return p // throttled: notice-from-cache only
+	}
 	now := e.Now
+	_ = SaveState(home, State{LastCheck: now, LatestKnown: state.LatestKnown})
+	p.ch = make(chan string, 1)
 	go func() {
 		latest, err := fetch()
-		st := State{LastCheck: now, LatestKnown: prevLatest}
-		if err == nil && latest != "" {
-			st.LatestKnown = latest
-		}
-		_ = SaveState(home, st)
-		if err != nil {
-			p.ch <- ""
+		if err != nil || latest == "" {
+			p.ch <- "" // attempt time is already on disk
 			return
 		}
+		_ = SaveState(home, State{LastCheck: now, LatestKnown: latest})
 		p.ch <- latest
 	}()
 	return p
 }
 
-// Finish prints a one-line notice to w iff the background check has ALREADY
-// returned a newer version — newer(current, latest) decides. It never blocks: if
-// the result is not yet in, it is skipped (the goroutine still updates the cache
-// for next time). Safe to call on a nil *Pending.
+// Finish prints the one-line notice to w if a newer version is known —
+// newer(current, latest) decides. It never blocks: a background refresh that has
+// ALREADY returned wins (it is the freshest answer), otherwise the cached
+// version is used, so the notice is instant and offline-capable. Exactly one
+// notice is printed at most. Safe to call on a nil *Pending.
 func (p *Pending) Finish(w io.Writer, newer func(current, latest string) bool) {
-	if p == nil {
+	if p == nil || !p.stderrTTY {
 		return
 	}
-	select {
-	case latest := <-p.ch:
-		if latest != "" && newer(p.current, latest) {
-			printNotice(w, p.current, latest)
+	latest := p.cached
+	if p.ch != nil {
+		select {
+		case fresh := <-p.ch:
+			if fresh != "" {
+				latest = fresh
+			}
+		default:
+			// Refresh not back yet — fall back to the cache, per the
+			// non-blocking contract. The goroutine still updates the cache.
 		}
-	default:
-		// Result not back yet — skip, per the non-blocking contract.
+	}
+	if latest != "" && newer(p.current, latest) {
+		printNotice(w, p.current, latest)
 	}
 }
 

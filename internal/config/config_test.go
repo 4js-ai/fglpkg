@@ -3,7 +3,9 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestResolve_BuiltinOnly(t *testing.T) {
@@ -190,6 +192,55 @@ func TestLoadGlobal_ReadsFile(t *testing.T) {
 	}
 	if len(regs) != 1 || regs[0].Name != "acme" || regs[0].RepoKey != "k" {
 		t.Fatalf("unexpected: %+v", regs)
+	}
+}
+
+// TestWriteGlobal_DoesNotInjectUpdateFields pins issue #21 item 2: `registry
+// add`/`remove` do a read-modify-write of the whole file, so a user who never set
+// the advisory update-check settings must not find them appearing in their
+// hand-edited config.json.
+func TestWriteGlobal_DoesNotInjectUpdateFields(t *testing.T) {
+	home := t.TempDir()
+	g := GlobalFile{Registries: []Registry{{Name: "acme", Type: TypeArtifactory, URL: "https://a", RepoKey: "k", Priority: 2}}}
+	if err := WriteGlobalFile(home, g); err != nil {
+		t.Fatalf("WriteGlobalFile: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(home, GlobalFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"updateCheck", "updateCheckInterval"} {
+		if strings.Contains(string(data), field) {
+			t.Errorf("write injected %q into a config that never set it:\n%s", field, data)
+		}
+	}
+}
+
+// TestWriteGlobal_KeepsExplicitUpdateFields: omitempty must not swallow a real
+// opt-out. A non-nil *bool is non-empty even when it points at false, so an
+// explicit `"updateCheck": false` survives the read-modify-write cycle.
+func TestWriteGlobal_KeepsExplicitUpdateFields(t *testing.T) {
+	home := t.TempDir()
+	off := false
+	if err := WriteGlobalFile(home, GlobalFile{UpdateCheck: &off, UpdateCheckInterval: "12h"}); err != nil {
+		t.Fatalf("WriteGlobalFile: %v", err)
+	}
+	g, err := LoadGlobalFile(home)
+	if err != nil {
+		t.Fatalf("LoadGlobalFile: %v", err)
+	}
+	if g.UpdateCheck == nil || *g.UpdateCheck {
+		t.Errorf("updateCheck did not round-trip as false: %v", g.UpdateCheck)
+	}
+	if g.UpdateCheckInterval != "12h" {
+		t.Errorf("updateCheckInterval = %q, want 12h", g.UpdateCheckInterval)
+	}
+	s, err := LoadUpdateSettings(home)
+	if err != nil {
+		t.Fatalf("LoadUpdateSettings: %v", err)
+	}
+	if s.Enabled || s.Interval != 12*time.Hour {
+		t.Errorf("resolved settings = %+v, want disabled with a 12h interval", s)
 	}
 }
 
