@@ -87,9 +87,14 @@ $err"
 }
 
 # ---------- platform helpers ----------
-# `fglpkg env` emits `SET VAR=...;%VAR%` on Windows, which a POSIX shell cannot
-# eval. Tests that exercise the eval round-trip probe already-captured output
-# with this and skip there.
+# Reports whether captured `fglpkg env` output is in cmd.exe `SET VAR=...;%VAR%`
+# syntax, which a POSIX shell cannot eval. That is the DEFAULT on Windows.
+#
+# Prefer `env --local --shell sh` in new tests: asking for the shell the suite is
+# actually running in (Git Bash, even on Windows) makes the eval round-trip work
+# everywhere, which is why the two cases that used to skip on Windows no longer
+# do. Note this predicate answers "did this output use the cmd shape", NOT "am I
+# on Windows" — `--shell sh` produces `export` lines from a Windows binary.
 env_output_is_windows_style() {  # env_output_is_windows_style "<captured output>"
   case "$1" in
     "SET "*|*$'\n'"SET "*) return 0 ;;

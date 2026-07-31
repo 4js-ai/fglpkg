@@ -22,6 +22,14 @@ assert_match() {  # extended-regex match against $output (or $2)
   local re="$1" hay="${2-$output}"
   grep -Eq -- "$re" <<<"$hay" || { _diag "expected to match /$re/"; _diag "in:"; printf '%s\n' "$hay" >&2; return 1; }
 }
+assert_not_match() {  # extended-regex must NOT match $output (or $2)
+  # Use this instead of assert_not_contains for structural claims like "no line
+  # STARTS WITH a comment marker": a bare substring check on "#" also fires on
+  # any path that happens to contain one.
+  local re="$1" hay="${2-$output}"
+  grep -Eq -- "$re" <<<"$hay" && { _diag "expected NOT to match /$re/"; _diag "in:"; printf '%s\n' "$hay" >&2; return 1; }
+  return 0
+}
 assert_eq() { [[ "$1" == "$2" ]] || { _diag "expected equal: [$1] == [$2]"; return 1; }; }
 
 # --- path content (separator-agnostic) ---

@@ -56,22 +56,41 @@ it "env omits FGLPROFILE when the declared file is not installed" _ep_omits_miss
 
 # FGLPROFILE entries are applied left to right with the LAST winning, so the
 # package's files must come first for the user's own profile to still override.
+#
+# --shell sh is explicit because this suite runs under Git Bash even on Windows,
+# where the default output is cmd syntax a POSIX shell cannot eval.
 _ep_user_value_wins() {
   _ep_installed_profile
-  run env --local
+  run env --local --shell sh
   assert_success
-  if env_output_is_windows_style "$output"; then
-    skip "FGLPROFILE lists package files before the user's existing value" "output is cmd.exe SET syntax"
-    return 0
-  fi
   export FGLPROFILE="/tmp/mine.4gp"
-  eval "$("$FGLPKG" env --local 2>/dev/null)"
+  eval "$("$FGLPKG" env --local --shell sh 2>/dev/null)"
   assert_contains_path "packages/poiapi/profiles/app.4gp" "$FGLPROFILE"
   assert_contains "/tmp/mine.4gp" "$FGLPROFILE"
-  local pkg_at user_at
-  pkg_at="${FGLPROFILE%%packages/poiapi*}"
-  user_at="${FGLPROFILE%%/tmp/mine.4gp*}"
+  # Normalise separators before the prefix trims, as assert_contains_path does:
+  # on Windows the value comes back with backslashes, so a "packages/poiapi"
+  # pattern would never match and both trims would return the whole string.
+  local norm pkg_at user_at
+  norm="${FGLPROFILE//\\//}"
+  pkg_at="${norm%%packages/poiapi*}"
+  user_at="${norm%%/tmp/mine.4gp*}"
   [[ ${#pkg_at} -lt ${#user_at} ]] \
     || { _diag "package profile must precede the user's: $FGLPROFILE"; return 1; }
 }
 it "FGLPROFILE lists package files before the user's existing value" _ep_user_value_wins
+
+# An unset variable must not gain a leading separator: to fglrun an empty path
+# entry means the current directory.
+_ep_no_leading_separator_when_unset() {
+  _ep_installed_profile
+  unset FGLPROFILE
+  eval "$("$FGLPKG" env --local --shell sh 2>/dev/null)"
+  assert_contains_path "packages/poiapi/profiles/app.4gp" "${FGLPROFILE:-}"
+  case "${FGLPROFILE:-}" in
+    ";"*|":"*) _diag "leading separator with the variable unset: $FGLPROFILE"; return 1 ;;
+  esac
+  case "${FGLPROFILE:-}" in
+    *";"|*":") _diag "trailing separator with the variable unset: $FGLPROFILE"; return 1 ;;
+  esac
+}
+it "env adds no stray separator when FGLPROFILE is unset" _ep_no_leading_separator_when_unset

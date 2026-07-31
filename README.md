@@ -52,10 +52,24 @@ echo 'eval "$(fglpkg env --global)"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-**Windows (cmd.exe)** — create a `setup-env.bat` script or run before building:
+**Windows (PowerShell)** — add to your profile (`$PROFILE`):
+
+```powershell
+fglpkg env --global --shell powershell | Invoke-Expression
+```
+
+**Windows (cmd.exe)** — generate a batch file and `call` it before building:
 
 ```cmd
-FOR /F "tokens=*" %%i IN ('fglpkg env --global') DO %%i
+fglpkg env --global --shell cmd > setup-env.bat
+call setup-env.bat
+```
+
+**Windows (Git Bash / WSL)** — pass `--shell sh`, since the Windows default is
+Command Prompt syntax:
+
+```bash
+eval "$(fglpkg env --global --shell sh)"
 ```
 
 **Genero Studio** — paste the output of `fglpkg env --gst` into your project's environment settings.
@@ -352,6 +366,7 @@ fglpkg update                            # Re-resolve and update all dependencie
 fglpkg list                              # List installed packages
 fglpkg env                               # Print export statements (auto-detects scope)
 fglpkg env --global                      # Print exports for all global packages
+fglpkg env --shell powershell            # Emit PowerShell syntax (or sh / cmd)
 fglpkg env --gst                         # Print in Genero Studio format
 fglpkg relink                            # Rebuild the merged FGLLDPATH root (recover a
                                          #   deleted/stale .fglpkg/merged; install/remove

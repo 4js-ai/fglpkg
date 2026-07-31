@@ -28,6 +28,7 @@ var completionFlags = []string{
 	"--global", "-g",
 	"--force", "-f",
 	"--gst",
+	"--shell=",
 	"--dry-run", "-n",
 	"--changelog",
 	"--git",
