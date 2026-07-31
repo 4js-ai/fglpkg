@@ -43,15 +43,19 @@ func TestBuildPackageZip_ShipsProfileNotMatchedByFilesGlobs(t *testing.T) {
 // relative to `root`, but staging strips importRoot. The shipped manifest must
 // describe the post-strip layout, or the installed copy's FGLPROFILE lookup
 // (which joins the entry onto the store dir) would miss the file.
+//
+// The fixture deliberately leaves `root` at its default "." while importRoot is
+// "lib", so the author-side entry ("lib/profiles/app.4gp") and the archive path
+// ("profiles/app.4gp") are DIFFERENT strings. A fixture where root == importRoot
+// makes the strip a no-op, and the rewrite could be deleted without failing.
 func TestBuildPackageZip_RewritesProfileToArchivePath(t *testing.T) {
 	stagePackTestDir(t, map[string]string{
 		"fglpkg.json": `{
   "name": "fglpkgtest",
   "version": "1.0.0",
-  "root": "lib",
   "importRoot": "lib",
   "files": ["*.42m"],
-  "profile": ["profiles/app.4gp"],
+  "profile": ["lib/profiles/app.4gp"],
   "dependencies": { "fgl": {} }
 }`,
 		"lib/ModuleA.42m":      "MAIN END MAIN\n",
@@ -72,13 +76,53 @@ func TestBuildPackageZip_RewritesProfileToArchivePath(t *testing.T) {
 	if _, ok := got["profiles/app.4gp"]; !ok {
 		t.Errorf("expected the profile rebased to profiles/app.4gp; got %v", keys(boolKeys(got)))
 	}
-	// And the shipped manifest points at where it actually landed.
+	if _, ok := got["lib/profiles/app.4gp"]; ok {
+		t.Error("the profile must not keep its lib/ prefix in the archive")
+	}
+	// And the shipped manifest points at where it actually landed, not at the
+	// author-side path — this is what env's os.Stat gate consumes.
 	var shipped manifest.Manifest
 	if err := json.Unmarshal([]byte(got[manifest.Filename]), &shipped); err != nil {
 		t.Fatalf("unmarshal shipped manifest: %v", err)
 	}
 	if len(shipped.Profile) != 1 || shipped.Profile[0] != "profiles/app.4gp" {
 		t.Errorf("shipped manifest profile should be the archive path; got %v", shipped.Profile)
+	}
+}
+
+// TestBuildPackageZip_ProfileOutsideImportRootPointsAtRoot: a profile that
+// cannot be rebased under importRoot is a hard pack error (never a silent
+// mis-ship), and the remedy offered must be one that works. `include` is not:
+// it folds by basename into the archive root and does not feed the shipped
+// `profile` path, so the author has to fix root/importRoot instead.
+func TestBuildPackageZip_ProfileOutsideImportRootPointsAtRoot(t *testing.T) {
+	stagePackTestDir(t, map[string]string{
+		"fglpkg.json": `{
+  "name": "fglpkgtest",
+  "version": "1.0.0",
+  "importRoot": "lib",
+  "files": ["*.42m"],
+  "profile": ["cfg/app.4gp"],
+  "dependencies": { "fgl": {} }
+}`,
+		"lib/ModuleA.42m": "MAIN END MAIN\n",
+		"cfg/app.4gp":     "gwc.server.name = \"demo\"\n",
+	})
+
+	m, err := manifest.Load(".")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	_, _, err = buildPackageZip(m)
+	if err == nil {
+		t.Fatal("expected an error for a profile outside importRoot")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "profile file") || !strings.Contains(msg, "importRoot") {
+		t.Errorf("error should name the profile file and importRoot; got: %v", err)
+	}
+	if strings.Contains(msg, "add it to include") {
+		t.Errorf("`include` cannot fix a profile — do not suggest it; got: %v", err)
 	}
 }
 

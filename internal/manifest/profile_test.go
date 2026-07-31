@@ -54,13 +54,36 @@ func TestLintWarnsDuplicateProfile(t *testing.T) {
 	var r Report
 	m.LintInto(&r)
 
-	found := false
-	for _, d := range r.Warnings() {
-		if d.Field == "profile" && strings.Contains(d.Message, "profiles/app.4gp") {
-			found = true
-		}
-	}
-	if !found {
+	if !hasProfileWarning(&r, "profiles/app.4gp") {
 		t.Errorf("expected a duplicate-profile warning; got %+v", r.Warnings())
 	}
+}
+
+// TestLintWarnsDuplicateProfileAcrossSpellings: two spellings of one path are a
+// duplicate to pack (both stage to the same archive entry and land on
+// FGLPROFILE twice), so exact-string comparison would miss a real mistake. The
+// warning reports the canonical spelling.
+func TestLintWarnsDuplicateProfileAcrossSpellings(t *testing.T) {
+	m := &Manifest{
+		Name:    "pkg",
+		Version: "1.0.0",
+		Profile: []string{"profiles/app.4gp", "./profiles/app.4gp"},
+	}
+	var r Report
+	m.LintInto(&r)
+
+	if !hasProfileWarning(&r, "profiles/app.4gp") {
+		t.Errorf("expected a duplicate-profile warning for differing spellings; got %+v", r.Warnings())
+	}
+}
+
+// hasProfileWarning reports whether the lint report carries a `profile` warning
+// mentioning want.
+func hasProfileWarning(r *Report, want string) bool {
+	for _, d := range r.Warnings() {
+		if d.Field == "profile" && strings.Contains(d.Message, want) {
+			return true
+		}
+	}
+	return false
 }
