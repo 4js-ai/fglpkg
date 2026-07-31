@@ -1174,9 +1174,16 @@ func cmdEnv(args []string) error {
 // printEnvWarnings writes an env Generator's diagnostics (basename collisions
 // between installed packages, unusable `profile` declarations, over-long
 // values) to stderr.
+//
+// One Warnings() entry is one logical warning, but the collision warning spans
+// several physical lines. Every line carries the prefix so a reader who greps
+// stderr for "warning:" gets the whole diagnostic rather than its first line;
+// the continuation lines keep the indent the message itself supplies.
 func printEnvWarnings(g *env.Generator) {
 	for _, w := range g.Warnings() {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		for _, line := range strings.Split(w, "\n") {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", line)
+		}
 	}
 }
 
@@ -2514,7 +2521,7 @@ func stageBDLFiles(stageDir string, m *manifest.Manifest, ignore *ignoreSet, sta
 			if ignore.shouldExclude(relPath, false) {
 				return nil
 			}
-			archivePath, err := stagePathFor(m.ImportRoot, relPath)
+			archivePath, err := stagePathFor(m.ImportRoot, relPath, kindFile)
 			if err != nil {
 				return err
 			}
@@ -2541,7 +2548,7 @@ func stageBDLFiles(stageDir string, m *manifest.Manifest, ignore *ignoreSet, sta
 		if relErr != nil {
 			relPath = fullPath
 		}
-		archivePath, err := stagePathFor(m.ImportRoot, relPath)
+		archivePath, err := stagePathFor(m.ImportRoot, relPath, kindFile)
 		if err != nil {
 			return err
 		}
@@ -2691,7 +2698,7 @@ func stageProfileFiles(stageDir string, m *manifest.Manifest, staged map[string]
 		if relErr != nil {
 			relPath = fullPath
 		}
-		archivePath, err := stagePathFor(m.ImportRoot, relPath)
+		archivePath, err := stagePathFor(m.ImportRoot, relPath, kindProfile)
 		if err != nil {
 			return nil, err
 		}
@@ -2703,11 +2710,28 @@ func stageProfileFiles(stageDir string, m *manifest.Manifest, staged map[string]
 	return archivePaths, nil
 }
 
+// pathKind carries the caller-specific wording for stagePathFor's
+// outside-importRoot error. The remedy differs by kind: folding a file in via
+// `include` genuinely fixes a stray module or bin script, but cannot fix a
+// profile (see kindProfile), and offering it there sends the author down a dead
+// end.
+type pathKind struct{ label, remedy string }
+
+var (
+	kindFile = pathKind{"file",
+		"fix root/importRoot/files or add it to include"}
+	// A profile cannot be rescued by `include`: stageIncludeFiles folds entries
+	// into the archive root under their BASENAME, and `include` does not feed
+	// the shipped `profile` rewrite in stagePackage — so the declared path would
+	// still resolve outside importRoot and fail here anyway.
+	kindProfile = pathKind{"profile file",
+		"adjust root/importRoot so it resolves inside importRoot (include cannot help here: it folds files into the archive root by basename and does not feed the shipped profile path)"}
+)
+
 // stagePathFor returns the archive path for a packaged file, rebased under
 // importRoot when set. It errors if the file lies outside importRoot (which
-// would otherwise produce a "../" escape) — the caller must fix root/importRoot
-// or fold the file in via `include`.
-func stagePathFor(importRoot, relPath string) (string, error) {
+// would otherwise produce a "../" escape); kind supplies the remedy to suggest.
+func stagePathFor(importRoot, relPath string, kind pathKind) (string, error) {
 	base := importRoot
 	if base == "" {
 		base = "."
@@ -2718,7 +2742,10 @@ func stagePathFor(importRoot, relPath string) (string, error) {
 	}
 	rel = filepath.ToSlash(rel)
 	if rel == ".." || strings.HasPrefix(rel, "../") {
-		return "", fmt.Errorf("file %q is outside importRoot %q — fix root/importRoot/files or add it to include", relPath, importRoot)
+		// Report the path slash-separated, the way the author spelled it in
+		// fglpkg.json — relPath is OS-native, so on Windows a raw %q would echo
+		// back "cfg\\app.4gp" for a manifest entry that reads "cfg/app.4gp".
+		return "", fmt.Errorf("%s %q is outside importRoot %q — %s", kind.label, filepath.ToSlash(relPath), importRoot, kind.remedy)
 	}
 	return rel, nil
 }
