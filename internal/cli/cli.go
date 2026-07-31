@@ -4391,8 +4391,12 @@ ENVIRONMENT:
 
 `)
 	} else {
+		// pwsh runs on Linux and macOS too, and --shell powershell works there:
+		// the emitted syntax is a property of the shell, not of the platform.
+		// The separator stays ':' because that is what fglrun expects here.
 		fmt.Print(`SETUP:
   Add to ~/.bashrc:  eval "$(fglpkg env --global)"
+  PowerShell (pwsh): fglpkg env --global --shell powershell | Invoke-Expression
 
 `)
 	}
