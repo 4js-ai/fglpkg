@@ -25,5 +25,11 @@ _env_empty() {
   # output is empty. That is expected; the command must simply exit cleanly and
   # not emit a spurious FGLLDPATH pointing at an empty store.
   assert_not_contains "FGLLDPATH"
+  # Same rule for every other managed variable: emit nothing rather than a
+  # spurious empty export.
+  assert_not_contains "FGLRESOURCEPATH"
+  assert_not_contains "FGLDBPATH"
+  assert_not_contains "FGLIMAGEPATH"
+  assert_not_contains "FGLPROFILE"
 }
 it "env --global exits cleanly (no output) with an empty home" _env_empty

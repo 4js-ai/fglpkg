@@ -129,7 +129,8 @@ fglpkg stores everything under `~/.fglpkg` (override with `FGLPKG_HOME`):
 ├── jars/              # Java JARs
 │   ├── gson-2.10.1.jar
 │   └── commons-lang3-3.12.0.jar
-└── credentials.json   # Registry + GitHub auth tokens
+├── config.json        # Per-user machine config: registry declarations (no secrets), preferences
+└── credentials.json   # Registry + GitHub auth tokens (secrets; never committed)
 ```
 
 The `merged/` directory is a **derived cache**, not a source of truth: `fglpkg env` puts it on
@@ -239,6 +240,7 @@ eval "$(fglpkg env --global)"
 | `importRoot` | No | Directory whose *contents* become the archive root (its prefix is stripped) — e.g. ship compiled output from under `lib/` without the `lib/` prefix. Must lie on the same path as `root`. |
 | `files` | No | Glob patterns for files to include in the zip (default `["*.42m", "*.42f", "*.sch"]`). A pattern with no `/` matches basenames at any depth under `root`; a pattern containing `/` is path-scoped relative to `root`. |
 | `include` | No | Extra loose files folded into the archive **root** by basename (e.g. `["dist/app.4st"]` ships as `app.4st`) — for files that live outside `importRoot`. |
+| `profile` | No | Genero configuration **files** this package ships (e.g. `["profiles/app.4gp"]`), relative to `root`. Always packed (even when `files` doesn't match them) and put on the consumer's `FGLPROFILE` ahead of their existing value, so their own settings still win |
 | `bin` | No | Command name to script path mappings (e.g., `{"migrate": "scripts/migrate.sh"}`) |
 | `docs` | No | Glob patterns for documentation files to include (e.g., `["README.md", "docs/**/*.md"]`) |
 | `dependencies.fgl` | No | BDL production package dependencies. Each value is either a version-constraint string (`"^1.0.0"`) or an object pinning the source repository: `{ "version": "^1.0.0", "registry": "acme" }` (see [Secondary Package Repositories](#secondary-package-repositories-jfrog-artifactory)) |
@@ -264,8 +266,12 @@ eval "$(fglpkg env --global)"
 | `FGLPKG_INSTALL_CONCURRENCY` | Cap parallel downloads during install (default 4) |
 | `FGLPKG_SIGNING` | Layer 1 signature enforcement: `require`, `warn`, or `off`. Overrides `signing.enforce` in `config.json` |
 | `FGLPKG_NO_UPDATE_CHECK` | Set to disable the passive "new version available" notice (also configurable via `updateCheck` in `~/.fglpkg/config.json`). Always off for `dev` builds, in CI, and for non-interactive output |
-| `FGLLDPATH` | Auto-managed by `fglpkg env` (prepends, preserves existing value) |
-| `CLASSPATH` | Auto-managed by `fglpkg env` (prepends, preserves existing value) |
+| `FGLLDPATH` | Auto-managed by `fglpkg env` — program modules, via the merged root (prepends, preserves existing value) |
+| `CLASSPATH` | Auto-managed by `fglpkg env` — installed JARs (prepends, preserves existing value) |
+| `FGLRESOURCEPATH` | Auto-managed by `fglpkg env` — directories holding packaged `.42f`/`.42s`/`.4ad`/`.4st`/`.4sm`/`.4tb`/`.4tm`/`.iem` |
+| `FGLDBPATH` | Auto-managed by `fglpkg env` — directories holding packaged `.sch`/`.val`/`.att` |
+| `FGLIMAGEPATH` | Auto-managed by `fglpkg env` — installed webcomponents plus directories holding packaged images and `.ttf` icon fonts |
+| `FGLPROFILE` | Auto-managed by `fglpkg env` — config **files** declared by a package's `profile` (listed first, so your own value still overrides) |
 
 ### Authentication
 
@@ -557,6 +563,20 @@ stay in `~/.fglpkg/credentials.json`. The effective set is a cascade, in
 increasing precedence: the built-in GI registry → the machine-wide
 `~/.fglpkg/config.json` → the project's `fglpkg.json`. Entries merge by `name`.
 
+There are three layers, mirroring npm's `.npmrc` / NuGet's `NuGet.config` split
+of *what to fetch* from *how to authenticate*:
+
+| Layer | File | Scope | Committed? |
+|---|---|---|---|
+| Project | `fglpkg.json` `registries` | This repo — team-shared | **Yes**, checked in |
+| Machine | `~/.fglpkg/config.json` | Per-user default for every project | No (per developer) |
+| Secrets | `~/.fglpkg/credentials.json` | Per-user tokens, keyed by URL | **Never** |
+
+Because the registry declarations live in the committed `fglpkg.json`, a clean
+clone needs no registry setup: **clone → `fglpkg login --registry <name>` →
+`fglpkg install`** just works. Each developer supplies only their own credentials;
+nobody re-declares the registries, and no secret is ever committed.
+
 Put it in the project `fglpkg.json` (committed, so teammates inherit the URL on
 clone):
 
@@ -614,12 +634,13 @@ Inspect the effective set and login status:
 
 ```bash
 fglpkg registry list
-# NAME   TYPE         PRIO  AUTH    LOGIN  URL
-# gi     genero       1     bearer  env    https://service.generointelligence.ai
-# acme   artifactory  2     bearer  yes    https://artifactory.acme.example/artifactory
+# NAME   TYPE         PRIO  AUTH    LOGIN  SOURCE   URL
+# gi     genero       1     bearer  env    builtin  https://service.generointelligence.ai
+# acme   artifactory  2     bearer  yes    project  https://artifactory.acme.example/artifactory
 ```
 
 `LOGIN` values: `yes` (credentials stored), `env` (GI authenticated by `FGLPKG_TOKEN`), `no` (none), `anon` (no auth needed).
+`SOURCE` values: `builtin` (the always-present GI entry), `global` (from `~/.fglpkg/config.json`), `project` (from the committed `fglpkg.json`) — so you can see at a glance which registries a clone inherited from the repo.
 
 ### Authentication
 

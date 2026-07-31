@@ -36,6 +36,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -279,6 +280,42 @@ const (
 // storage-API reads and artifact downloads.
 func (f *File) AuthHeaders(registryURL, scheme string) map[string]string {
 	e, _ := f.Get(registryURL)
+	return headersForEntry(e, scheme)
+}
+
+// AuthHeadersForURL is like AuthHeaders but resolves the credential by the
+// longest stored key that is an origin-and-path-boundary prefix of rawURL,
+// preferring an exact match. This lets a download URL nested under a registry
+// base — e.g. a Maven mirror at ".../artifactory/<repo>" served by the same
+// Artifactory the user logged into at ".../artifactory" — authenticate from
+// the enclosing registry credential without a mirror-specific login (GIS-365).
+// Boundary matching mirrors the installer's matchRepoAuth rule so a key never
+// matches a merely-string-prefixed host or path. Returns nil when no stored
+// credential covers rawURL.
+func (f *File) AuthHeadersForURL(rawURL, scheme string) map[string]string {
+	if e, ok := f.Get(rawURL); ok {
+		if h := headersForEntry(e, scheme); h != nil {
+			return h
+		}
+	}
+	var bestKey string
+	var bestEntry Entry
+	for k, e := range f.Registries {
+		if urlCoveredByKey(rawURL, k) && len(k) > len(bestKey) {
+			bestKey, bestEntry = k, e
+		}
+	}
+	if bestKey == "" {
+		return nil
+	}
+	return headersForEntry(bestEntry, scheme)
+}
+
+// headersForEntry builds the HTTP headers implementing scheme from a single
+// credential entry. Shared by the exact (AuthHeaders) and prefix
+// (AuthHeadersForURL) lookups. Returns nil for anonymous, an unknown scheme,
+// or when the required secret is absent.
+func headersForEntry(e Entry, scheme string) map[string]string {
 	switch scheme {
 	case SchemeBearer:
 		if e.Pat != "" {
@@ -295,6 +332,31 @@ func (f *File) AuthHeaders(registryURL, scheme string) map[string]string {
 		}
 	}
 	return nil
+}
+
+// urlCoveredByKey reports whether a credential key (a stored, normalised
+// registry URL) is an origin-and-path-boundary prefix of rawURL: same
+// scheme+host (case-insensitive) and rawURL's path starts with the key's path
+// on a "/" boundary. Both sides are normalised first so the comparison matches
+// how keys are stored. This is the credentials-package twin of the installer's
+// urlHasOriginPrefix — duplicated rather than shared to avoid an import cycle.
+func urlCoveredByKey(rawURL, key string) bool {
+	u, err := url.Parse(normalise(rawURL))
+	if err != nil {
+		return false
+	}
+	k, err := url.Parse(normalise(key))
+	if err != nil {
+		return false
+	}
+	if !strings.EqualFold(u.Scheme, k.Scheme) || !strings.EqualFold(u.Host, k.Host) {
+		return false
+	}
+	if !strings.HasPrefix(u.Path, k.Path) {
+		return false
+	}
+	rest := u.Path[len(k.Path):]
+	return rest == "" || strings.HasPrefix(rest, "/")
 }
 
 // Delete removes the entire credential entry (OAuth + PAT + GitHub token) for

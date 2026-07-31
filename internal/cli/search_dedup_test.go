@@ -41,7 +41,7 @@ func TestSearchAcrossProviders_DedupAndCollision(t *testing.T) {
 	}
 	rs := provider.NewRepositorySet([]provider.Provider{gi, acme}, descs, nil)
 
-	out, err := captureStdout(t, func() error { return searchAcrossProviders(rs, "u", false, nil) })
+	out, err := captureStdout(t, func() error { return searchAcrossProviders(rs, "u", false, nil, "") })
 	if err != nil {
 		t.Fatalf("searchAcrossProviders: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestSearchAcrossProviders_GradesAgainstTarget(t *testing.T) {
 	rs := provider.NewRepositorySet([]provider.Provider{gi}, descs, nil)
 	target := genero.MustParse("4.01.12")
 
-	out, err := captureStdout(t, func() error { return searchAcrossProviders(rs, "x", false, &target) })
+	out, err := captureStdout(t, func() error { return searchAcrossProviders(rs, "x", false, &target, "") })
 	if err != nil {
 		t.Fatalf("searchAcrossProviders: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestSearchAcrossProviders_GeneroColumnWidensToFit(t *testing.T) {
 	rs := provider.NewRepositorySet([]provider.Provider{gi}, descs, nil)
 	target := genero.MustParse("4.01.12")
 
-	out, err := captureStdout(t, func() error { return searchAcrossProviders(rs, "x", false, &target) })
+	out, err := captureStdout(t, func() error { return searchAcrossProviders(rs, "x", false, &target, "") })
 	if err != nil {
 		t.Fatalf("searchAcrossProviders: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestSearchAcrossProviders_StatusColumn(t *testing.T) {
 	}
 	rs := provider.NewRepositorySet([]provider.Provider{gi}, descs, nil)
 
-	out, err := captureStdout(t, func() error { return searchAcrossProviders(rs, "x", false, nil) })
+	out, err := captureStdout(t, func() error { return searchAcrossProviders(rs, "x", false, nil, "") })
 	if err != nil {
 		t.Fatalf("searchAcrossProviders: %v", err)
 	}

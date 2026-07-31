@@ -20,7 +20,7 @@ func TestFromPlan_RecordsSourceAsRegistry(t *testing.T) {
 			{Name: "logft", Version: semver.MustParse("2.0.0"), RequiredBy: []string{"<root>"}}, // no source (gi default)
 		},
 	}
-	lf := lockfile.FromPlan(plan, manifest.New("app", "1.0.0", "", ""))
+	lf := lockfile.FromPlan(plan, manifest.New("app", "1.0.0", "", ""), "")
 
 	var acme, logft *lockfile.LockedPackage
 	for i := range lf.Packages {
@@ -94,7 +94,7 @@ func TestFromPlan_GISourceNormalizedToEmpty(t *testing.T) {
 			{Name: "chart-3d", Version: semver.MustParse("1.0.0"), Source: "gi", RequiredBy: []string{"<root>"}, Variant: "webcomponent"},
 		},
 	}
-	lf := lockfile.FromPlan(plan, manifest.New("app", "1.0.0", "", ""))
+	lf := lockfile.FromPlan(plan, manifest.New("app", "1.0.0", "", ""), "")
 
 	for i := range lf.Packages {
 		if lf.Packages[i].Registry != "" {
@@ -126,7 +126,7 @@ func TestFromPlan_EmptySourceOmittedInJSON(t *testing.T) {
 			{Name: "logft", Version: semver.MustParse("2.0.0"), RequiredBy: []string{"<root>"}},
 		},
 	}
-	lf := lockfile.FromPlan(plan, manifest.New("app", "1.0.0", "", ""))
+	lf := lockfile.FromPlan(plan, manifest.New("app", "1.0.0", "", ""), "")
 	data, err := json.Marshal(lf)
 	if err != nil {
 		t.Fatal(err)

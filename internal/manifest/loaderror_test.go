@@ -56,6 +56,11 @@ func TestLoadFriendlyTypeErrors(t *testing.T) {
 			wantSubstr: []string{"bin", "object", "got an array"},
 		},
 		{
+			name:       "profile string instead of array",
+			raw:        `{"name":"x","version":"1.0.0","profile":"profiles/app.4gp"}`,
+			wantSubstr: []string{"profile", "array of file paths", "got a string"},
+		},
+		{
 			name:       "name number falls back to generic string hint",
 			raw:        `{"name":5,"version":"1.0.0"}`,
 			wantSubstr: []string{"name", "expected a string", "got a number"},

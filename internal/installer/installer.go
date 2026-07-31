@@ -43,6 +43,10 @@ type Installer struct {
 	registryToken    string // bearer for the consumer registry when it serves zips directly
 	giOrigin         string // scheme+host of the GI registry; gates where registryToken may be sent
 	repoAuth         []RepoAuth
+	// mavenBase, when non-empty, replaces public Maven Central as the base for
+	// JAR downloads (GIS-365). The mirror is also registered in repoAuth so its
+	// downloads carry credentials via matchRepoAuth. "" == Maven Central.
+	mavenBase string
 	// versionFetcher/infoFetcher, when non-nil, replace the default live GI
 	// registry fetchers with a multi-provider routing layer (RepositorySet).
 	versionFetcher resolver.VersionFetcher
@@ -101,6 +105,15 @@ func New(home, githubToken, registryToken, giOrigin string) *Installer {
 // secondary repositories) and returns the installer for chaining.
 func (i *Installer) WithRepoAuth(ra []RepoAuth) *Installer {
 	i.repoAuth = ra
+	return i
+}
+
+// WithMavenBase sets the Maven mirror base URL used for JAR downloads (GIS-365)
+// and returns the installer for chaining. An empty base keeps the default
+// (public Maven Central). Register the same base in WithRepoAuth so authenticated
+// mirrors receive credentials.
+func (i *Installer) WithMavenBase(base string) *Installer {
+	i.mavenBase = base
 	return i
 }
 
@@ -297,6 +310,19 @@ type Options struct {
 	// it does NOT install Java coordinates the manifest declares and the
 	// install set omits. Default (false) means fallback is on.
 	NoManifestFallback bool
+
+	// Prune deletes installed packages, webcomponent bundles, and JARs that
+	// the current dependency graph no longer requires, so the store converges
+	// on the manifest instead of accumulating orphans that keep resolving on
+	// FGLLDPATH (and keep appearing in `fglpkg list`).
+	//
+	// It MUST be false for a global (~/.fglpkg) home — those artifacts are
+	// shared across every project, so pruning against one project's graph
+	// would delete another's dependencies. Only the caller knows which home
+	// is in play, hence the opt-in. It is additionally suppressed under
+	// Production, which resolves a deliberately narrowed graph (no dev scope)
+	// and so must never be allowed to delete a developer's dev packages.
+	Prune bool
 }
 
 // InstallAll resolves or reads from the lock file, then installs every
@@ -320,6 +346,11 @@ func (i *Installer) InstallAllWithOptions(m *manifest.Manifest, projectDir strin
 		return fmt.Errorf("cannot detect Genero version: %w", err)
 	}
 
+	// Pruning is the install-side counterpart of what `remove` already does:
+	// converge the store on the dependency graph. Gated on a project-local home
+	// and never applied to a narrowed --production graph (see Options.Prune).
+	prune := opts.Prune && !opts.Production
+
 	// ── Try to use an existing lock file ────────────────────────────────────
 	if !forceResolve && lockfile.Exists(projectDir) {
 		lf, err := lockfile.Load(projectDir)
@@ -331,20 +362,32 @@ func (i *Installer) InstallAllWithOptions(m *manifest.Manifest, projectDir strin
 			if err := lf.CheckRegistries(i.configuredRegistries); err != nil {
 				return err
 			}
-			vr := lf.Validate(m, gv.String(), i.packagesDir, i.webcomponentsDir)
+			vr := lf.Validate(m, gv.String(), i.packagesDir, i.webcomponentsDir, i.jarsDir)
 			if vr.NeedsResolve() {
-				fmt.Printf("Lock file is stale (%v) — re-resolving...\n", vr.ManifestMismatch)
+				fmt.Printf("Lock file is stale (%s) — re-resolving...\n", vr.StaleReason())
 			} else {
 				if vr.GeneroMismatch != nil {
 					fmt.Printf("warning: %v\n", vr.GeneroMismatch)
 				}
 				if vr.IsClean() {
-					// Everything is already on disk. Build the merged root only
-					// when it is MISSING — the migration case (fglpkg upgraded on
-					// an already-installed project, or .fglpkg/merged deleted).
-					// When it already exists, install/remove have kept it current,
-					// so skip the redundant rebuild (and its inference re-scan).
-					if !i.mergedRootExists() {
+					// Everything the lock names is on disk — but something the
+					// lock does NOT name still can be (a branch switch to an
+					// older lock, an interrupted run), so converge first.
+					var pruned []string
+					if prune {
+						pruned, err = i.pruneToLock(lf)
+						if err != nil {
+							return err
+						}
+						reportPruned(pruned)
+					}
+					// Build the merged root when it is MISSING — the migration
+					// case (fglpkg upgraded on an already-installed project, or
+					// .fglpkg/merged deleted) — or when a prune just removed
+					// modules that are still linked into it. Otherwise
+					// install/remove have kept it current, so skip the
+					// redundant rebuild (and its inference re-scan).
+					if !i.mergedRootExists() || len(pruned) > 0 {
 						if err := i.syncMergedRoot(projectDir, !opts.Production); err != nil {
 							return err
 						}
@@ -352,8 +395,16 @@ func (i *Installer) InstallAllWithOptions(m *manifest.Manifest, projectDir strin
 					fmt.Printf("Lock file is up to date (Genero %s). Nothing to install.\n", gv)
 					return nil
 				}
-				// Lock is valid but some packages are missing on disk — install them.
+				// Lock is valid but some packages are missing on disk — install
+				// them, dropping anything the lock no longer names first.
 				fmt.Printf("Installing from lock file (Genero %s)...\n", gv)
+				if prune {
+					pruned, err := i.pruneToLock(lf)
+					if err != nil {
+						return err
+					}
+					reportPruned(pruned)
+				}
 				return i.installFromLock(lf, m, opts, projectDir)
 			}
 		}
@@ -381,7 +432,7 @@ func (i *Installer) InstallAllWithOptions(m *manifest.Manifest, projectDir strin
 	// When --production is in effect we do NOT overwrite the lock file,
 	// because it would drop dev entries that should remain recorded.
 	if !opts.Production {
-		lf := lockfile.FromPlan(plan, m)
+		lf := lockfile.FromPlan(plan, m, i.mavenBase)
 		if err := lf.Save(projectDir); err != nil {
 			// Non-fatal: warn but continue with the install.
 			fmt.Printf("warning: could not write lock file: %v\n", err)
@@ -390,7 +441,27 @@ func (i *Installer) InstallAllWithOptions(m *manifest.Manifest, projectDir strin
 		}
 	}
 
+	// Prune before installing, not after: the plan's keep-set already accounts
+	// for everything about to be installed, so anything the sweep removes is
+	// genuinely orphaned — and materialization downstream then sees a store
+	// with no stale members in it.
+	if prune {
+		pruned, err := i.pruneToPlan(plan)
+		if err != nil {
+			return err
+		}
+		reportPruned(pruned)
+	}
+
 	return i.installFromPlan(plan, m, opts, projectDir)
+}
+
+// reportPruned prints one line per removed artifact, matching the summary
+// `fglpkg remove` prints for the same operation.
+func reportPruned(pruned []string) {
+	for _, p := range pruned {
+		fmt.Printf("  pruned %s\n", p)
+	}
 }
 
 // installFromLock installs every entry in the lock file using its pinned
@@ -815,11 +886,16 @@ func (i *Installer) InstallJar(dep manifest.JavaDependency) error {
 		return fmt.Errorf("cannot create jar file: %w", err)
 	}
 
-	url := dep.MavenURL()
+	url := dep.MavenURL(i.mavenBase)
 
-	// JavaDependency doesn't carry a checksum field today; pass "" to skip.
-	// JARs come from Maven Central anonymously — no repo auth.
-	if err := downloadAndVerify(url, dep.Checksum, dep.JarFileName(), f, "", "", "", nil, false); err != nil {
+	// If the JAR is served by a configured repository (a Maven mirror registered
+	// in repoAuth, GIS-365), apply that repo's auth headers — the same path FGL
+	// packages take via matchRepoAuth. With no mirror configured the URL is
+	// Maven Central, matchRepoAuth returns matched=false, and the download stays
+	// anonymous — byte-identical to the previous behavior. The GI/GitHub tokens
+	// are deliberately left empty: a JAR host must never receive the GI bearer.
+	repoHeaders, repoMatched := i.matchRepoAuth(url)
+	if err := downloadAndVerify(url, dep.Checksum, dep.JarFileName(), f, "", "", "", repoHeaders, repoMatched); err != nil {
 		f.Close()
 		os.Remove(dest)
 		return err
@@ -873,7 +949,7 @@ func (i *Installer) ReconcileAfterRemove(m *manifest.Manifest, projectDir string
 	// re-resolved graph, or delete it when that graph is now empty. Always
 	// safe regardless of prune — the lock is project-local wherever artifacts
 	// live.
-	lockNote, err := reconcileLock(plan, m, projectDir)
+	lockNote, err := reconcileLock(plan, m, projectDir, i.mavenBase)
 	if err != nil {
 		return nil, err
 	}
@@ -907,7 +983,7 @@ func (i *Installer) ReconcileAfterRemove(m *manifest.Manifest, projectDir string
 // empty fglpkg.lock is confusing (GIS-273). Otherwise the lock is rewritten
 // from the plan. Returns a human-readable note when the lock was deleted (for
 // the caller's summary), or "" when it was rewritten or absent.
-func reconcileLock(plan *resolver.Plan, m *manifest.Manifest, projectDir string) (string, error) {
+func reconcileLock(plan *resolver.Plan, m *manifest.Manifest, projectDir, mavenBase string) (string, error) {
 	if !lockfile.Exists(projectDir) {
 		return "", nil
 	}
@@ -917,7 +993,7 @@ func reconcileLock(plan *resolver.Plan, m *manifest.Manifest, projectDir string)
 		}
 		return lockfile.Filename + " (no dependencies remain)", nil
 	}
-	if err := lockfile.FromPlan(plan, m).Save(projectDir); err != nil {
+	if err := lockfile.FromPlan(plan, m, mavenBase).Save(projectDir); err != nil {
 		return "", fmt.Errorf("cannot write lock file: %w", err)
 	}
 	return "", nil
@@ -931,19 +1007,61 @@ func reconcileLock(plan *resolver.Plan, m *manifest.Manifest, projectDir string)
 // remaining package is kept (GIS-372).
 func (i *Installer) pruneToPlan(plan *resolver.Plan) ([]string, error) {
 	wantPkg := make(map[string]bool, len(plan.Packages))
-	wantWC := make(map[string]bool)
+	wantWC := make(map[string]bool, len(plan.Packages))
 	for _, p := range plan.Packages {
-		if p.IsWebcomponent() {
-			wantWC[p.Name] = true
-		} else {
+		// Only pure-BDL/mixed packages own a directory under packages/, so a
+		// pure webcomponent package is deliberately absent from wantPkg.
+		if !p.IsWebcomponent() {
 			wantPkg[p.Name] = true
 		}
+		// wantWC, by contrast, holds EVERY wanted package name: the ownership
+		// sidecar is keyed by package name for any webcomponent-bearing
+		// package, and a *mixed* package (variant genero<N>, bundle routed into
+		// webcomponents/ at install) is recorded there under its own name. Were
+		// wantWC limited to IsWebcomponent() entries, every prune would delete
+		// a still-required mixed package's bundle. Naming a pure-BDL package
+		// here is harmless — it simply has no sidecar entry to keep.
+		wantWC[p.Name] = true
 	}
+	// Plan JARs are full JavaDependency structs, so JarFileName() honours any
+	// `jar` / `url` override and the derived name is authoritative.
 	wantJar := make(map[string]bool, len(plan.JARs))
 	for _, dep := range plan.JARs {
 		wantJar[dep.JarFileName()] = true
 	}
+	return i.pruneTo(wantPkg, wantWC, wantJar)
+}
 
+// pruneToLock is the lock-driven counterpart of pruneToPlan, for the install
+// paths that never build a resolver plan: the lock is valid, so its own
+// contents define what belongs on disk. Used to clear artifacts left behind by
+// an earlier lock (a branch switch, an interrupted run) that would otherwise
+// keep resolving on FGLLDPATH and show up in `fglpkg list`.
+//
+// JARs are deliberately left alone here. A LockedJAR records coordinates but
+// not the manifest's optional `jar` filename override, so its on-disk name can
+// only be derived — and a wrong guess would delete a JAR that is genuinely
+// required. An orphaned JAR is instead collected on the next real re-resolve,
+// which is the moment one can actually become orphaned.
+func (i *Installer) pruneToLock(lf *lockfile.LockFile) ([]string, error) {
+	wantPkg := make(map[string]bool, len(lf.Packages))
+	// wantWC spans both lock sections — see pruneToPlan for why a mixed
+	// package's name must count as a wanted webcomponent owner.
+	wantWC := make(map[string]bool, len(lf.Packages)+len(lf.Webcomponents))
+	for _, p := range lf.Packages {
+		wantPkg[p.Name] = true
+		wantWC[p.Name] = true
+	}
+	for _, w := range lf.Webcomponents {
+		wantWC[w.Name] = true
+	}
+	return i.pruneTo(wantPkg, wantWC, nil)
+}
+
+// pruneTo deletes installed artifacts absent from the given keep-sets. A nil
+// wantJar skips the JAR sweep entirely (see pruneToLock); an empty non-nil
+// wantJar prunes every JAR.
+func (i *Installer) pruneTo(wantPkg, wantWC, wantJar map[string]bool) ([]string, error) {
 	var pruned []string
 
 	pkgEntries, err := os.ReadDir(i.packagesDir)
@@ -960,18 +1078,20 @@ func (i *Installer) pruneToPlan(plan *resolver.Plan) ([]string, error) {
 		pruned = append(pruned, "package "+e.Name())
 	}
 
-	jarEntries, err := os.ReadDir(i.jarsDir)
-	if err != nil && !os.IsNotExist(err) {
-		return pruned, err
-	}
-	for _, e := range jarEntries {
-		if e.IsDir() || wantJar[e.Name()] {
-			continue
+	if wantJar != nil {
+		jarEntries, err := os.ReadDir(i.jarsDir)
+		if err != nil && !os.IsNotExist(err) {
+			return pruned, err
 		}
-		if err := os.Remove(filepath.Join(i.jarsDir, e.Name())); err != nil {
-			return pruned, fmt.Errorf("cannot prune jar %s: %w", e.Name(), err)
+		for _, e := range jarEntries {
+			if e.IsDir() || wantJar[e.Name()] {
+				continue
+			}
+			if err := os.Remove(filepath.Join(i.jarsDir, e.Name())); err != nil {
+				return pruned, fmt.Errorf("cannot prune jar %s: %w", e.Name(), err)
+			}
+			pruned = append(pruned, "jar "+e.Name())
 		}
-		pruned = append(pruned, "jar "+e.Name())
 	}
 
 	wcPruned, err := i.pruneWebcomponents(wantWC)
@@ -1208,6 +1328,12 @@ func downloadAndVerify(url, expectedChecksum, name string, w io.Writer, githubTo
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		return fmt.Errorf("HTTP 401 downloading %s: Not authorised — run 'fglpkg login' or set FGLPKG_TOKEN", name)
+	}
+	// Artifactory returns 403 (not 401) for a bad or missing credential on a
+	// protected repo; surface it as an auth failure rather than the generic
+	// message so a mis-scoped Maven mirror token is diagnosable (GIS-365).
+	if resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("HTTP 403 downloading %s from %s: Forbidden — check your credentials for this repository (run 'fglpkg login')", name, url)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d downloading %s from %s", resp.StatusCode, name, url)
