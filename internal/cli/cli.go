@@ -1152,9 +1152,16 @@ func cmdEnv(args []string) error {
 // printEnvWarnings writes an env Generator's diagnostics (basename collisions
 // between installed packages, unusable `profile` declarations, over-long
 // values) to stderr.
+//
+// One Warnings() entry is one logical warning, but the collision warning spans
+// several physical lines. Every line carries the prefix so a reader who greps
+// stderr for "warning:" gets the whole diagnostic rather than its first line;
+// the continuation lines keep the indent the message itself supplies.
 func printEnvWarnings(g *env.Generator) {
 	for _, w := range g.Warnings() {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		for _, line := range strings.Split(w, "\n") {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", line)
+		}
 	}
 }
 

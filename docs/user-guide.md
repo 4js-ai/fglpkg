@@ -267,10 +267,13 @@ is nothing to disambiguate them with — so fglpkg cannot prevent it, and instea
 ```
 $ eval "$(fglpkg env --local)"
 warning: FGLRESOURCEPATH: "Customer.42f" is shipped by both "poiapi" (local) and "reportkit" (global).
-  These variables are searched by basename, first match wins: the copy in
-  /home/you/proj/.fglpkg/packages/poiapi/com/fourjs/poiapi will be used and reportkit's is shadowed.
-  Rename one of the two files, or set FGLRESOURCEPATH yourself to pick a winner.
+warning:   These variables are searched by basename, first match wins: the copy in
+warning:   /home/you/proj/.fglpkg/packages/poiapi/com/fourjs/poiapi will be used and reportkit's is shadowed.
+warning:   Rename one of the two files, or set FGLRESOURCEPATH yourself to pick a winner.
 ```
+
+Every physical line carries the `warning:` prefix, so grepping stderr for it gives you the
+whole diagnostic rather than just its first line.
 
 The order is deterministic, so the winner is reproducible rather than an accident:
 
