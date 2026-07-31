@@ -1048,6 +1048,15 @@ func validateHookOp(op HookOperation) error {
 	return nil
 }
 
+// cleanRelPath is the canonical spelling of a manifest-relative path:
+// lexically cleaned and slash-separated, so "./profiles/app.4gp" and
+// "profiles/app.4gp" compare equal. Validation and duplicate detection must
+// agree on this, or two spellings of one path look distinct to the linter while
+// pack stages them to a single archive entry.
+func cleanRelPath(p string) string {
+	return filepath.ToSlash(filepath.Clean(p))
+}
+
 // safeRelPath rejects absolute paths and any path that escapes its base
 // via ".." segments. Forward slashes are normalised so manifests work the
 // same on Windows and Unix.
@@ -1058,7 +1067,7 @@ func safeRelPath(field, p string) error {
 	if filepath.IsAbs(p) || strings.HasPrefix(p, "/") {
 		return fmt.Errorf("%s %q must be relative, not absolute", field, p)
 	}
-	cleaned := filepath.ToSlash(filepath.Clean(p))
+	cleaned := cleanRelPath(p)
 	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
 		return fmt.Errorf("%s %q must not escape the package root with ..", field, p)
 	}

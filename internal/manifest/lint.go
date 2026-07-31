@@ -111,8 +111,10 @@ func (m *Manifest) LintInto(r *Report) {
 
 	// A duplicated profile entry would stage the same file twice and put it on
 	// FGLPROFILE twice — harmless (the later copy is identical, and FGLPROFILE
-	// is last-wins) but always a mistake worth pointing out.
-	if dups := duplicateStrings(m.Profile); len(dups) > 0 {
+	// is last-wins) but always a mistake worth pointing out. Compared by
+	// canonical path, since "profiles/app.4gp" and "./profiles/app.4gp" are one
+	// file to pack; the message reports the canonical spelling.
+	if dups := duplicatePaths(m.Profile); len(dups) > 0 {
 		r.Warnf("profile", "duplicate profile file(s): %s", strings.Join(dups, ", "))
 	}
 }
@@ -120,9 +122,21 @@ func (m *Manifest) LintInto(r *Report) {
 // duplicateStrings returns the distinct values that appear more than once in
 // values, sorted, for a stable message.
 func duplicateStrings(values []string) []string {
+	return duplicatesBy(values, func(v string) string { return v })
+}
+
+// duplicatePaths is duplicateStrings for relative paths: entries are compared
+// (and reported) in their canonical cleaned, slash-separated form.
+func duplicatePaths(values []string) []string {
+	return duplicatesBy(values, cleanRelPath)
+}
+
+// duplicatesBy returns the distinct keys that more than one value maps to,
+// sorted, for a stable message.
+func duplicatesBy(values []string, key func(string) string) []string {
 	seen := make(map[string]int, len(values))
 	for _, v := range values {
-		seen[v]++
+		seen[key(v)]++
 	}
 	var dups []string
 	for v, n := range seen {
