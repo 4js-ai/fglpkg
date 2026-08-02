@@ -94,3 +94,43 @@ _ep_no_leading_separator_when_unset() {
   esac
 }
 it "env adds no stray separator when FGLPROFILE is unset" _ep_no_leading_separator_when_unset
+
+# A hand-edited/hostile installed manifest whose profile points outside the
+# package must not put a traversal path on FGLPROFILE: env drops it, warns on
+# stderr, and stays exit-0 with eval-safe stdout.
+_ep_escape_warning() {
+  mkdir -p ".fglpkg/packages/poiapi"
+  cat > ".fglpkg/packages/poiapi/fglpkg.json" <<'EOF'
+{ "name":"poiapi","version":"1.0.0","profile":["../evil.4gp"],"dependencies":{"fgl":{}} }
+EOF
+  run_split env --local
+  assert_success
+  assert_contains "which escapes the package directory" "$err"
+  assert_contains "../evil.4gp" "$err"
+  assert_not_contains "FGLPROFILE" "$out"   # never a traversal path on the eval-safe stream
+  assert_not_contains "warning" "$out"
+}
+it "env warns and drops an FGLPROFILE entry that escapes the package dir" _ep_escape_warning
+
+# A declared profile is force-staged even when a .fglpkgignore pattern would
+# exclude it — dropping a declared config file would silently break the package.
+_ep_pack_ships_profile_despite_ignore() {
+  mkpkg "profile.demo" "1.0.0"
+  mkdir -p profiles
+  printf 'gwc.server.name = "demo"\n' > profiles/app.4gp
+  python3 - <<'PY'
+import json
+m = json.load(open("fglpkg.json"))
+m["files"] = ["*.42m"]
+m["profile"] = ["profiles/app.4gp"]
+json.dump(m, open("fglpkg.json", "w"), indent=2)
+PY
+  printf 'P' > Module.42m
+  printf 'profiles/\n' > .fglpkgignore     # would exclude the profile dir…
+  run pack
+  assert_success
+  run_raw python3 -c "import zipfile,glob,sys; z=zipfile.ZipFile(glob.glob('*.zip')[0]); print('\n'.join(z.namelist()))"
+  assert_success
+  assert_contains_path "profiles/app.4gp"  # …but the declared profile still ships
+}
+it "pack ships a declared profile even when .fglpkgignore would exclude it" _ep_pack_ships_profile_despite_ignore

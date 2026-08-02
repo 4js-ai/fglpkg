@@ -209,3 +209,35 @@ _er_shell_rejects_bad_values() {
   assert_success
 }
 it "env rejects an unknown --shell and --shell with --gst" _er_shell_rejects_bad_values
+
+# One package shipping the same basename from two directories: the first wins and
+# the second is unreachable — said out loud on stderr, never on stdout.
+_er_same_package_two_dirs() {
+  mkdir -p ".fglpkg/packages/solo/formsA" ".fglpkg/packages/solo/formsB"
+  cat > ".fglpkg/packages/solo/fglpkg.json" <<'EOF'
+{ "name":"solo","version":"1.0.0","dependencies":{"fgl":{}} }
+EOF
+  printf 'F' > ".fglpkg/packages/solo/formsA/Customer.42f"
+  printf 'F' > ".fglpkg/packages/solo/formsB/Customer.42f"
+  run_split env --local
+  assert_success
+  assert_contains 'package "solo" ships "Customer.42f" in two directories' "$err"
+  assert_contains "the second is unreachable" "$err"
+  assert_not_contains "warning" "$out"
+}
+it "env warns when one package ships a basename in two directories" _er_same_package_two_dirs
+
+# The cross-package collision message must name the winner, the shadowed copy, and
+# the remediation (not merely that a collision happened) — strengthening the
+# _er_collision_warns_on_stderr coverage above.
+_er_collision_names_winner_and_remedy() {
+  _er_collision_fixture
+  run_split env --local
+  assert_success
+  assert_contains 'is shipped by both "alpha" (local) and "beta" (local)' "$err"
+  assert_contains "first match wins" "$err"
+  assert_contains "beta's is shadowed" "$err"
+  assert_contains "set FGLRESOURCEPATH yourself to pick a winner" "$err"
+  assert_not_contains "warning" "$out"
+}
+it "env collision warning names the winner, the shadowed copy, and the remedy" _er_collision_names_winner_and_remedy

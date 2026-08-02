@@ -12,6 +12,7 @@
 
 _MOCK_REGISTRY_SERVER="$_LIBDIR/../mock/registry_server.py"
 _MOCK_OSV_SERVER="$_LIBDIR/../mock/osv_server.py"
+_MOCK_MAVEN_SERVER="$_LIBDIR/../mock/maven_server.py"
 
 _MOCK_PIDS=()
 _mock_track() { _MOCK_PIDS+=("$1"); trap _mock_stop_all EXIT; }
@@ -70,8 +71,23 @@ mock_osv_start() {  # mock_osv_start
   return 0
 }
 
+# ---- Maven mirror (JAR downloads) ----
+# Starts maven_server.py and reports its base URL in MAVEN_URL (host+port in
+# MAVEN_HOST). It does NOT export FGLPKG_MAVEN_URL: JAR-mirror tests need to place
+# the URL differently each time — the env var, a project `mavenMirror` block, or a
+# per-dependency `url` — and the env var would otherwise always win. Pass
+# --require-token <tok> to make the server answer 403 unless the request carries a
+# matching bearer token (the fail-closed auth path).
+mock_maven_start() {  # mock_maven_start [--require-token <tok>]
+  _mock_launch "$_MOCK_MAVEN_SERVER" "$@" || return 1
+  MAVEN_LOG="$_ML_LOG"; MAVEN_PID="$_ML_PID"; MAVEN_PORT="$_ML_PORT"
+  MAVEN_URL="http://127.0.0.1:$MAVEN_PORT"
+  MAVEN_HOST="127.0.0.1:$MAVEN_PORT"
+  return 0
+}
+
 # Dump a server's request log (debugging).
-mock_dump_log() { [[ -n "${MOCK_LOG:-}" ]] && sed 's/^/    reg| /' "$MOCK_LOG" >&2; [[ -n "${OSV_LOG:-}" ]] && sed 's/^/    osv| /' "$OSV_LOG" >&2; return 0; }
+mock_dump_log() { [[ -n "${MOCK_LOG:-}" ]] && sed 's/^/    reg| /' "$MOCK_LOG" >&2; [[ -n "${OSV_LOG:-}" ]] && sed 's/^/    osv| /' "$OSV_LOG" >&2; [[ -n "${MAVEN_LOG:-}" ]] && sed 's/^/    mvn| /' "$MAVEN_LOG" >&2; return 0; }
 
 # ---- fixtures builder (dogfoods `fglpkg pack` so served sha256s are real) ----
 mock_build_fixtures() {  # mock_build_fixtures <dir>

@@ -43,8 +43,33 @@ it "relink fails when two packages claim the same namespace" _rl_clash
 _rl_rejects_args() {
   run relink bogus
   assert_failure
+  assert_contains 'relink takes no arguments (got "bogus")'
 }
 it "relink rejects positional arguments" _rl_rejects_args
+
+_rl_mutually_exclusive() {
+  run relink --local --global
+  assert_failure
+  assert_contains "--local and --global are mutually exclusive"
+}
+it "relink rejects --local and --global together" _rl_mutually_exclusive
+
+# The one-line summary is user-facing: an empty scope and a populated one print
+# distinct, accurate messages.
+_rl_summary_empty() {
+  run relink --local
+  assert_success
+  assert_contains "local: no namespaced packages to merge ("
+}
+it "relink reports an empty scope" _rl_summary_empty
+
+_rl_summary_populated() {
+  _rl_store dbconnection com.fourjs.db com/fourjs/db/DbConnection.42m
+  run relink --local
+  assert_success
+  assert_contains "local: linked 1 module(s) from 1 package(s) into"
+}
+it "relink reports the linked module and package counts" _rl_summary_populated
 
 # A legacy store (manifest without generoPackages, e.g. published before the
 # feature) still materializes — namespaces inferred from layout — and relink is
@@ -62,5 +87,6 @@ EOF
   assert_contains "fgl-log4j"
   assert_contains "com.fourjs.log4j"
   assert_contains "inferred"
+  assert_contains "republish it with a current fglpkg to record them"   # actionable hint
 }
 it "relink surfaces inferred namespaces for a legacy package" _rl_legacy_inferred_note
