@@ -589,23 +589,26 @@ func cmdInstall(args []string) error {
 	// Best-effort manifest load so any configured registries drive resolution.
 	// The authoritative load happens later per install path.
 	regManifest, _ := manifest.Load(".")
-	// Per-invocation installer options are applied HERE, by the constructor, not
-	// at the call sites. The add-package path rebuilds the installer after saving
-	// the manifest (see below) and every download runs through that rebuilt
-	// instance, so an option applied only to the first one silently did nothing:
-	// `install <pkg> --no-verify-signature` still enforced signatures, and under
-	// signing.enforce=require it failed outright despite the documented override.
-	// Routing options belong to buildInstaller; this closure carries the ones that
-	// come from flags, so every instance is built the same way.
-	newInst := func(m *manifest.Manifest) *installer.Installer {
-		i := newInstaller(home, m)
+	// Per-invocation installer options that come from flags (currently
+	// --no-verify-signature) are applied by this helper at EVERY construction
+	// site. The add-package path rebuilds the installer after saving the manifest
+	// (see below), and every download runs through that rebuilt instance, so an
+	// option applied only to the first one silently did nothing: `install <pkg>
+	// --no-verify-signature` still enforced signatures and, under
+	// signing.enforce=require, failed outright despite the documented override
+	// (#64). Routing options live in buildInstaller / applyConsumeRegistry.
+	applyInstallFlags := func(i *installer.Installer) {
 		if flags.noVerifySignature {
 			globalHome, _ := fglpkgHome()
 			i.WithSigning(signing.EnforceOff, globalHome, defaultRegistry())
 		}
-		return i
 	}
-	inst := newInst(regManifest)
+	// buildInstaller (not newInstaller) so the graph-install path below can scope
+	// the resolver to the configured consume default (GIS-364). Re-resolution only
+	// happens on a stale/missing lock — a valid lock replays its recorded sources
+	// and never routes — but that path must honour the default too.
+	inst, instRS := buildInstaller(home, regManifest)
+	applyInstallFlags(inst)
 	projectDir, _ := os.Getwd()
 
 	if isLocal {
@@ -649,6 +652,18 @@ func cmdInstall(args []string) error {
 				return err
 			}
 		}
+		// Scope any re-resolution to the configured consume default (GIS-364).
+		// --registry cannot appear here (it requires a package argument), so the
+		// scoping can only come from config.
+		globalHome, err := fglpkgHome()
+		if err != nil {
+			globalHome = home
+		}
+		reg, fromDefault, err := applyConsumeRegistry(instRS, globalHome, m, "")
+		if err != nil {
+			return err
+		}
+		noteConsumeDefault(instRS, reg, fromDefault)
 		if err := runHook(m, manifest.HookPreInstall, projectDir); err != nil {
 			return err
 		}
@@ -683,18 +698,16 @@ func cmdInstall(args []string) error {
 
 	// --registry <name> disambiguates a package available from more than one
 	// repository: it restricts this resolve to the named repo and pins that
-	// choice in the manifest so subsequent installs stay deterministic.
-	if flags.registry != "" {
-		if rs == nil {
-			// Only the built-in GI registry is configured. --registry gi is a
-			// harmless no-op; any other name cannot be honoured.
-			if flags.registry != config.GIName {
-				return fmt.Errorf("--registry %q: no repository named %q is configured (add it to fglpkg.json or ~/.fglpkg/config.json)", flags.registry, flags.registry)
-			}
-		} else {
-			rs.Restrict(flags.registry)
-		}
+	// choice in the manifest so subsequent installs stay deterministic. With no
+	// flag, a configured consume default scopes the resolve instead (GIS-364) —
+	// it does NOT write a per-dependency pin, since the point of a sticky default
+	// is that the source is declared once; the lockfile still records where each
+	// package actually came from.
+	reg, fromDefault, err := applyConsumeRegistry(rs, globalHome, m, flags.registry)
+	if err != nil {
+		return err
 	}
+	noteConsumeDefault(rs, reg, fromDefault)
 
 	scopeLabel := scopeDisplayName(flags.scope)
 	for _, pkg := range flags.pkgs {
@@ -710,9 +723,10 @@ func cmdInstall(args []string) error {
 			info, err = registry.Resolve(name, version, generoMajor)
 		}
 		if err != nil {
-			// Prefer the explicit --registry target, else the manifest pin, so
-			// the not-found hint points at the credentials that actually matter.
-			hintReg := flags.registry
+			// Prefer the registry this resolve was actually scoped to (an explicit
+			// --registry or the configured consume default), else the manifest pin,
+			// so the not-found hint points at the credentials that actually matter.
+			hintReg := reg
 			if hintReg == "" {
 				hintReg = pinnedRegistry(m, name)
 			}
@@ -740,8 +754,16 @@ func cmdInstall(args []string) error {
 	// Rebuild the installer from the saved manifest so its routing picks up any
 	// freshly-written registry pin — otherwise a pinned (collision) package
 	// would fail the graph install, which was resolved from the pre-add manifest.
-	// Via newInst, so this instance keeps the invocation's flags.
-	inst = newInst(m)
+	// The rebuilt set is a fresh RepositorySet, so re-apply BOTH the same scoping
+	// the add-resolve used (or the graph install would fan out, GIS-364) AND this
+	// invocation's flags via applyInstallFlags (or --no-verify-signature would be
+	// silently dropped here on the add path, #64).
+	rebuiltInst, rebuiltRS := buildInstaller(home, m)
+	applyInstallFlags(rebuiltInst)
+	if _, _, err := applyConsumeRegistry(rebuiltRS, globalHome, m, flags.registry); err != nil {
+		return err
+	}
+	inst = rebuiltInst
 	fmt.Println()
 	if err := runHook(m, manifest.HookPreInstall, projectDir); err != nil {
 		return err
@@ -1074,15 +1096,16 @@ func cmdUpdate(args []string) error {
 
 	// --registry <name> restricts this re-resolution to a single repository
 	// (spec §11). It needs no package argument (unlike `install --registry`).
-	if flags.registry != "" {
-		if rs == nil {
-			if flags.registry != config.GIName {
-				return fmt.Errorf("--registry %q: no repository named %q is configured (add it to fglpkg.json or ~/.fglpkg/config.json)", flags.registry, flags.registry)
-			}
-		} else {
-			rs.Restrict(flags.registry)
-		}
+	// With no flag, a configured consume default scopes it instead (GIS-364).
+	globalHome, err := fglpkgHome()
+	if err != nil {
+		globalHome = home
 	}
+	reg, fromDefault, err := applyConsumeRegistry(rs, globalHome, m, flags.registry)
+	if err != nil {
+		return err
+	}
+	noteConsumeDefault(rs, reg, fromDefault)
 	return inst.InstallAllWithOptions(m, projectDir, true, instOpts)
 }
 
@@ -1394,15 +1417,25 @@ func cmdSearch(args []string) error {
 	if mm, mErr := manifest.Load("."); mErr == nil {
 		m = mm
 	}
-	if rs, _, _, rErr := buildRepositorySet(home, m); rErr == nil && rs != nil {
-		return searchAcrossProviders(rs, term, all, target, reg)
+	// A configured consume default scopes the search the same way --registry does
+	// when the user passed no flag (GIS-364), so search shows what install can
+	// actually resolve. applyConsumeRegistry also covers the single-registry case
+	// below: naming the only configured registry is a no-op, any other name errors.
+	rs, _, _, rErr := buildRepositorySet(home, m)
+	if rErr != nil {
+		// Same tolerance as install/info/outdated: a broken registries config
+		// degrades to the single-registry path rather than failing discovery.
+		fmt.Fprintf(os.Stderr, "warning: ignoring registries config: %v\n", rErr)
 	}
-
-	// Single-registry (only the built-in GI repository is configured). --registry
-	// gi is a harmless no-op; any other name cannot be honoured — mirror the
-	// install/update UX exactly (cli.go cmdUpdate).
-	if reg != "" && reg != config.GIName {
-		return fmt.Errorf("--registry %q: no repository named %q is configured (add it to fglpkg.json or ~/.fglpkg/config.json)", reg, reg)
+	reg, fromDefault, err := applyConsumeRegistry(rs, home, m, reg)
+	if err != nil {
+		return err
+	}
+	if rs != nil {
+		noteConsumeDefault(rs, reg, fromDefault)
+		// searchAcrossProviders queries providers directly rather than through
+		// route(), so the scope is applied by filtering its provider loop.
+		return searchAcrossProviders(rs, term, all, target, reg)
 	}
 
 	results, err := registry.Search(term)
@@ -3458,11 +3491,12 @@ type registryEditFlags struct {
 	priority       *int // nil = unset (auto-assign); an explicit value (incl. 0) is validated
 	packages       []string
 	project        bool // write to the project fglpkg.json instead of the global config
+	consumeDefault bool // also make this the default consume registry (GIS-364)
 }
 
 const registryAddUsage = "usage: fglpkg registry add <name> <url> " +
 	"[--type genero|artifactory] [--repo-key K] [--auth bearer|basic|apikey|anonymous] " +
-	"[--priority N] [--packages 'acme-*,foo-*'] [--project]\n" +
+	"[--priority N] [--packages 'acme-*,foo-*'] [--project] [--consume-default]\n" +
 	"       <url> may include the Artifactory repo key (https://acme.jfrog.io/artifactory/GeneroBDL), " +
 	"in which case --repo-key is optional"
 
@@ -3474,6 +3508,8 @@ func parseRegistryAddFlags(args []string) (registryEditFlags, error) {
 		switch {
 		case a == "--project":
 			f.project = true
+		case a == "--consume-default":
+			f.consumeDefault = true
 		case a == "--type" || strings.HasPrefix(a, "--type="):
 			v, err := flagValue(a, &i, args)
 			if err != nil {
@@ -3685,11 +3721,18 @@ func cmdRegistryAdd(args []string) error {
 			return err
 		}
 		m.Registries = proj
+		// --consume-default records the new repository as the sticky source for
+		// install/update/search/info/outdated, in the same file the descriptor
+		// landed in, so "clone → install" needs no per-developer setup (GIS-364).
+		if f.consumeDefault {
+			m.DefaultConsumeRegistry = f.name
+		}
 		if err := m.Save("."); err != nil {
 			return err
 		}
 		fmt.Printf("✓ Added registry %q to %s\n", f.name, manifest.Filename)
 		noteRepoKeySplit()
+		noteConsumeDefaultSet(f, manifest.Filename)
 		return nil
 	}
 
@@ -3702,15 +3745,30 @@ func cmdRegistryAdd(args []string) error {
 		return err
 	}
 	g.Registries = global
+	if f.consumeDefault {
+		g.DefaultConsumeRegistry = f.name
+	}
 	if err := config.WriteGlobalFile(home, g); err != nil {
 		return err
 	}
 	fmt.Printf("✓ Added registry %q to %s\n", f.name, filepath.Join(home, config.GlobalFilename))
 	noteRepoKeySplit()
+	noteConsumeDefaultSet(f, config.GlobalFilename)
 	if r.Auth != config.AuthAnonymous {
 		fmt.Printf("  Run 'fglpkg login --registry %s' to store credentials.\n", f.name)
 	}
 	return nil
+}
+
+// noteConsumeDefaultSet confirms that --consume-default rewired where packages
+// are consumed from — a bigger change than adding a repository, so it is stated
+// explicitly rather than left to be discovered on the next install.
+func noteConsumeDefaultSet(f registryEditFlags, file string) {
+	if !f.consumeDefault {
+		return
+	}
+	fmt.Printf("  Set as the default consume registry in %s — install/update/search/info/outdated\n", file)
+	fmt.Printf("  now resolve from %q alone (override per command with --registry <name>).\n", f.name)
 }
 
 func cmdRegistryRemove(args []string) error {
@@ -3750,6 +3808,11 @@ func cmdRegistryRemove(args []string) error {
 		if m.DefaultRegistry == name {
 			m.DefaultRegistry = ""
 		}
+		// Same for the consume default — otherwise every consuming command would
+		// fail on a registry the user just removed (GIS-364).
+		if m.DefaultConsumeRegistry == name {
+			m.DefaultConsumeRegistry = ""
+		}
 		if err := m.Save("."); err != nil {
 			return err
 		}
@@ -3773,6 +3836,9 @@ func cmdRegistryRemove(args []string) error {
 	g.Registries = kept
 	if g.DefaultRegistry == name {
 		g.DefaultRegistry = ""
+	}
+	if g.DefaultConsumeRegistry == name {
+		g.DefaultConsumeRegistry = ""
 	}
 	if err := config.WriteGlobalFile(home, g); err != nil {
 		return err
@@ -3820,13 +3886,41 @@ func cmdRegistryList() error {
 	}
 	creds, _ := credentials.Load(home)
 	source := registrySources(home, fglpkgRegistry, projRegs)
+	// Which registry each default points at, so the sticky routing is visible
+	// here rather than only discoverable by running an install (GIS-364).
+	var pm *manifest.Manifest
+	if m, err := manifest.Load("."); err == nil {
+		pm = m
+	}
+	consumeDef := resolveDefaultConsumeRegistry(home, pm)
+	publishDef := resolveDefaultPublishRegistry(home, pm)
 
-	fmt.Printf("%-16s %-12s %-4s %-9s %-6s %-7s %s\n", "NAME", "TYPE", "PRIO", "AUTH", "LOGIN", "SOURCE", "URL")
+	fmt.Printf("%-16s %-12s %-4s %-9s %-6s %-7s %-8s %s\n", "NAME", "TYPE", "PRIO", "AUTH", "LOGIN", "SOURCE", "DEFAULT", "URL")
 	for _, r := range regs {
-		fmt.Printf("%-16s %-12s %-4d %-9s %-6s %-7s %s\n",
-			r.Name, r.Type, r.Priority, r.Auth, registryLoginStatus(creds, r), source[r.Name], r.URL)
+		fmt.Printf("%-16s %-12s %-4d %-9s %-6s %-7s %-8s %s\n",
+			r.Name, r.Type, r.Priority, r.Auth, registryLoginStatus(creds, r), source[r.Name],
+			registryDefaultRole(r.Name, consumeDef, publishDef), r.URL)
 	}
 	return nil
+}
+
+// registryDefaultRole labels a registry's role in the DEFAULT column of
+// `registry list`: which commands fall back to it when no --registry is given.
+// An empty consume/publish default means "no default configured", which for
+// publish means GI — but that is the built-in fallback, not a declared default,
+// so it is left blank rather than implied on the gi row.
+func registryDefaultRole(name, consumeDef, publishDef string) string {
+	consume := consumeDef != "" && consumeDef == name
+	publish := publishDef != "" && publishDef == name
+	switch {
+	case consume && publish:
+		return "both"
+	case consume:
+		return "consume"
+	case publish:
+		return "publish"
+	}
+	return "-"
 }
 
 // registrySources maps each registry name to the config layer that ultimately
@@ -4430,6 +4524,10 @@ ENVIRONMENT:
                            stored login; cannot be cleared by 'fglpkg logout'.
   FGLPKG_PUBLISH_REGISTRY  Name of the repository 'fglpkg publish' targets when no
                            --registry is given (overrides fglpkg.json defaultRegistry)
+  FGLPKG_CONSUME_REGISTRY  Name of the repository install/update/search/info/outdated
+                           resolve from when no --registry is given (overrides
+                           fglpkg.json/config.json defaultConsumeRegistry). Only that
+                           repository is consulted; a per-dependency pin still wins.
   FGLPKG_MAVEN_URL         Maven mirror base URL for JAR downloads (e.g. a JFrog
                            Artifactory Maven repo). Overrides fglpkg.json/config.json
                            mavenMirror. Default: https://repo1.maven.org/maven2
@@ -4657,6 +4755,90 @@ func resolveDefaultPublishRegistry(home string, m *manifest.Manifest) string {
 		return v
 	}
 	return ""
+}
+
+// resolveDefaultConsumeRegistry returns the logical name of the repository the
+// consuming commands (install/update/search/info/outdated) should resolve
+// against when no --registry flag is given, in decreasing precedence:
+// FGLPKG_CONSUME_REGISTRY, the project manifest's defaultConsumeRegistry, then
+// the global config's defaultConsumeRegistry. Returns "" when none is set — the
+// caller then consults every configured repository, exactly as before (GIS-364).
+//
+// Deliberately a separate field from the publish default: `defaultRegistry` is
+// documented publish-only, so widening it would silently restrict installs for
+// every team that set it just to publish to their own Artifactory.
+func resolveDefaultConsumeRegistry(home string, m *manifest.Manifest) string {
+	if v := strings.TrimSpace(os.Getenv("FGLPKG_CONSUME_REGISTRY")); v != "" {
+		return v
+	}
+	if m != nil && m.DefaultConsumeRegistry != "" {
+		return m.DefaultConsumeRegistry
+	}
+	if v, err := config.GlobalConsumeRegistry(home); err == nil && v != "" {
+		return v
+	}
+	return ""
+}
+
+// applyConsumeRegistry decides which repository a consuming command resolves
+// against and configures rs accordingly. It is the single place the explicit
+// flag, the sticky default, and the single-registry special case are reconciled,
+// so install/update/search/info/outdated all share one behaviour and one error
+// surface.
+//
+// Returns the effective registry name ("" = no restriction; consult everything)
+// and whether it came from the configured default rather than an explicit flag —
+// callers use that to decide whether to print a note or to pin the choice.
+//
+// rs may be nil: that is the single-registry case (only the built-in GI registry
+// is configured, so buildRepositorySet returns no set). There a value of "gi"
+// names that one registry and is a harmless no-op, while any other name cannot
+// be honoured and is an error — never silently ignored.
+func applyConsumeRegistry(rs *provider.RepositorySet, home string, m *manifest.Manifest, explicit string) (name string, fromDefault bool, err error) {
+	name, fromDefault = explicit, false
+	if name == "" {
+		name, fromDefault = resolveDefaultConsumeRegistry(home, m), true
+	}
+	if name == "" {
+		return "", false, nil
+	}
+
+	if rs == nil {
+		if name != config.GIName {
+			if fromDefault {
+				return "", false, fmt.Errorf("default consume registry %q: no repository named %q is configured (add it to fglpkg.json or ~/.fglpkg/config.json)", name, name)
+			}
+			return "", false, fmt.Errorf("--registry %q: no repository named %q is configured (add it to fglpkg.json or ~/.fglpkg/config.json)", name, name)
+		}
+		// Naming the only configured registry restricts nothing.
+		return name, fromDefault, nil
+	}
+
+	// An explicit flag is a hard restriction that outranks pins; the sticky
+	// default is weaker than a pin (see RepositorySet.route).
+	if !fromDefault {
+		rs.Restrict(name)
+		return name, false, nil
+	}
+	if err := rs.SetConsumeDefault(name); err != nil {
+		return "", false, err
+	}
+	return name, true, nil
+}
+
+// noteConsumeDefault tells the user which repository a sticky consume default
+// scoped this command to, so a narrowed result set or a not-found error is
+// self-explanatory rather than mysterious. Silent when nothing was scoped (no
+// default, an explicit flag, or the single-registry case where naming the only
+// registry restricts nothing).
+//
+// Written to stderr, never stdout: `info --json` and `outdated --json` promise
+// machine-readable stdout.
+func noteConsumeDefault(rs *provider.RepositorySet, name string, fromDefault bool) {
+	if rs == nil || name == "" || !fromDefault {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "note: scoped to default consume registry %q (override with --registry <name>)\n", name)
 }
 
 // resolveMavenMirror returns the Maven mirror base URL and its auth scheme for
