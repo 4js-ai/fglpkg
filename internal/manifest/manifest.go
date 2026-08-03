@@ -125,6 +125,21 @@ type Manifest struct {
 	// time. Empty ("" or "gi") preserves the default of publishing to GI. This
 	// is a publish-only default; it does not bias consume-side routing.
 	DefaultRegistry string `json:"defaultRegistry,omitempty"`
+	// DefaultConsumeRegistry names the repository the consuming commands
+	// (install/update/search/info/outdated) resolve against when no --registry
+	// flag is given. Committed with the project so a clean clone consumes from
+	// the team's repository with no per-developer setup. Overridden by
+	// FGLPKG_CONSUME_REGISTRY; overrides the global config.json
+	// defaultConsumeRegistry. Empty consults every configured repository, as
+	// before. See specs/artifactory-secondary-repository.md (GIS-364).
+	//
+	// It is *exclusion*, not precedence — the named repository is the only one
+	// consulted, so a name present in two repositories is never silently
+	// tie-broken. It is also the weakest of the source selectors: an explicit
+	// --registry wins, and so does a per-dependency `registry` pin (a pin is the
+	// more specific declaration, and letting the default override it would 404
+	// every package deliberately pinned elsewhere).
+	DefaultConsumeRegistry string `json:"defaultConsumeRegistry,omitempty"`
 	// MavenMirror, when set, reroutes Java/JAR downloads from Maven Central to
 	// the given Maven repository (typically a JFrog Artifactory Maven
 	// remote/virtual repo). Committed with the project so teammates fetch JARs
@@ -641,6 +656,10 @@ func (m *Manifest) PublishCopy() *Manifest {
 	// defaultRegistry is a publisher-side convenience (where THIS project
 	// publishes); it is meaningless to a consumer reading the sidecar.
 	clone.DefaultRegistry = ""
+	// defaultConsumeRegistry is this project's own source policy. Shipping it
+	// would let a dependency's manifest dictate where its consumer resolves
+	// packages from — the consumer's own config must own that decision.
+	clone.DefaultConsumeRegistry = ""
 	return &clone
 }
 

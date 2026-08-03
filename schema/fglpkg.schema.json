@@ -157,6 +157,10 @@
       "type": "string",
       "description": "Name of the repository that `fglpkg publish` targets when no --registry flag is given (and FGLPKG_PUBLISH_REGISTRY is unset). Lets a team that publishes to their own Artifactory avoid passing --registry every time. Omit (or use \"gi\") to publish to the Genero Intelligence registry. Publish-only: does not affect which repository packages are consumed from."
     },
+    "defaultConsumeRegistry": {
+      "type": "string",
+      "description": "Name of the repository the consuming commands (install, update, search, info, outdated) resolve against when no --registry flag is given (and FGLPKG_CONSUME_REGISTRY is unset). Committed with the project so a clean clone consumes from the team's repository with no per-developer setup. Omit (or use \"gi\") to consult every configured repository. This is exclusion, not precedence: the named repository is the only one consulted, so a name present in two repositories is never silently tie-broken. An explicit --registry and a per-dependency \"registry\" pin both override it."
+    },
     "mavenMirror": {
       "$ref": "#/definitions/mavenMirror",
       "description": "Maven repository (typically a JFrog Artifactory Maven remote/virtual repo) that replaces Maven Central as the source for Java/JAR downloads. Committed with the project so teammates fetch JARs from the team mirror on clone; credentials stay per-developer in ~/.fglpkg/credentials.json. Overridden by FGLPKG_MAVEN_URL; overrides the global config.json mavenMirror. Omit to use public Maven Central. A per-dependency \"url\" still overrides the mirror."

@@ -697,6 +697,36 @@ to its own Artifactory avoid passing `--registry` every time. **Publish-only**: 
 does not change which repository packages are *consumed* from. Omit it (or use
 `"gi"`) to publish to the GI registry.
 
+#### `defaultConsumeRegistry` — string
+Logical name of the repository that `install`, `update`, `search`, `info`, and
+`outdated` resolve from when no `--registry` flag is given (and
+`FGLPKG_CONSUME_REGISTRY` is unset). Committed with the project, so a clean clone
+consumes from the team's repository with no per-developer setup — only
+`fglpkg login` remains per-developer. Omit it to consult every configured
+repository (the default).
+
+Intended for the case where your Artifactory **proxies everything**, public
+packages included: every public name then exists in both GI and the mirror, and
+the collision guard would otherwise fire on all of them.
+
+**Exclusion, not precedence.** Only the named repository is consulted, so a name
+present in two repositories is never silently tie-broken; there is deliberately no
+"higher-priority repository wins" mode. A package missing from it is a clear
+not-found naming that repository, never a silent fallback elsewhere.
+
+Overridden, strongest first, by `--registry <name>` (that command), a
+per-dependency `registry` pin (that dependency), and a lockfile-recorded source
+(that locked package). Write it with
+`fglpkg registry add <name> <url> --project --consume-default`, and see which
+repository serves it in `fglpkg registry list`'s `DEFAULT` column.
+
+```json
+{
+  "registries": [ { "name": "acme", "type": "artifactory", "url": "…", "repoKey": "…" } ],
+  "defaultConsumeRegistry": "acme"
+}
+```
+
 ---
 
 ## 7. Worked examples
