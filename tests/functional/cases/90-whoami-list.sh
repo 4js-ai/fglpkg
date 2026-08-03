@@ -2,7 +2,10 @@ suite "whoami / logout / list"
 
 _whoami() {
   run whoami
-  assert_success
+  # Not-logged-in is a non-zero exit by design (cli.go cmdWhoami returns an
+  # error), so `if fglpkg whoami; then ...` is a usable auth check in a script.
+  # This asserted exit 0 until the harness started enforcing mid-body failures.
+  assert_exit 1
   assert_contains "not logged in"
 }
 it "whoami with no credentials reports not-logged-in" _whoami

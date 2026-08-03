@@ -15,10 +15,12 @@ _em_emits_merged() {
   _em_materialized
   run env --local
   assert_success
-  assert_contains ".fglpkg/merged"
+  assert_contains_path ".fglpkg/merged"
   # The materialized package is covered by the merged root, so its raw store dir
-  # must NOT be added as a separate FGLLDPATH entry.
-  assert_not_contains "packages/dbconnection"
+  # must NOT be added as a separate FGLLDPATH entry. The *_path form matters most
+  # here: a forward-slash needle can never appear in a backslash Windows path, so
+  # a plain assert_not_contains would hold vacuously and assert nothing at all.
+  assert_not_contains_path "packages/dbconnection"
 }
 it "env emits the merged root and omits a materialized package's store" _em_emits_merged
 
@@ -30,7 +32,7 @@ EOF
   printf 'P' > ".fglpkg/packages/legacylib/com/acme/Old.42m"
   run env --local
   assert_success
-  assert_contains "packages/legacylib"     # legacy (no generoPackages) → per-package entry kept
+  assert_contains_path "packages/legacylib"  # legacy (no generoPackages) → per-package entry kept
 }
 it "env keeps a per-package entry for a legacy (no-namespace) package" _em_legacy_passthrough
 
@@ -49,7 +51,7 @@ EOF
   printf 'P' > ".fglpkg/packages/dbkit/Helper.42m"                       # flat-root → not merged, not a program
   run env --local
   assert_success
-  assert_contains ".fglpkg/merged"      # namespaced module resolves via the merged root
-  assert_contains "packages/dbkit"      # flat module still resolves via the retained store dir
+  assert_contains_path ".fglpkg/merged"   # namespaced module resolves via the merged root
+  assert_contains_path "packages/dbkit"   # flat module still resolves via the retained store dir
 }
 it "env keeps a mixed package's store entry for its un-merged flat module" _em_mixed_keeps_store

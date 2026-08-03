@@ -103,4 +103,15 @@ it "thing does x" _does_x
 `run <args>` sets `$status` and combined `$output` (stdin is closed so a stray
 prompt can't hang; use `run_in "<stdin>" <args>` for interactive commands like
 `init`). The test body runs under `set -e`, so the first failing assertion fails
-the test. `mkpkg [name] [ver]` drops a minimal valid, packable package in cwd.
+the test — enforced, and guarded by `cases/000-harness-contract.sh`. (That
+guard exists because the invocation shape in `it()` silently suspended `set -e`
+for a long while, letting a mid-body failure pass as long as the body's last
+command succeeded.) `mkpkg [name] [ver]` drops a minimal valid, packable package
+in cwd.
+
+When asserting on a path, use `assert_contains_path` /
+`assert_not_contains_path` and write the needle with forward slashes: they
+normalise both sides, so one assertion covers POSIX and Windows. This matters
+doubly for the negative form — a `/` needle can never occur in a `\` path, so a
+plain `assert_not_contains` on a path holds vacuously on Windows and asserts
+nothing.

@@ -5,7 +5,7 @@ _env_global() {
   run env --global
   assert_success
   assert_contains "FGLLDPATH"
-  assert_contains "packages/mypkg"
+  assert_contains_path "packages/mypkg"
 }
 it "env --global puts the installed package dir on FGLLDPATH" _env_global
 
