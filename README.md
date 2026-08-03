@@ -366,7 +366,9 @@ fglpkg install --global                  # Force install to ~/.fglpkg/
 fglpkg install --local                   # Force install to .fglpkg/
 fglpkg remove myutils                    # Remove a package (any scope)
 fglpkg update                            # Re-resolve and update all dependencies
-fglpkg list                              # List installed packages
+fglpkg list                              # Dependency tree: packages, then their JARs
+fglpkg list --flat                       # One line per package, then the JAR files
+fglpkg list --depth 1                    # Only the directly declared dependencies
 fglpkg env                               # Print export statements (auto-detects scope)
 fglpkg env --global                      # Print exports for all global packages
 fglpkg env --shell powershell            # Emit PowerShell syntax (or sh / cmd)

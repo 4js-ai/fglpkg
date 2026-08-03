@@ -559,7 +559,7 @@ Lock file is stale (dependency "poiapi" was removed from dependencies) — re-re
   pruned jar poi-5.3.0.jar
 ```
 
-This matters because `.fglpkg/packages/` is not an inert cache: `fglpkg env` puts it on `FGLLDPATH`. An orphan left there stays importable, so code that should have stopped compiling keeps compiling on your machine and breaks on a fresh clone. Pruning is also what keeps `fglpkg list` honest — it reports what is on disk.
+This matters because `.fglpkg/packages/` is not an inert cache: `fglpkg env` puts it on `FGLLDPATH`. An orphan left there stays importable, so code that should have stopped compiling keeps compiling on your machine and breaks on a fresh clone. Pruning is also what keeps `fglpkg list` honest — an orphan the lock no longer records still shows up under `fglpkg list --flat`, which reports what is on disk.
 
 Two deliberate limits:
 
@@ -603,13 +603,54 @@ $ fglpkg install --frozen
 
 It checks the committed lock against the manifest only — nothing needs to be installed yet, which is exactly the fresh-checkout case. `--frozen` cannot be combined with a package argument or `--force` (both require re-resolving), and is not valid for `update`, whose whole purpose is to move the lock.
 
-### Listing Installed Packages
+### Listing Installed Dependencies
+
+`fglpkg list` prints the installed dependency tree. At every level, Genero packages and webcomponents come first, then the Java JARs they pull in:
+
+```bash
+$ fglpkg list
+myproject@1.0.0
+
+├─ poiapi@1.6.5
+│  ├─ myutils@1.0.0
+│  │  └─ com.google.guava:guava  32.1.3-jre
+│  ├─ org.apache.poi:poi  5.5.1
+│  └─ org.apache.xmlbeans:xmlbeans  5.3.0
+├─ testkit@1.0.0 (dev)
+│  └─ myutils@1.0.0 (*)
+└─ com.google.code.gson:gson  2.10.1
+
+3 packages, 3 JARs.
+(*) subtree already shown above
+```
+
+The top level is what your `fglpkg.json` declares; everything nested below it came in transitively. `(dev)` and `(optional)` mark the scope a dependency was installed under, and a subtree already shown further up collapses to a `(*)` leaf rather than being repeated.
+
+Where the tree comes from matters when the output surprises you:
+
+- **Package parentage is exact.** It is read from the `requiredBy` fields in `fglpkg.lock`, recorded during resolution.
+- **JAR parentage is reconstructed.** The lock does not record which package asked for a JAR, so `list` reads the bundled `fglpkg.json` of each installed package to find out (see [Working with Java JARs](#working-with-java-jars)). A JAR that no installed manifest declares is shown at the top level — including a JAR whose declaring package has no manifest on disk.
+- **JARs never have children.** fglpkg does no transitive POM resolution, so a JAR is always a leaf. A package that needs ten JARs lists all ten itself.
+
+Flags:
+
+| Flag | Effect |
+|---|---|
+| `--flat` | One line per installed package, then the installed JAR files — the pre-tree output, with no parentage |
+| `--depth <n>` | Show only the first `n` levels (`0`, the default, means unlimited). The counts still reflect everything rendered |
+| `--local`, `--global` | Force the project store (`.fglpkg/`) or the shared one (`~/.fglpkg/`) |
+
+The tree needs a `fglpkg.lock` in the current directory. Without one — and always under `--global`, which has no lock — the output falls back to `--flat` and says so:
 
 ```bash
 $ fglpkg list
 Installed packages:
-  myutils                        1.0.0
-  poiapi                         1.0.0
+  poiapi                         1.6.5
+
+Installed JARs:
+  poi-5.5.1.jar
+
+(no fglpkg.lock — run 'fglpkg install' to see the dependency tree)
 ```
 
 ### Searching the Registry
@@ -1828,7 +1869,7 @@ fglpkg update
 
 ### `fglpkg list` shows a package I removed
 
-`list` reports what is actually installed under `.fglpkg/packages/`, so a package that is gone from `fglpkg.json` but still listed means the store hasn't been reconciled yet. Run `fglpkg install` — it re-resolves and prunes the orphan (see [Pruning](#pruning-converging-on-the-manifest)). If it persists, you are most likely on a **global** install (`~/.fglpkg/`), which is shared across projects and deliberately never pruned; check with `fglpkg list --local` vs `fglpkg list --global`.
+`list` reports what `fglpkg.lock` records as installed (and, under `--flat`, what is actually on disk under `.fglpkg/packages/`), so a package that is gone from `fglpkg.json` but still listed means the store hasn't been reconciled yet. Run `fglpkg install` — it re-resolves and prunes the orphan (see [Pruning](#pruning-converging-on-the-manifest)). If it persists, you are most likely on a **global** install (`~/.fglpkg/`), which is shared across projects and deliberately never pruned; check with `fglpkg list --local` vs `fglpkg list --global`.
 
 ### Wrong Genero version detected
 

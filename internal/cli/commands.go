@@ -138,11 +138,25 @@ global ~/.fglpkg/ is shared across projects.
 	},
 	{
 		Name:    "list",
-		Summary: "List installed packages",
-		Usage:   "fglpkg list [--local|--global]",
+		Summary: "List installed dependencies as a tree",
+		Usage:   "fglpkg list [--local|--global] [--flat] [--depth <n>]",
 		Long: `FLAGS:
   --local, -l              Force local project directory (.fglpkg/)
   --global, -g             Force global home directory (~/.fglpkg/)
+  --flat                   One line per installed package, then the JARs, with
+                           no tree structure and no parentage
+  --depth <n>              Limit the tree to n levels (0 = unlimited, default)
+
+Prints the installed dependency tree: at every level, Genero packages and
+webcomponents first, then the Java JARs they pull in. A subtree already shown
+above is collapsed to a "(*)" leaf rather than repeated.
+
+Package parentage comes from fglpkg.lock. JAR parentage is not recorded there,
+so it is read from each installed package's bundled fglpkg.json — a JAR no
+installed manifest declares is shown at the top level.
+
+Needs a fglpkg.lock in the current directory. Without one — and always under
+--global, which has no lock — the output falls back to --flat.
 `,
 	},
 	{

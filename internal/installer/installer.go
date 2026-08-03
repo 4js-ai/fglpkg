@@ -1127,6 +1127,31 @@ func (i *Installer) List() ([]InstalledPackage, error) {
 	return pkgs, nil
 }
 
+// ListJars returns the file names of all installed JARs by scanning the jars
+// dir, sorted for stable output. Unlike List, there is no manifest to consult:
+// a JAR on disk is just a file, so the name is all there is. Used by
+// `fglpkg list` in its flat mode, where no lock file is available to supply
+// coordinates.
+func (i *Installer) ListJars() ([]string, error) {
+	entries, err := os.ReadDir(i.jarsDir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var jars []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".jar") {
+			continue
+		}
+		jars = append(jars, e.Name())
+	}
+	sort.Strings(jars)
+	return jars, nil
+}
+
 // PackagesDir returns the path where BDL packages are installed.
 func (i *Installer) PackagesDir() string { return i.packagesDir }
 

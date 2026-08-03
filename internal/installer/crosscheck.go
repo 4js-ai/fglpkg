@@ -253,6 +253,41 @@ func (i *Installer) collectDeclared(root *manifest.Manifest, bdlPkgNames []strin
 	return set
 }
 
+// JarDeclarers maps "groupId:artifactId" to the names of the root project
+// (rootPkgLabel, "<root>") and the installed packages whose bundled manifest
+// declares that JAR. It is how `fglpkg list` reconstructs JAR parentage, which
+// the lock file does not record: LockedJAR has no requiredBy field, so without
+// this the only honest place to hang a JAR is the root (which is what the
+// CycloneDX SBOM still does — see internal/sbom.buildDependencyEdges).
+//
+// The key is version-independent by construction: JavaDependency.Key() and
+// LockedJAR.Key are both exactly "groupId:artifactId", so joining a locked JAR
+// to its declaration is an exact match and survives the resolver's
+// higher-version-wins dedup.
+//
+// pkgNames are the installed BDL package names (a package's directory under
+// packagesDir is its name — see the destDir in downloadAndExtract). Packages
+// with no manifest on disk are skipped, inherited from collectDeclared.
+func (i *Installer) JarDeclarers(root *manifest.Manifest, pkgNames []string) map[string][]string {
+	out := map[string][]string{}
+	for _, d := range i.collectDeclared(root, pkgNames).java {
+		key := d.dep.Key()
+		// The same package declaring a coordinate twice (e.g. in both prod and
+		// optional) is still one edge.
+		seen := false
+		for _, p := range out[key] {
+			if p == d.pkg {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			out[key] = append(out[key], d.pkg)
+		}
+	}
+	return out
+}
+
 // manifestJavaDeps returns a manifest's Java dependencies across the prod,
 // optional, and dev scopes. Published package manifests carry no dev deps
 // (they are stripped at publish), so including dev is harmless and makes the

@@ -1074,30 +1074,8 @@ func cmdUpdate(args []string) error {
 }
 
 // ─── list ─────────────────────────────────────────────────────────────────────
-
-func cmdList(args []string) error {
-	_, forceLocal, forceGlobal, _, err := parseFlags(args)
-	if err != nil {
-		return err
-	}
-	home, _, err := resolveHome(forceLocal, forceGlobal)
-	if err != nil {
-		return err
-	}
-	pkgs, err := newInstaller(home, nil).List()
-	if err != nil {
-		return err
-	}
-	if len(pkgs) == 0 {
-		fmt.Println("No packages installed.")
-		return nil
-	}
-	fmt.Println("Installed packages:")
-	for _, p := range pkgs {
-		fmt.Printf("  %-30s %s\n", p.Name, p.Version)
-	}
-	return nil
-}
+//
+// cmdList lives in list.go, with the dependency-tree builder and renderer.
 
 // ─── env ──────────────────────────────────────────────────────────────────────
 
