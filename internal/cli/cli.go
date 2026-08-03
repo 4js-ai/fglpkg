@@ -589,15 +589,26 @@ func cmdInstall(args []string) error {
 	// Best-effort manifest load so any configured registries drive resolution.
 	// The authoritative load happens later per install path.
 	regManifest, _ := manifest.Load(".")
+	// Per-invocation installer options that come from flags (currently
+	// --no-verify-signature) are applied by this helper at EVERY construction
+	// site. The add-package path rebuilds the installer after saving the manifest
+	// (see below), and every download runs through that rebuilt instance, so an
+	// option applied only to the first one silently did nothing: `install <pkg>
+	// --no-verify-signature` still enforced signatures and, under
+	// signing.enforce=require, failed outright despite the documented override
+	// (#64). Routing options live in buildInstaller / applyConsumeRegistry.
+	applyInstallFlags := func(i *installer.Installer) {
+		if flags.noVerifySignature {
+			globalHome, _ := fglpkgHome()
+			i.WithSigning(signing.EnforceOff, globalHome, defaultRegistry())
+		}
+	}
 	// buildInstaller (not newInstaller) so the graph-install path below can scope
 	// the resolver to the configured consume default (GIS-364). Re-resolution only
 	// happens on a stale/missing lock — a valid lock replays its recorded sources
 	// and never routes — but that path must honour the default too.
 	inst, instRS := buildInstaller(home, regManifest)
-	if flags.noVerifySignature {
-		globalHome, _ := fglpkgHome()
-		inst.WithSigning(signing.EnforceOff, globalHome, defaultRegistry())
-	}
+	applyInstallFlags(inst)
 	projectDir, _ := os.Getwd()
 
 	if isLocal {
@@ -743,9 +754,12 @@ func cmdInstall(args []string) error {
 	// Rebuild the installer from the saved manifest so its routing picks up any
 	// freshly-written registry pin — otherwise a pinned (collision) package
 	// would fail the graph install, which was resolved from the pre-add manifest.
-	// The rebuilt set is a fresh RepositorySet, so re-apply the same scoping the
-	// add-resolve used, or the graph install would fan out (GIS-364).
+	// The rebuilt set is a fresh RepositorySet, so re-apply BOTH the same scoping
+	// the add-resolve used (or the graph install would fan out, GIS-364) AND this
+	// invocation's flags via applyInstallFlags (or --no-verify-signature would be
+	// silently dropped here on the add path, #64).
 	rebuiltInst, rebuiltRS := buildInstaller(home, m)
+	applyInstallFlags(rebuiltInst)
 	if _, _, err := applyConsumeRegistry(rebuiltRS, globalHome, m, flags.registry); err != nil {
 		return err
 	}
