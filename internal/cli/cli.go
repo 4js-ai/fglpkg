@@ -589,11 +589,23 @@ func cmdInstall(args []string) error {
 	// Best-effort manifest load so any configured registries drive resolution.
 	// The authoritative load happens later per install path.
 	regManifest, _ := manifest.Load(".")
-	inst := newInstaller(home, regManifest)
-	if flags.noVerifySignature {
-		globalHome, _ := fglpkgHome()
-		inst.WithSigning(signing.EnforceOff, globalHome, defaultRegistry())
+	// Per-invocation installer options are applied HERE, by the constructor, not
+	// at the call sites. The add-package path rebuilds the installer after saving
+	// the manifest (see below) and every download runs through that rebuilt
+	// instance, so an option applied only to the first one silently did nothing:
+	// `install <pkg> --no-verify-signature` still enforced signatures, and under
+	// signing.enforce=require it failed outright despite the documented override.
+	// Routing options belong to buildInstaller; this closure carries the ones that
+	// come from flags, so every instance is built the same way.
+	newInst := func(m *manifest.Manifest) *installer.Installer {
+		i := newInstaller(home, m)
+		if flags.noVerifySignature {
+			globalHome, _ := fglpkgHome()
+			i.WithSigning(signing.EnforceOff, globalHome, defaultRegistry())
+		}
+		return i
 	}
+	inst := newInst(regManifest)
 	projectDir, _ := os.Getwd()
 
 	if isLocal {
@@ -728,7 +740,8 @@ func cmdInstall(args []string) error {
 	// Rebuild the installer from the saved manifest so its routing picks up any
 	// freshly-written registry pin — otherwise a pinned (collision) package
 	// would fail the graph install, which was resolved from the pre-add manifest.
-	inst = newInstaller(home, m)
+	// Via newInst, so this instance keeps the invocation's flags.
+	inst = newInst(m)
 	fmt.Println()
 	if err := runHook(m, manifest.HookPreInstall, projectDir); err != nil {
 		return err
