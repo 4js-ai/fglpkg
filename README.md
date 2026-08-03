@@ -277,6 +277,7 @@ eval "$(fglpkg env --global)"
 | `FGLPKG_REGISTRY` | GI registry URL — used by `install`, `search`, `audit`, `info`, `outdated`, `whoami`, `login`, `publish`. Default: `https://service.generointelligence.ai` |
 | `FGLPKG_TOKEN` | Bearer token for the **GI** registry. Takes precedence over stored OAuth/PAT credentials, and cannot be cleared by `fglpkg logout` (unset it to fully log out). Does not authenticate secondary repositories |
 | `FGLPKG_PUBLISH_REGISTRY` | Name of the repository `fglpkg publish` targets when no `--registry` is given. Overrides the manifest's `defaultRegistry`. See [Secondary Package Repositories](#secondary-package-repositories-jfrog-artifactory) |
+| `FGLPKG_CONSUME_REGISTRY` | Name of the repository `install`, `update`, `search`, `info`, and `outdated` resolve from when no `--registry` is given. Overrides `defaultConsumeRegistry` in `fglpkg.json` / `config.json`. Only that repository is consulted; a per-dependency `registry` pin still wins. See [Choosing where packages come from](#choosing-where-packages-come-from) |
 | `FGLPKG_MAVEN_URL` | Base URL of a Maven mirror for JAR downloads (replaces `https://repo1.maven.org/maven2`). Highest-precedence override of the `mavenMirror` config; a per-dependency `url` still wins |
 | `FGLPKG_GENERO_VERSION` | Override Genero version detection |
 | `FGLPKG_INSTALL_CONCURRENCY` | Cap parallel downloads during install (default 4) |
@@ -725,6 +726,61 @@ resolved in decreasing precedence: `FGLPKG_PUBLISH_REGISTRY` → the project's
 
 With that, a bare `fglpkg publish` deploys to `acme`; `--registry gi` still
 reaches GI on demand.
+
+### Choosing where packages come from
+
+By default the consuming commands consult **every** configured repository, and a
+package name found in more than one is a hard error rather than a silent guess
+(the dependency-confusion defense). That is the right default for a team with a
+few internal packages alongside GI.
+
+It is the wrong default if your Artifactory **proxies everything**, including
+public packages: then every public name exists in both GI and your mirror, and
+the collision guard fires on all of them. For that case, declare a **default
+consume registry** — the one repository packages are resolved from:
+
+```json
+{
+  "registries": [ { "name": "acme", "type": "artifactory", "url": "…", "repoKey": "…" } ],
+  "defaultConsumeRegistry": "acme"
+}
+```
+
+```bash
+# or write both at once
+fglpkg registry add acme https://acme.jfrog.io/artifactory/GeneroBDL --project --consume-default
+```
+
+Resolved in decreasing precedence: `FGLPKG_CONSUME_REGISTRY` → the project's
+`defaultConsumeRegistry` → the global `defaultConsumeRegistry` → unset (consult
+everything). Declaring it in the committed `fglpkg.json` means a clean clone
+resolves from the right repository with no per-developer setup — only
+`fglpkg login` remains per-developer.
+
+It applies to `install`, `update`, `search`, `info`, and `outdated`, and
+`registry list` shows it in the `DEFAULT` column.
+
+**This is exclusion, not precedence.** Only the named repository is consulted, so
+a name present in two repositories is never silently tie-broken — there is
+deliberately no "higher-priority repository wins" mode, which would reopen
+exactly the hole the collision guard closes. `priority` still only controls query
+order and `search` de-duplication.
+
+What still overrides it, strongest first:
+
+| Override | Scope |
+|---|---|
+| `--registry <name>` | this command only |
+| a per-dependency `registry` pin in `fglpkg.json` | that dependency, always |
+| a lockfile-recorded source | that locked package, always |
+
+A package missing from the default repository is a clear not-found naming that
+repository — never a silent fallback to another one. To fetch a specific package
+from elsewhere, pin it:
+
+```json
+{ "dependencies": { "fgl": { "logft": { "version": "^2.0.0", "registry": "gi" } } } }
+```
 
 ### Integrity
 

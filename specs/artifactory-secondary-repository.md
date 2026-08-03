@@ -471,6 +471,22 @@ Env: no new *required* vars. `FGLPKG_REGISTRY` keeps overriding the `gi` URL. (A
 `FGLPKG_REGISTRY_<NAME>_TOKEN` convention for CI could be added if needed, but `--token` on
 `login` covers CI today.)
 
+**Consume-side default (GIS-364, added 2026-08-03).** A `defaultConsumeRegistry` in `fglpkg.json`
+or `~/.fglpkg/config.json` (env override `FGLPKG_CONSUME_REGISTRY`; written by
+`registry add --consume-default`) makes one repository the sole source for **all** the commands in
+the table above. It slots into [§6](#6-routing--the-collision-guard) routing *below* every pin and
+*above* the fan-out:
+
+```
+--registry flag  >  root pin  >  declared pin  >  defaultConsumeRegistry  >  fan-out + collision guard
+```
+
+Only the named repository is consulted, so the guard is never *reached* for an unpinned name rather
+than being weakened — see [§12](#12-security-posture--dependency-confusion) and decision #6. A
+locked `Registry` still wins outright (`VersionsFrom` bypasses routing), and `outdated` consults the
+default only for a dependency the lock has never seen. `priority` remains what it was: query order
+and `search` de-duplication.
+
 ## 12. Security posture — dependency confusion
 
 This is the central risk of any secondary-repository feature (Birsan-style dependency confusion),
@@ -490,9 +506,18 @@ and it is a named threat in [threat-model.md](../security/threat-model.md). Defe
    story and can extend to Artifactory-hosted zips later (they can carry the same detached
    signatures — no re-signing at the mirror).
 
+5. **Consume-side default is exclusion, not precedence ([§11](#11-consuming-commands), GIS-364)** —
+   a configured `defaultConsumeRegistry` consults exactly *one* repository, so it can only ever
+   yield 0 or 1 hits and introduces no tie-breaking. It *narrows* the consulted set, which is
+   strictly stronger than the fan-out: a public name can no longer be answered by a repository the
+   team did not choose. What it must never become is a "prefer X on a tie" knob — see decision #6.
+
 **Recommendation to the customer:** give internal packages a distinctive prefix (e.g. `acme-`) and
 set the `packages` allow-list on the Artifactory repo. That makes the public/internal split
-*structural*, not merely ordered — the strongest available defense short of scoped names.
+*structural*, not merely ordered — the strongest available defense short of scoped names. Where the
+Artifactory proxies *everything* (public packages included), a prefix split cannot express that:
+set `defaultConsumeRegistry` instead, which makes the mirror the single source without introducing
+precedence.
 
 ## 13. CLI & config surface (summary)
 
@@ -561,7 +586,7 @@ fglpkg registry list                     # configured repos + auth status
   [package-signing.md](package-signing.md).
 - **Offline / air-gapped cache** (gap #28).
 
-## 17. Decisions — resolved (2026-07-10)
+## 17. Decisions — resolved (2026-07-10; #8 added 2026-08-03)
 
 All design decisions are settled; this section is retained as a decision log for the implementer.
 Each landed on the recommended option.
@@ -588,6 +613,37 @@ Each landed on the recommended option.
 7. **Auth schemes → settled.** ✅ `bearer` + `basic` + `apikey` + `anonymous`
    ([§8](#8-authentication)); Basic was promoted to first-class after the trial showed the instance
    advertises `Basic` and disables anonymous read.
+
+Added later, from the Tyler Technologies demo (2026-07-20):
+
+8. **Consume-side default → scoping (a persistent restriction), and precedence-wins routing is
+   explicitly rejected.** ✅ Resolved 2026-08-03 (GIS-364).
+
+   Tyler proxies **everything** through their Artifactory, public packages included, so every public
+   name exists in both `gi` and their mirror and the collision guard
+   ([§6](#6-routing--the-collision-guard)) fires on all of them. The ticket was filed as "preferred
+   registry + priority order" — the npm/NuGet mental model — but that reading is a
+   *precedence* knob, and shipping one would reopen precisely the dependency-confusion hole decisions
+   #2/#3 close: any repository that could win a tie can be used to shadow a name.
+
+   What shipped instead is `defaultConsumeRegistry` ([§11](#11-consuming-commands)): a persistent
+   restriction to **one** repository for the consuming commands. It expresses "Artifactory *is* the
+   source" directly, and because exactly one repository is consulted it can only produce 0 or 1
+   hits — there is nothing to tie-break. It sits below every pin so a project that deliberately
+   sources a package elsewhere keeps working, and above the fan-out so the guard is never reached
+   for an unpinned name.
+
+   **There is still no "higher-priority repository wins" mode, and none should be added.** The
+   supported ways to control the source are, strongest first: `--registry <name>` (one command), a
+   per-dependency `registry` pin (one dependency), a lockfile-recorded source (one locked package),
+   `defaultConsumeRegistry` (all unpinned names), and the `packages` allow-list
+   ([§7.4](#74-optional-name-scope-filter)) for a structural prefix split. If a future request asks
+   for "just prefer repo X on a collision", the answer is a pin, an allow-list, or this default —
+   not precedence. `priority` remains query order + `search` de-duplication only.
+
+   A rejected variant: reusing the publish-side `defaultRegistry` for both directions (the shortest
+   diff). It would silently scope installs for every team that had set it purely to publish to their
+   own Artifactory, so the two directions stay separate fields.
 
 ## 18. Post-merge status & open issues (reviewed 2026-07-15)
 

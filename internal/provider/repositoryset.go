@@ -20,6 +20,7 @@ import (
 //
 // Routing per package name:
 //   - pinned (a manifest registry: pin or a lockfile Source) → that provider only;
+//   - a configured consume default → that provider only (GIS-364);
 //   - otherwise query every admitting provider and count non-not-found hits:
 //     0 → not found, 1 → resolve + record source, ≥2 → a hard collision error.
 //
@@ -30,6 +31,10 @@ type RepositorySet struct {
 	descriptors map[string]config.Registry // provider name → descriptor (for Admits)
 	pins        map[string]string          // package name → required registry name (root manifest / explicit)
 	restrictTo  string                     // if set, resolution is limited to this provider
+	// consumeDefault is the sticky consume-side default registry (GIS-364): when
+	// set, an *unpinned* name resolves from that provider alone instead of
+	// fanning out. Weaker than restrictTo and than any pin; see route.
+	consumeDefault string
 
 	mu           sync.Mutex
 	declaredPins map[string]string // package name → registry declared by a depending package's manifest
@@ -111,6 +116,32 @@ func (rs *RepositorySet) pinFor(name string) string {
 
 // Restrict limits resolution to the single named provider (the --registry flag).
 func (rs *RepositorySet) Restrict(name string) { rs.restrictTo = name }
+
+// SetConsumeDefault makes name the sticky consume-side default repository
+// (GIS-364): an unpinned package resolves from it alone rather than fanning out
+// to every provider. This is exclusion, not precedence — only one repository is
+// ever consulted, so it introduces no way for a two-repository collision to be
+// silently tie-broken. An explicit Restrict and any pin both still win.
+//
+// The name is validated here rather than at first route so a typo in
+// fglpkg.json / config.json fails immediately with the configured names, instead
+// of surfacing as a confusing not-found during resolution. Passing "" clears it.
+func (rs *RepositorySet) SetConsumeDefault(name string) error {
+	if name == "" {
+		rs.consumeDefault = ""
+		return nil
+	}
+	if rs.byName(name) == nil {
+		return fmt.Errorf(
+			"default consume registry %q is not configured.\n"+
+				"  Configured registries: %s\n"+
+				"  Fix the name in fglpkg.json / ~/.fglpkg/config.json (defaultConsumeRegistry), "+
+				"or add %q to one of them.",
+			name, rs.configuredNames(), name)
+	}
+	rs.consumeDefault = name
+	return nil
+}
 
 // Providers returns the providers in priority order.
 func (rs *RepositorySet) Providers() []Provider { return rs.providers }
@@ -239,6 +270,49 @@ func (rs *RepositorySet) route(name string) (routeDecision, error) {
 			if errors.Is(err, registry.ErrNotFound) {
 				return routeDecision{}, fmt.Errorf(
 					"package %q is pinned to registry %q but was not found there", name, pin)
+			}
+			return routeDecision{}, err
+		}
+		d := routeDecision{provider: p, versions: vs}
+		rs.routes[name] = d
+		return d, nil
+	}
+
+	// Unpinned, but a consume default is configured → that provider alone
+	// (GIS-364). This deliberately sits BELOW the pin check: a pin is the more
+	// specific declaration, and overriding it would break every package a
+	// project has deliberately pinned to another repository. It sits ABOVE the
+	// fan-out because its purpose is to keep the fan-out (and therefore the
+	// collision guard) from firing at all for a team whose repository proxies
+	// every public name.
+	//
+	// The `packages` allow-list (Admits) is not consulted here, matching the
+	// restrictTo branch above: the user named this repository explicitly, so it
+	// is asked directly rather than filtered out of its own default.
+	if rs.consumeDefault != "" {
+		p := rs.byName(rs.consumeDefault)
+		if p == nil {
+			// SetConsumeDefault validates the name, so this is only reachable if a
+			// caller set the field some other way. Fail closed rather than fanning
+			// out — silently widening the consulted set would undo the scoping.
+			return routeDecision{}, fmt.Errorf(
+				"default consume registry %q is not configured (configured: %s)",
+				rs.consumeDefault, rs.configuredNames())
+		}
+		vs, err := p.FetchVersions(name)
+		if err != nil {
+			if errors.Is(err, registry.ErrNotFound) {
+				// Keep wrapping ErrNotFound: the resolver's optional-dependency
+				// handling and `install`'s hints both test for it with errors.Is.
+				// The pin example uses a placeholder rather than naming another
+				// repository — no other repository was queried, so which one holds
+				// the package is genuinely unknown here.
+				return routeDecision{}, fmt.Errorf(
+					"package %q not found in %q, the default consume registry (%w).\n"+
+						"  Only that repository was consulted. To look elsewhere, pass\n"+
+						"  --registry <name>, or pin the source in fglpkg.json:\n"+
+						"      \"dependencies\": { \"fgl\": { %q: { \"version\": \"…\", \"registry\": \"<name>\" } } }",
+					name, rs.consumeDefault, registry.ErrNotFound, name)
 			}
 			return routeDecision{}, err
 		}

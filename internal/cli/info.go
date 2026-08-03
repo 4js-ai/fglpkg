@@ -62,10 +62,22 @@ func cmdInfo(args []string) error {
 	if rsErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: ignoring registries config: %v\n", rsErr)
 	}
+	// A configured consume default scopes the lookup to one repository (GIS-364),
+	// so `info` reports on the copy `install` would actually resolve. `info` has
+	// no --registry flag, so the default is the only scoping input.
+	reg, fromDefault, err := applyConsumeRegistry(rs, home, m, "")
+	if err != nil {
+		return err
+	}
+	noteConsumeDefault(rs, reg, fromDefault)
 
 	versions, err := infoVersionList(rs, name)
 	if err != nil {
-		return privateHint(err, name, pinnedRegistry(m, name))
+		hintReg := reg
+		if hintReg == "" {
+			hintReg = pinnedRegistry(m, name)
+		}
+		return privateHint(err, name, hintReg)
 	}
 	if len(versions.Versions) == 0 {
 		return fmt.Errorf("package %q has no published versions", name)
