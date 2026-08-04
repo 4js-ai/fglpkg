@@ -421,6 +421,32 @@ REM Windows
 SET FGLPKG_HOME=C:\fglpkg
 ```
 
+#### Separating global packages from config and credentials
+
+`FGLPKG_HOME` holds two different things: your user **config** (`config.json`) and **credentials**
+(`credentials.json`), and — by default — the **global package store** (`packages/`, `jars/`,
+`webcomponents/`, `merged/`). You can relocate just the package store with `FGLPKG_GLOBAL_DIR`,
+leaving config and credentials under `FGLPKG_HOME`:
+
+```bash
+# Bind global packages to the Genero version, keep config/credentials in ~/.fglpkg
+export FGLPKG_GLOBAL_DIR="$FGLDIR/fglpkg"
+```
+
+Resolution of the global package root, highest precedence first:
+
+1. `FGLPKG_GLOBAL_DIR`, if set;
+2. `FGLPKG_HOME`, if set — it has always governed the package store, so setting it keeps packages
+   under it (nothing moves unexpectedly);
+3. `$FGLDIR/fglpkg`, when `FGLDIR` is set and that path is **writable** — so a default install is
+   bound to the Genero version rather than the user home;
+4. `~/.fglpkg`.
+
+Config and credentials always resolve from `FGLPKG_HOME` (or `~/.fglpkg`), never from
+`FGLPKG_GLOBAL_DIR`. If you relocate the package root on a machine that already had global packages
+under `~/.fglpkg`, `fglpkg` prints a one-time note pointing at the old location so nothing appears to
+silently vanish.
+
 ## Creating a New Project
 
 To start a new Genero BDL project with fglpkg:

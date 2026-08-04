@@ -156,6 +156,14 @@ hard links are unavailable — a different filesystem, or Windows), so it costs 
 `install`/`remove` keep it current; delete it freely and rebuild with `fglpkg relink`. It is always
 git-ignored, even if you choose to vendor `.fglpkg/packages/`.
 
+**Relocating the global package root.** By default packages and config live together under
+`~/.fglpkg`, but you can separate them. `FGLPKG_GLOBAL_DIR` sets the **global package root**
+(`packages/`, `jars/`, `webcomponents/`, `merged/`) independently of `config.json` and
+`credentials.json`, which always stay under `FGLPKG_HOME`. When `FGLPKG_GLOBAL_DIR` is unset, the
+global package root defaults to `$FGLDIR/fglpkg` — binding global installs to the Genero version —
+when `FGLDIR` is set and that path is writable, otherwise `~/.fglpkg`. Setting `FGLPKG_HOME` keeps
+packages under it, as before.
+
 The `jars/.classpath.jar` file is likewise **generated**: rather than putting every JAR's absolute path
 on `CLASSPATH`, `fglpkg env` emits this one anchor jar per scope, whose `META-INF/MANIFEST.MF` lists the
 real JARs by name. `fglrun` embeds its JVM via JNI and ignores launcher-style `dir/*` wildcards, but a
@@ -282,7 +290,8 @@ eval "$(fglpkg env --global)"
 
 | Variable | Purpose |
 |---|---|
-| `FGLPKG_HOME` | Override default `~/.fglpkg` home |
+| `FGLPKG_HOME` | Override the default `~/.fglpkg` home: user config (`config.json`) and credentials (`credentials.json`) — and the global package root too, unless `FGLPKG_GLOBAL_DIR` is set |
+| `FGLPKG_GLOBAL_DIR` | Root for globally-installed packages (`packages/`, `jars/`, `webcomponents/`, `merged/`), kept separate from config/credentials. When unset, defaults to `$FGLDIR/fglpkg` if `FGLDIR` is set and writable, else `~/.fglpkg` |
 | `FGLPKG_REGISTRY` | GI registry URL — used by `install`, `search`, `audit`, `info`, `outdated`, `whoami`, `login`, `publish`. Default: `https://service.generointelligence.ai` |
 | `FGLPKG_TOKEN` | Bearer token for the **GI** registry. Takes precedence over stored OAuth/PAT credentials, and cannot be cleared by `fglpkg logout` (unset it to fully log out). Does not authenticate secondary repositories |
 | `FGLPKG_PUBLISH_REGISTRY` | Name of the repository `fglpkg publish` targets when no `--registry` is given. Overrides the manifest's `defaultRegistry`. See [Secondary Package Repositories](#secondary-package-repositories-jfrog-artifactory) |
