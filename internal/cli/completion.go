@@ -31,6 +31,10 @@ var completionFlags = []string{
 	// Both spellings: parseEnvFlags accepts "--shell sh" and "--shell=sh",
 	// and the space form is the one the usage text documents.
 	"--shell", "--shell=",
+	"--flat",
+	// Both spellings, as for --shell: parseListFlags accepts "--depth 2" and
+	// "--depth=2".
+	"--depth", "--depth=",
 	"--dry-run", "-n",
 	"--changelog",
 	"--git",

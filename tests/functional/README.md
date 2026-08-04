@@ -58,6 +58,7 @@ mock/                  # phase-2 mock registry/OSV/Artifactory scaffold (see moc
 | `sbom` | CycloneDX 1.5 from lockfile; `-o` writes valid JSON |
 | manifest validation | malformed / unknown-field / bad-version rejected |
 | `whoami`/`logout`/`list` | not-logged-in; graceful logout; empty install |
+| `list` (tree) | JARs nested under the declaring package; `--depth`; `--flat`; unattributed JAR at top level; real install; no-lock and `--global` flat fallback; argument rejection |
 
 **Phase 2 — mock-backed (implemented, 56 tests total):** local mocks
 (`mock/registry_server.py` + `mock/osv_server.py`, protocol in
