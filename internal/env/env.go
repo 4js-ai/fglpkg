@@ -39,6 +39,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/4js-mikefolcher/fglpkg/internal/classpath"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 	"github.com/4js-mikefolcher/fglpkg/internal/workspace"
 )
@@ -73,14 +74,14 @@ const (
 var assetExtensions = map[string]envVar{
 	// FGLRESOURCEPATH — the manual's "program resource files" list is closed and
 	// has exactly these eight entries. See c_fgl_EnvVariables_FGLRESOURCEPATH.
-	".42f":  varResource, // compiled form
-	".iem":  varResource, // compiled message file (fglmkmsg; OPTIONS HELP FILE)
-	".4ad":  varResource, // action defaults
-	".4st":  varResource, // presentation style
-	".4sm":  varResource, // start menu
-	".4tb":  varResource, // toolbar
-	".4tm":  varResource, // topmenu
-	".42s":  varResource, // compiled localized strings
+	".42f": varResource, // compiled form
+	".iem": varResource, // compiled message file (fglmkmsg; OPTIONS HELP FILE)
+	".4ad": varResource, // action defaults
+	".4st": varResource, // presentation style
+	".4sm": varResource, // start menu
+	".4tb": varResource, // toolbar
+	".4tm": varResource, // topmenu
+	".42s": varResource, // compiled localized strings
 	// FGLDBPATH — a database schema is three files, not one, and fgldbsch emits
 	// them side by side. See c_fgl_DatabaseSchema_017. .val/.att are legacy
 	// (backward compatibility only) but still resolved through FGLDBPATH, so a
@@ -557,12 +558,17 @@ func (g *Generator) buildPlan(s *scanner, scopes []envScope, includeWorkspace bo
 			p.addPath(varLD, sc.mergedDir)
 		}
 
-		jars, err := collectJars(sc.jarsDir)
-		if err != nil {
-			return nil, err
-		}
-		for _, jar := range jars {
-			p.addPath(varClass, jar)
+		// CLASSPATH carries one anchor jar per jars dir, never the individual
+		// jars — see internal/classpath's package comment for why. The anchor
+		// is REFERENCED here, never written: install/update/remove keep it
+		// current (classpath.Sync), while env/bdl are read→stdout commands —
+		// env is typically eval'd from shell profiles, so a disk write here
+		// would race concurrent shells and fail on a read-only global home.
+		if anchor := classpath.AnchorPath(sc.jarsDir); anchor != "" {
+			p.addPath(varClass, anchor)
+		} else if classpath.HasDependencyJars(sc.jarsDir) {
+			p.warn("%s holds JAR dependencies but no %s; run 'fglpkg install' to regenerate the classpath anchor.",
+				sc.jarsDir, classpath.AnchorName)
 		}
 
 		// FGLIMAGEPATH points at the PARENT of webcomponents/ (i.e. .fglpkg/),
@@ -643,29 +649,6 @@ func (p *envPlan) finalWarnings() []string {
 		return p.warnings
 	}
 	return append(p.warnings, fmt.Sprintf("… and %d more environment warning(s) suppressed.", p.dropped))
-}
-
-// collectJars returns the absolute path of every .jar directly in dir, in
-// lexical order. A missing directory is not an error; an unreadable one is.
-func collectJars(dir string) ([]string, error) {
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return nil, nil
-	}
-	entries, err := os.ReadDir(abs)
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("cannot read directory %s: %w", dir, err)
-	}
-	var jars []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".jar") {
-			jars = append(jars, filepath.Join(abs, e.Name()))
-		}
-	}
-	return jars, nil
 }
 
 // ─── rendering ────────────────────────────────────────────────────────────────
