@@ -70,12 +70,17 @@ func cmdOutdated(args []string) error {
 	projectDir, _ := os.Getwd()
 	current := map[string]string{}
 	sources := map[string]string{}
+	// locked distinguishes "the lock recorded this package with an empty registry"
+	// (historical GI) from "the lock has no entry at all" — both leave sources[name]
+	// empty, but only the latter may fall back to the consume default below.
+	locked := map[string]bool{}
 	if lockfile.Exists(projectDir) {
 		lf, err := lockfile.Load(projectDir)
 		if err == nil {
 			for _, p := range lf.Packages {
 				current[p.Name] = p.Version
 				sources[p.Name] = p.Registry
+				locked[p.Name] = true
 			}
 		}
 	}
@@ -86,6 +91,16 @@ func cmdOutdated(args []string) error {
 	if rsErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: ignoring registries config: %v\n", rsErr)
 	}
+	// The locked source always wins (a locked package is re-checked against its
+	// own repository, never re-routed). The consume default only supplies a source
+	// for a dependency the lock has never seen (GIS-364). Called for its
+	// validation and note as much as for the name: this command resolves sources
+	// per package rather than through route().
+	consumeDefault, fromDefault, err := applyConsumeRegistry(rs, home, m, "")
+	if err != nil {
+		return err
+	}
+	noteConsumeDefault(rs, consumeDefault, fromDefault)
 
 	names := make([]string, 0, len(m.Dependencies.FGL))
 	for n := range m.Dependencies.FGL {
@@ -97,7 +112,18 @@ func cmdOutdated(args []string) error {
 	outdatedCount := 0
 
 	for _, name := range names {
-		row := buildOutdatedRow(rs, name, m.Dependencies.FGL[name], current[name], sources[name])
+		sourceReg := sources[name]
+		if !locked[name] {
+			// No lock entry, so no recorded source: fall back to the per-dependency
+			// pin, then the consume default, then "" (GI) — the same precedence the
+			// router applies to a fresh resolve.
+			if p := pinnedRegistry(m, name); p != "" {
+				sourceReg = p
+			} else if fromDefault {
+				sourceReg = consumeDefault
+			}
+		}
+		row := buildOutdatedRow(rs, name, m.Dependencies.FGL[name], current[name], sourceReg)
 		rows = append(rows, row)
 		if row.Status != "ok" {
 			outdatedCount++
