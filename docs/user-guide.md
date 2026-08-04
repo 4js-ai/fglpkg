@@ -667,7 +667,7 @@ Flags:
 | `--depth <n>` | Show only the first `n` levels (`0`, the default, means unlimited). The counts still reflect everything rendered |
 | `--local`, `--global` | Force the project store (`.fglpkg/`) or the shared one (`~/.fglpkg/`) |
 
-The tree needs a `fglpkg.lock` in the current directory. Without one — and always under `--global`, which has no lock — the output falls back to `--flat` and says so:
+**In a project**, the tree's package parentage comes from `fglpkg.lock`. Without a lock in the current directory, `list` falls back to `--flat` and says why:
 
 ```bash
 $ fglpkg list
@@ -679,6 +679,23 @@ Installed JARs:
 
 (no fglpkg.lock — run 'fglpkg install' to see the dependency tree)
 ```
+
+**In the global store** (`--global`) there is no lock — a lock lives beside a project's `fglpkg.json`, and the shared store has none. `list --global` instead reconstructs the tree from the bundled `fglpkg.json` of every installed package, printing a **forest**: each package that nothing else depends on is the root of its own subtree.
+
+```bash
+$ fglpkg list --global
+Global packages — /opt/fourjs/fgl/fglpkg
+
+├─ fgl-log4j@1.1.4
+│  └─ org.apache.logging.log4j:log4j-core  2.26.1
+└─ poiapi@1.6.5
+   ├─ org.apache.poi:poi  5.5.1
+   └─ org.apache.xmlbeans:xmlbeans  5.3.0
+
+2 packages, 3 JARs.
+```
+
+Because the global store installs each package's *own* declared JARs — there is no cross-package resolution picking one shared version — the same coordinate can legitimately appear at two versions under two different packages, and both are shown. Only BDL packages and the JARs they declare appear in the forest; for the raw on-disk package and JAR listing, use `fglpkg list --global --flat`. (A webcomponent installed globally extracts into a shared tree with no per-package manifest, so it is not listed by either mode.)
 
 ### Searching the Registry
 

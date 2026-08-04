@@ -386,6 +386,7 @@ fglpkg install --local                   # Force install to .fglpkg/
 fglpkg remove myutils                    # Remove a package (any scope)
 fglpkg update                            # Re-resolve and update all dependencies
 fglpkg list                              # Dependency tree: packages, then their JARs
+fglpkg list --global                     # Dependency forest of the shared store (~/.fglpkg/)
 fglpkg list --flat                       # One line per package, then the JAR files
 fglpkg list --depth 1                    # Only the directly declared dependencies
 fglpkg env                               # Print export statements (auto-detects scope)

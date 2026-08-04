@@ -17,11 +17,19 @@ package cli
 // fglpkg does no transitive POM resolution, so a JAR never has children: every
 // JAR node is a leaf one level below whoever declared it, and all of the tree's
 // depth comes from the Genero package graph.
+//
+// The global store (`list --global`) has no lock file — that lives beside a
+// project's fglpkg.json — so its tree is reconstructed a third way, from the
+// bundled fglpkg.json of every installed package (buildGlobalForest). The result
+// is a forest whose roots are the packages nothing else depends on, with each
+// JAR leaf keeping the version its declaring package requested (the global store
+// installs each package's own JARs rather than resolving one shared version).
 
 import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -126,20 +134,30 @@ func cmdList(args []string) error {
 	}
 	inst := newInstaller(home, nil)
 
+	// The global store has no lock file — that lives beside a project's
+	// fglpkg.json — so its dependency tree cannot be read from a lock. It is
+	// instead reconstructed from the bundled manifest of every installed
+	// package (listGlobalForest). --flat still forces the plain listing.
+	if flags.global {
+		if flags.flat {
+			return listFlat(os.Stdout, inst, false)
+		}
+		return listGlobalForest(os.Stdout, inst, home, flags.depth)
+	}
+
 	// The lock lives beside fglpkg.json in the project directory, not inside
-	// .fglpkg/, and there is none for the global store — so the tree is only
-	// available for a local project.
+	// .fglpkg/, so the tree is only available once a local project has one.
 	projectDir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("cannot determine working directory: %w", err)
 	}
-	hasLock := !flags.global && lockfile.Exists(projectDir)
+	hasLock := lockfile.Exists(projectDir)
 
 	if flags.flat || !hasLock {
 		// Only call out the missing lock when a tree was what the user asked
-		// for and could not be given: under --flat or --global, flat output is
-		// the right answer, not a fallback.
-		return listFlat(os.Stdout, inst, !flags.flat && !flags.global)
+		// for and could not be given: under --flat, flat output is the right
+		// answer, not a fallback.
+		return listFlat(os.Stdout, inst, !flags.flat)
 	}
 
 	lf, err := lockfile.Load(projectDir)
@@ -211,6 +229,218 @@ func listTree(w io.Writer, inst *installer.Installer, lf *lockfile.LockFile, pro
 	nodes := buildListTree(lf, inst.JarDeclarers(root, names), maxDepth)
 	writeTree(w, nodes, treeRootLabel(lf))
 	return nil
+}
+
+// ─── global forest ──────────────────────────────────────────────────────────
+
+// listGlobalForest reconstructs and prints the global store's dependency forest.
+// The global store has no lock file (that lives beside a project's fglpkg.json),
+// so parentage is recovered from the bundled fglpkg.json of every installed
+// package. Only BDL packages and the JARs they declare appear: a globally-
+// installed webcomponent extracts into a shared tree with no per-package
+// manifest to attribute, so it is listed by neither the forest nor --flat (both
+// see only packages/ and jars/). With no packages installed, this falls back to
+// the flat listing so any stray JARs are still reported.
+func listGlobalForest(w io.Writer, inst *installer.Installer, globalRoot string, maxDepth int) error {
+	installed, err := inst.List()
+	if err != nil {
+		return err
+	}
+	if len(installed) == 0 {
+		return listFlat(w, inst, false)
+	}
+
+	pkgs := make([]globalPkg, 0, len(installed))
+	for _, ip := range installed {
+		gp := globalPkg{name: ip.Name, version: ip.Version}
+		// A package with no readable manifest still shows as a childless node —
+		// we know it is installed, we just cannot recover its dependencies.
+		if m, err := manifest.Load(filepath.Join(inst.PackagesDir(), ip.Name)); err == nil {
+			gp.fglDeps = installedFGLDeps(m)
+			gp.jars = append(append([]manifest.JavaDependency(nil), m.Dependencies.Java...), m.OptionalDependencies.Java...)
+			if gp.version == "" || gp.version == "unknown" {
+				gp.version = m.Version
+			}
+		}
+		pkgs = append(pkgs, gp)
+	}
+
+	nodes := buildGlobalForest(pkgs, maxDepth)
+	writeTree(w, nodes, fmt.Sprintf("Global packages — %s", globalRoot))
+	return nil
+}
+
+// installedFGLDeps returns the de-duplicated FGL dependency names a manifest
+// declares across the prod and optional scopes — the scopes a consumer installs
+// transitively. Dev deps are excluded: they are stripped at publish and never
+// installed globally. Mirrors installer.manifestFGLNames, kept local rather than
+// exporting it.
+func installedFGLDeps(m *manifest.Manifest) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(fgl map[string]string) {
+		for name := range fgl {
+			if !seen[name] {
+				seen[name] = true
+				out = append(out, name)
+			}
+		}
+	}
+	add(m.Dependencies.FGL)
+	add(m.OptionalDependencies.FGL)
+	sort.Strings(out)
+	return out
+}
+
+// globalPkg is one installed package's reconstructed metadata: its version and
+// the direct dependencies its bundled manifest declares. It is the pure input to
+// buildGlobalForest, so the forest's shape is unit-testable without a filesystem.
+type globalPkg struct {
+	name    string
+	version string
+	fglDeps []string                  // direct FGL-package dependency names (prod+optional)
+	jars    []manifest.JavaDependency // direct JAR dependencies (prod+optional)
+}
+
+// buildGlobalForest reconstructs the global store's dependency forest from the
+// bundled manifests of installed packages. Unlike buildListTree there is no lock
+// file: package parentage comes from each manifest's FGL deps, and every JAR leaf
+// keeps the version its declaring package requested. That is faithful for the
+// global store, which installs each package's own declared JARs rather than
+// resolving one shared version — so the same coordinate can legitimately appear
+// at two versions under two different packages.
+//
+// Roots are the installed packages no other installed package depends on. A dep
+// on a package that is not installed is ignored (the forest shows what is on
+// disk, not what is merely declared). Repeats and cycles collapse to a (*) leaf
+// exactly as in the single-root tree; maxDepth caps recursion (0 = unlimited).
+//
+// Every installed package is guaranteed to appear exactly once: a package caught
+// in a dependency cycle with no external entry point (a<->b, or a store that is
+// wholly one cycle) is reachable from no root, so after the roots are walked any
+// still-unvisited package is promoted to a root of its own. Without that pass
+// such packages would silently vanish from the listing and the counts.
+func buildGlobalForest(pkgs []globalPkg, maxDepth int) []listNode {
+	byName := make(map[string]globalPkg, len(pkgs))
+	names := make([]string, 0, len(pkgs))
+	for _, p := range pkgs {
+		if _, dup := byName[p.name]; dup {
+			continue // a name is installed once; ignore an accidental duplicate
+		}
+		byName[p.name] = p
+		names = append(names, p.name)
+	}
+	sort.Strings(names) // deterministic root and leftover ordering
+
+	// requiredByOther marks any installed package named as an FGL dep of another
+	// installed package. What remains are the forest's roots.
+	requiredByOther := map[string]bool{}
+	for _, name := range names {
+		for _, dep := range byName[name].fglDeps {
+			if _, ok := byName[dep]; ok && dep != name {
+				requiredByOther[dep] = true
+			}
+		}
+	}
+	var roots []string
+	for _, name := range names {
+		if !requiredByOther[name] {
+			roots = append(roots, name) // names is sorted, so roots is too
+		}
+	}
+
+	// reachable is computed over the FULL dependency graph, independent of the
+	// depth-limited display walk below: a package hidden only because an ancestor
+	// was truncated by maxDepth is still reachable and must NOT be promoted to a
+	// root. Only a package no root can reach at all — an isolated cycle — is a
+	// leftover root, so nothing installed silently vanishes.
+	reachable := map[string]bool{}
+	var mark func(name string)
+	mark = func(name string) {
+		if reachable[name] {
+			return
+		}
+		reachable[name] = true
+		for _, dep := range byName[name].fglDeps {
+			if _, ok := byName[dep]; ok {
+				mark(dep)
+			}
+		}
+	}
+	for _, r := range roots {
+		mark(r)
+	}
+	var extraRoots []string
+	for _, name := range names {
+		if !reachable[name] {
+			extraRoots = append(extraRoots, name) // sorted (names is)
+		}
+	}
+
+	// seen keys on identity (kind|label|version), not name, so two versions of a
+	// coordinate both expand while a genuine repeat collapses — and a cycle is
+	// bounded because a package is already seen by the time we return to it.
+	seen := map[string]bool{}
+	pkgKey := func(p globalPkg) string { return fmt.Sprintf("%d|%s@%s", kindPkg, p.name, p.version) }
+	jarKey := func(j manifest.JavaDependency) string { return fmt.Sprintf("%d|%s@%s", kindJar, j.Key(), j.Version) }
+
+	var expand func(name string, depth int) listNode
+	expand = func(name string, depth int) listNode {
+		p := byName[name]
+		n := listNode{label: p.name, version: p.version, kind: kindPkg}
+		if seen[pkgKey(p)] {
+			n.repeat = true
+			return n
+		}
+		seen[pkgKey(p)] = true
+		if maxDepth != 0 && depth >= maxDepth {
+			return n
+		}
+		// FGL-package children first (alphabetical), then JAR leaves
+		// (alphabetical by coordinate, then version) — the package-before-JAR
+		// ordering buildListTree applies at every level.
+		kids := append([]string(nil), p.fglDeps...)
+		sort.Strings(kids)
+		for _, dep := range kids {
+			if _, ok := byName[dep]; !ok {
+				continue // declared but not installed → not shown
+			}
+			n.children = append(n.children, expand(dep, depth+1))
+		}
+		js := append([]manifest.JavaDependency(nil), p.jars...)
+		sort.SliceStable(js, func(a, b int) bool {
+			if js[a].Key() != js[b].Key() {
+				return js[a].Key() < js[b].Key()
+			}
+			return js[a].Version < js[b].Version
+		})
+		for _, j := range js {
+			jn := listNode{label: j.Key(), version: j.Version, kind: kindJar}
+			if seen[jarKey(j)] {
+				jn.repeat = true
+			} else {
+				seen[jarKey(j)] = true
+			}
+			n.children = append(n.children, jn)
+		}
+		return n
+	}
+
+	out := make([]listNode, 0, len(names))
+	// Real roots first, then the isolated-cycle leftovers. Skip any leftover an
+	// earlier walk already displayed (expanding one cycle member pulls in the
+	// rest), so a cycle surfaces once as a subtree rather than as redundant
+	// top-level (*) repeats.
+	for _, r := range roots {
+		out = append(out, expand(r, 1))
+	}
+	for _, r := range extraRoots {
+		if seen[pkgKey(byName[r])] {
+			continue
+		}
+		out = append(out, expand(r, 1))
+	}
+	return out
 }
 
 // treeRootLabel renders the project heading, e.g. "myproject@1.0.0". A lock
