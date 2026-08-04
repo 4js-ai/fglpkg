@@ -37,7 +37,8 @@ _SANDBOX_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/fglpkg-ft.XXXXXX")"
 # Called INSIDE each test's subshell so exports/cwd never leak between tests and
 # the real ~/.fglpkg (credentials, config) is never touched.
 sandbox() {
-  unset FGLPKG_TOKEN FGLPKG_REGISTRY FGLPKG_PUBLISH_REGISTRY FGLPKG_SIGNING \
+  unset FGLPKG_TOKEN FGLPKG_REGISTRY FGLPKG_PUBLISH_REGISTRY FGLPKG_CONSUME_REGISTRY \
+        FGLPKG_MAVEN_URL FGLPKG_SIGNING \
         FGLPKG_ARTIFACTORY_URL FGLPKG_ARTIFACTORY_REPO FGLPKG_ARTIFACTORY_TOKEN \
         FGLPKG_AUDIT_URL FGLPKG_INSTALL_CONCURRENCY 2>/dev/null || true
   TESTHOME="$(mktemp -d "$_SANDBOX_ROOT/home.XXXXXX")"

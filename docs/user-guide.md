@@ -1666,6 +1666,48 @@ GI:
 A bare `fglpkg publish` then deploys to `acme`; `fglpkg publish --registry gi`
 still targets GI when you need it.
 
+### 5. Consume from one repository only
+
+By default the consuming commands consult every configured repository, and a name
+found in more than one is a hard error rather than a guess. If your Artifactory
+proxies **everything** — public packages included — that guard fires on every
+public name, because each one exists in both GI and your mirror. Declare a
+**default consume registry** to make your repository the single source:
+
+```json
+{
+  "registries": [ { "name": "acme", "type": "artifactory", "url": "…", "repoKey": "…" } ],
+  "defaultConsumeRegistry": "acme"
+}
+```
+
+```bash
+# writes the descriptor and the default together
+fglpkg registry add acme https://acme.jfrog.io/artifactory/GeneroBDL --project --consume-default
+fglpkg registry list     # the DEFAULT column shows acme = consume
+```
+
+Resolved as `FGLPKG_CONSUME_REGISTRY` → project `defaultConsumeRegistry` → global
+`defaultConsumeRegistry` → unset (consult everything). It covers `install`,
+`update`, `search`, `info`, and `outdated`. Declared in the committed
+`fglpkg.json`, a clean clone resolves from the right repository immediately — only
+`fglpkg login` stays per-developer.
+
+This is **exclusion, not precedence**: only that repository is consulted, so two
+repositories are never silently tie-broken. There is deliberately no
+"higher-priority repository wins" mode — it would reopen the hole the collision
+guard closes. `priority` continues to control only query order and `search`
+de-duplication.
+
+Overrides, strongest first: `--registry <name>` for one command, a per-dependency
+`registry` pin for one dependency, and a lockfile-recorded source for one locked
+package. A package missing from the default repository is a clear not-found naming
+it, never a silent fallback:
+
+```json
+{ "dependencies": { "fgl": { "logft": { "version": "^2.0.0", "registry": "gi" } } } }
+```
+
 For the complete design, see
 [specs/artifactory-secondary-repository.md](../specs/artifactory-secondary-repository.md).
 
