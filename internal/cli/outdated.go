@@ -112,17 +112,7 @@ func cmdOutdated(args []string) error {
 	outdatedCount := 0
 
 	for _, name := range names {
-		sourceReg := sources[name]
-		if !locked[name] {
-			// No lock entry, so no recorded source: fall back to the per-dependency
-			// pin, then the consume default, then "" (GI) — the same precedence the
-			// router applies to a fresh resolve.
-			if p := pinnedRegistry(m, name); p != "" {
-				sourceReg = p
-			} else if fromDefault {
-				sourceReg = consumeDefault
-			}
-		}
+		sourceReg := outdatedSourceFor(m, name, locked, sources, consumeDefault, fromDefault)
 		row := buildOutdatedRow(rs, name, m.Dependencies.FGL[name], current[name], sourceReg)
 		rows = append(rows, row)
 		if row.Status != "ok" {
@@ -144,6 +134,26 @@ func cmdOutdated(args []string) error {
 		return fmt.Errorf("%d dependenc%s out of date", outdatedCount, pluralY(outdatedCount))
 	}
 	return nil
+}
+
+// outdatedSourceFor resolves which registry a dependency's versions are checked
+// against (GIS-364). A locked package is always re-checked against its own
+// recorded source — locked wins even when that source is "" (historical GI) — so
+// a consume default never re-routes a package the lock has already sourced. An
+// un-locked package falls back to its per-dependency pin, then the consume
+// default, then "" (the built-in GI registry): the same precedence route()
+// applies to a fresh resolve.
+func outdatedSourceFor(m *manifest.Manifest, name string, locked map[string]bool, sources map[string]string, consumeDefault string, fromDefault bool) string {
+	if locked[name] {
+		return sources[name]
+	}
+	if p := pinnedRegistry(m, name); p != "" {
+		return p
+	}
+	if fromDefault {
+		return consumeDefault
+	}
+	return ""
 }
 
 // buildOutdatedRow fetches the version list for one package and computes

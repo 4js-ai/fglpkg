@@ -141,6 +141,7 @@ fglpkg stores everything under `~/.fglpkg` (override with `FGLPKG_HOME`):
 ├── merged/            # Derived FGLLDPATH root — modules laid out by PACKAGE namespace
 │   └── com/fourjs/poiapi/PoiApi.42m
 ├── jars/              # Java JARs
+│   ├── .classpath.jar # Generated CLASSPATH anchor (see below)
 │   ├── gson-2.10.1.jar
 │   └── commons-lang3-3.12.0.jar
 ├── config.json        # Per-user machine config: registry declarations (no secrets), preferences
@@ -154,6 +155,14 @@ per-package stores by hard-linking each namespaced `.42m` into place (falling ba
 hard links are unavailable — a different filesystem, or Windows), so it costs almost no extra disk.
 `install`/`remove` keep it current; delete it freely and rebuild with `fglpkg relink`. It is always
 git-ignored, even if you choose to vendor `.fglpkg/packages/`.
+
+The `jars/.classpath.jar` file is likewise **generated**: rather than putting every JAR's absolute path
+on `CLASSPATH`, `fglpkg env` emits this one anchor jar per scope, whose `META-INF/MANIFEST.MF` lists the
+real JARs by name. `fglrun` embeds its JVM via JNI and ignores launcher-style `dir/*` wildcards, but a
+manifest `Class-Path` is honored at the classloader level — so a single short, constant `CLASSPATH`
+resolves every JAR regardless of how many are installed (and stays well under the Windows
+environment-block cap). It is (re)written by `install`/`remove`/`update`; delete it freely and any of
+those regenerates it.
 
 When working inside a project, fglpkg can also install to a local `.fglpkg/` directory:
 
@@ -284,7 +293,7 @@ eval "$(fglpkg env --global)"
 | `FGLPKG_SIGNING` | Layer 1 signature enforcement: `require`, `warn`, or `off`. Overrides `signing.enforce` in `config.json` |
 | `FGLPKG_NO_UPDATE_CHECK` | Set to disable the passive "new version available" notice (also configurable via `updateCheck` in `~/.fglpkg/config.json`). Always off for `dev` builds, in CI, and for non-interactive output |
 | `FGLLDPATH` | Auto-managed by `fglpkg env` — program modules, via the merged root (prepends, preserves existing value) |
-| `CLASSPATH` | Auto-managed by `fglpkg env` — installed JARs (prepends, preserves existing value) |
+| `CLASSPATH` | Auto-managed by `fglpkg env` — a single generated `.classpath.jar` anchor (per scope) whose manifest lists the installed JARs (prepends, preserves existing value) |
 | `FGLRESOURCEPATH` | Auto-managed by `fglpkg env` — directories holding packaged `.42f`/`.42s`/`.4ad`/`.4st`/`.4sm`/`.4tb`/`.4tm`/`.iem` |
 | `FGLDBPATH` | Auto-managed by `fglpkg env` — directories holding packaged `.sch`/`.val`/`.att` |
 | `FGLIMAGEPATH` | Auto-managed by `fglpkg env` — installed webcomponents plus directories holding packaged images and `.ttf` icon fonts |
@@ -655,13 +664,14 @@ Inspect the effective set and login status:
 
 ```bash
 fglpkg registry list
-# NAME   TYPE         PRIO  AUTH    LOGIN  SOURCE   URL
-# gi     genero       1     bearer  env    builtin  https://service.generointelligence.ai
-# acme   artifactory  2     bearer  yes    project  https://artifactory.acme.example/artifactory
+# NAME   TYPE         PRIO  AUTH    LOGIN  SOURCE   DEFAULT  URL
+# gi     genero       1     bearer  env    builtin  -        https://service.generointelligence.ai
+# acme   artifactory  2     bearer  yes    project  consume  https://artifactory.acme.example/artifactory
 ```
 
 `LOGIN` values: `yes` (credentials stored), `env` (GI authenticated by `FGLPKG_TOKEN`), `no` (none), `anon` (no auth needed).
 `SOURCE` values: `builtin` (the always-present GI entry), `global` (from `~/.fglpkg/config.json`), `project` (from the committed `fglpkg.json`) — so you can see at a glance which registries a clone inherited from the repo.
+`DEFAULT` values: `consume` (the sole source consulted for `install`/`update`/`search`/`info`/`outdated` — see [Choosing where packages come from](#choosing-where-packages-come-from)), `publish` (the default `publish` target), `both`, or `-`.
 
 ### Authentication
 

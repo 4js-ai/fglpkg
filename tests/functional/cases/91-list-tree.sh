@@ -65,6 +65,38 @@ _list_tree_nests_jars_under_declarer() {
 }
 it "list nests each JAR under the package whose manifest declares it" _list_tree_nests_jars_under_declarer
 
+# A webcomponent package is tagged (webcomponent) in the tree and counted in its
+# own bucket in the summary line — distinct from Genero packages and JARs.
+_list_marks_webcomponents() {
+  cat > fglpkg.json <<'EOF'
+{ "name":"wcapp", "version":"1.0.0", "genero":">=3.20",
+  "dependencies": { "fgl": { "poiapi": "^1.4.0", "chart-widget": "^2.0.0" } } }
+EOF
+  cat > fglpkg.lock <<'EOF'
+{
+  "lockfileVersion": 1,
+  "generatedAt": "2026-01-01T00:00:00Z",
+  "generoVersion": "6.00.01",
+  "root": { "name": "wcapp", "version": "1.0.0" },
+  "packages": [
+    { "name":"poiapi", "version":"1.4.0", "downloadUrl":"", "requiredBy":["<root>"] }
+  ],
+  "webcomponents": [
+    { "name":"chart-widget", "version":"2.0.0", "downloadUrl":"", "requiredBy":["<root>"] }
+  ],
+  "jars": []
+}
+EOF
+  run list
+  assert_success
+  assert_contains "wcapp@1.0.0"
+  assert_contains "chart-widget@2.0.0 (webcomponent)"
+  assert_contains "poiapi@1.4.0"
+  # The webcomponent gets its own count, separate from packages and JARs.
+  assert_contains "1 package, 1 webcomponent, 0 JARs."
+}
+it "list tags webcomponent packages and counts them separately" _list_marks_webcomponents
+
 # --depth truncates the tree without lying about what is installed.
 _list_tree_depth() {
   _fixture_lock

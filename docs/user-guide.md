@@ -177,7 +177,7 @@ assignments PowerShell understands:
 
 ```powershell
 $env:FGLLDPATH = 'C:\Users\you\.fglpkg\merged' + $(if ($env:FGLLDPATH) { ';' + $env:FGLLDPATH })
-$env:CLASSPATH = 'C:\Users\you\.fglpkg\jars\poi-5.2.3.jar' + $(if ($env:CLASSPATH) { ';' + $env:CLASSPATH })
+$env:CLASSPATH = 'C:\Users\you\.fglpkg\jars\.classpath.jar' + $(if ($env:CLASSPATH) { ';' + $env:CLASSPATH })
 ```
 
 ### Windows (cmd.exe)
@@ -202,7 +202,7 @@ reference resolves correctly.
 
 ```
 SET FGLLDPATH=C:\Users\you\.fglpkg\merged;%FGLLDPATH%
-SET CLASSPATH=C:\Users\you\.fglpkg\jars\poi-5.2.3.jar;%CLASSPATH%
+SET CLASSPATH=C:\Users\you\.fglpkg\jars\.classpath.jar;%CLASSPATH%
 SET FGLRESOURCEPATH=C:\Users\you\.fglpkg\packages\poiapi\com\fourjs\poiapi;%FGLRESOURCEPATH%
 ```
 
@@ -249,7 +249,7 @@ Run `fglpkg env --gst` and paste the output into your project's environment vari
 
 ```
 FGLLDPATH=$(ProjectDir)/.fglpkg/merged;$(FGLLDPATH)
-CLASSPATH=$(ProjectDir)/.fglpkg/jars/poi-5.2.3.jar;$(CLASSPATH)
+CLASSPATH=$(ProjectDir)/.fglpkg/jars/.classpath.jar;$(CLASSPATH)
 FGLRESOURCEPATH=$(ProjectDir)/.fglpkg/packages/poiapi/com/fourjs/poiapi;$(FGLRESOURCEPATH)
 ```
 
@@ -282,7 +282,7 @@ not apply to `--gst` or `--gwa` and is rejected if combined with either.
 Key points:
 - Existing values are preserved — fglpkg **prepends** its paths, never replaces them
 - Installed packages are exposed through a single merged `FGLLDPATH` entry (see below)
-- All downloaded JARs are added to `CLASSPATH`
+- Installed JARs are exposed through a single generated `.classpath.jar` anchor on `CLASSPATH` (see [Working with Java JARs](#working-with-java-jars))
 - A variable is emitted **only** when a package actually ships matching files, so you never get an
   empty export
 - Diagnostics (see [Resource collisions](#resource-collisions)) go to **stderr**, so
@@ -293,7 +293,7 @@ Key points:
 | Variable | Resolves | Emitted as | Populated from |
 |---|---|---|---|
 | `FGLLDPATH` | program modules (`*.42m`, `*.42r`, `*.42x`) | the merged root, plus any uncovered store dir | see [the merged FGLLDPATH root](#the-merged-fglldpath-root) |
-| `CLASSPATH` | Java JARs | one entry per `*.jar` | `.fglpkg/jars/` |
+| `CLASSPATH` | Java JARs | a single `.classpath.jar` anchor (one entry, regardless of JAR count) | `.fglpkg/jars/` |
 | `FGLRESOURCEPATH` | program resources (`*.42f`, `*.42s`, `*.4ad`, `*.4st`, `*.4sm`, `*.4tb`, `*.4tm`, `*.iem`) | directories | every directory in a package that holds one |
 | `FGLDBPATH` | database schemas (`*.sch`, `*.val`, `*.att`) | directories | every directory in a package that holds one |
 | `FGLIMAGEPATH` | webcomponents, images (`*.png`, `*.jpg`, `*.jpeg`, `*.gif`, `*.svg`, `*.bmp`, `*.ico`, `*.tiff`, `*.tif`), icon fonts (`*.ttf`) | directories | `.fglpkg/` (for webcomponents) + every image directory in a package |
@@ -616,15 +616,16 @@ myproject@1.0.0
 │  │  └─ com.google.guava:guava  32.1.3-jre
 │  ├─ org.apache.poi:poi  5.5.1
 │  └─ org.apache.xmlbeans:xmlbeans  5.3.0
+├─ chart-widget@2.0.0 (webcomponent)
 ├─ testkit@1.0.0 (dev)
 │  └─ myutils@1.0.0 (*)
 └─ com.google.code.gson:gson  2.10.1
 
-3 packages, 3 JARs.
+3 packages, 1 webcomponent, 3 JARs.
 (*) subtree already shown above
 ```
 
-The top level is what your `fglpkg.json` declares; everything nested below it came in transitively. `(dev)` and `(optional)` mark the scope a dependency was installed under, and a subtree already shown further up collapses to a `(*)` leaf rather than being repeated.
+The top level is what your `fglpkg.json` declares; everything nested below it came in transitively. `(dev)` and `(optional)` mark the scope a dependency was installed under, `(webcomponent)` marks a webcomponent package, and a subtree already shown further up collapses to a `(*)` leaf rather than being repeated.
 
 Where the tree comes from matters when the output surprises you:
 
@@ -1099,7 +1100,28 @@ Genero BDL can call Java code, so fglpkg also manages JAR dependencies. Declare 
 | `jar` | Override the JAR filename (default: `artifactId-version.jar`) |
 | `url` | Override the download URL entirely for this one JAR (default: the configured Maven mirror, else Maven Central). To route *all* JARs through a mirror, use the top-level `mavenMirror` instead — see below. |
 
-JARs are downloaded to `~/.fglpkg/jars/` and added to `CLASSPATH` by `fglpkg env`.
+JARs are downloaded to `~/.fglpkg/jars/` (or a project's `.fglpkg/jars/`).
+
+### The `.classpath.jar` anchor
+
+`fglpkg env` does **not** put each JAR's path on `CLASSPATH`. Instead it generates a single anchor jar
+per scope — `.fglpkg/jars/.classpath.jar` (and `~/.fglpkg/jars/.classpath.jar`) — an otherwise-empty jar
+whose `META-INF/MANIFEST.MF` declares a `Class-Path:` listing every real JAR in that directory by bare
+filename. `CLASSPATH` carries only that one anchor path.
+
+Why an anchor jar rather than the JARs themselves or a `dir/*` wildcard:
+
+- **It works under `fglrun`.** `fglrun` embeds its JVM through JNI and bypasses the `java` launcher, so
+  launcher-level classpath wildcards (`dir/*`) resolve nothing. A jar manifest's `Class-Path` is a
+  classloader-level feature (honored by `URLClassLoader` itself), so it works identically under JNI.
+- **`CLASSPATH` stays short and constant** — one path per scope no matter how many JARs are installed,
+  which matters for the ~32 KB Windows environment-block cap.
+- **The jars directory is relocatable** — manifest entries are bare filenames, so moving `.fglpkg/jars/`
+  needs no regeneration.
+
+The anchor is (re)written on every `install`, `remove`, and `update`, so it can never go stale against
+the directory's contents; delete it and any of those commands regenerates it. `fglpkg env` itself never
+writes it — it only references it, and warns on stderr if JARs are present but the anchor is missing.
 
 ### Routing JARs through an internal Maven mirror
 
@@ -1632,16 +1654,19 @@ Check the effective configuration and login status any time:
 
 ```bash
 fglpkg registry list
-# NAME   TYPE         PRIO  AUTH    LOGIN  SOURCE   URL
-# gi     genero       1     bearer  env    builtin  https://service.generointelligence.ai
-# acme   artifactory  2     bearer  no     project  https://artifactory.acme.example/artifactory
+# NAME   TYPE         PRIO  AUTH    LOGIN  SOURCE   DEFAULT  URL
+# gi     genero       1     bearer  env    builtin  -        https://service.generointelligence.ai
+# acme   artifactory  2     bearer  no     project  consume  https://artifactory.acme.example/artifactory
 ```
 
 The `LOGIN` column shows `yes` (stored credentials), `env` (GI authenticated by
 `FGLPKG_TOKEN`), `no` (none), or `anon` (no auth needed). The `SOURCE` column
 shows where each entry came from — `builtin` (the always-present GI entry),
 `global` (`~/.fglpkg/config.json`), or `project` (the committed `fglpkg.json`) —
-so you can confirm which registries a clone inherited from the repo.
+so you can confirm which registries a clone inherited from the repo. The `DEFAULT`
+column shows a registry's default role: `consume` (the sole source consulted for
+`install`/`update`/`search`/`info`/`outdated`), `publish` (the default publish
+target), `both`, or `-` — see [Consume from one repository only](#5-consume-from-one-repository-only).
 
 ### 2. Log in
 

@@ -76,6 +76,21 @@ func render(lf *lockfile.LockFile, jarParents map[string][]string, maxDepth int)
 	return buf.String()
 }
 
+// TestListTreeEmptyLockPrintsNoPackages covers listTree's empty branch: a lock
+// that exists but records zero packages, webcomponents, and JARs prints
+// "No packages installed." rather than a bare root line. The branch returns
+// before consulting the installer, so a nil installer is fine here.
+func TestListTreeEmptyLockPrintsNoPackages(t *testing.T) {
+	var buf bytes.Buffer
+	lf := &lockfile.LockFile{} // no packages, webcomponents, or JARs
+	if err := listTree(&buf, nil, lf, t.TempDir(), 0); err != nil {
+		t.Fatalf("listTree: %v", err)
+	}
+	if got := strings.TrimSpace(buf.String()); got != emptyInstall {
+		t.Errorf("listTree on an empty lock = %q, want %q", got, emptyInstall)
+	}
+}
+
 func TestBuildListTreeNestsAndOrders(t *testing.T) {
 	lf := &lockfile.LockFile{
 		RootManifest: lockfile.RootEntry{Name: "myproject", Version: "1.0.0"},

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 	"github.com/4js-mikefolcher/fglpkg/internal/semver"
 )
 
@@ -242,5 +243,45 @@ func TestCmdOutdatedNoDeps(t *testing.T) {
 	}
 	if err := cmdOutdated([]string{}); err != nil {
 		t.Errorf("expected nil error for empty deps, got %v", err)
+	}
+}
+
+// TestOutdatedSourceFor covers the per-package source-resolution precedence the
+// consume default introduced (GIS-364): a locked package is always re-checked
+// against its own recorded source (locked wins — even "" — so the consume
+// default never re-routes it), while an un-locked package falls back
+// pin → consume default → "" (GI).
+func TestOutdatedSourceFor(t *testing.T) {
+	m := manifest.New("app", "1.0.0", "", "")
+	m.Dependencies.FGL = map[string]string{
+		"locked-gi": "^1.0.0", "locked-art": "^1.0.0", "pinned": "^1.0.0", "fresh": "^1.0.0",
+	}
+	// A per-dependency pin on "pinned" → "pinned-repo" (distinct from the default
+	// below, so the test proves the pin wins rather than the default).
+	m.Dependencies.FGLPins = map[string]string{"pinned": "pinned-repo"}
+
+	locked := map[string]bool{"locked-gi": true, "locked-art": true}
+	sources := map[string]string{"locked-gi": "", "locked-art": "artifactory-2"}
+
+	cases := []struct {
+		name           string
+		pkg            string
+		consumeDefault string
+		fromDefault    bool
+		want           string
+	}{
+		{"locked GI source ignores the consume default", "locked-gi", "acme", true, ""},
+		{"locked Artifactory source ignores the consume default", "locked-art", "acme", true, "artifactory-2"},
+		{"un-locked pin beats the consume default", "pinned", "acme", true, "pinned-repo"},
+		{"un-locked, no pin: the consume default supplies the source", "fresh", "acme", true, "acme"},
+		{"un-locked, no pin, no default: falls back to GI", "fresh", "", false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := outdatedSourceFor(m, c.pkg, locked, sources, c.consumeDefault, c.fromDefault)
+			if got != c.want {
+				t.Errorf("outdatedSourceFor(%q) = %q, want %q", c.pkg, got, c.want)
+			}
+		})
 	}
 }

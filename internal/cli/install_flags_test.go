@@ -100,6 +100,21 @@ func TestParseInstallFlagsNoManifestFallback(t *testing.T) {
 	}
 }
 
+func TestParseInstallFlagsNoVerifySignature(t *testing.T) {
+	f, err := parseInstallFlags([]string{"--no-verify-signature", "pkg"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !f.noVerifySignature {
+		t.Error("--no-verify-signature not set")
+	}
+	// Default is off (signature verification honoured).
+	def, _ := parseInstallFlags([]string{"pkg"})
+	if def.noVerifySignature {
+		t.Error("noVerifySignature should default to false")
+	}
+}
+
 func TestParseInstallFlagsConflicting(t *testing.T) {
 	cases := [][]string{
 		{"--save-dev", "--save-optional", "x"},

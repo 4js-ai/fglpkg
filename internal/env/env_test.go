@@ -376,6 +376,55 @@ func TestEnvNeverWritesAnchorAndWarnsWhenMissing(t *testing.T) {
 	}
 }
 
+// TestRawEnvClasspathIsAnchorJar covers the raw (unquoted, programmatic) env
+// path used by `fglpkg bdl`: RawEnv and BuildJavaClasspath must expose the same
+// single .classpath.jar anchor as the shell/GST renderers, never the individual
+// jar paths. Regression guard for the raw variant, which the shell/GST/merged
+// anchor tests don't exercise.
+func TestRawEnvClasspathIsAnchorJar(t *testing.T) {
+	projectDir := t.TempDir()
+	jarsDir := filepath.Join(projectDir, ".fglpkg", "jars")
+	mustMkdir(t, jarsDir)
+	mustWriteFile(t, filepath.Join(jarsDir, "guava-33.2.1-jre.jar"), "guava")
+	mustWriteFile(t, filepath.Join(jarsDir, "jackson-core-2.17.2.jar"), "jackson")
+	mustSyncAnchor(t, jarsDir)
+
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	// Resolve the expected anchor AFTER chdir (macOS /var vs /private/var symlink).
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAnchor := filepath.Join(cwd, ".fglpkg", "jars", classpath.AnchorName)
+
+	// Empty global home so only the local scope contributes to CLASSPATH.
+	g := New(t.TempDir())
+	raw, err := g.RawEnv()
+	if err != nil {
+		t.Fatalf("RawEnv: %v", err)
+	}
+	if got := raw["CLASSPATH"]; got != wantAnchor {
+		t.Errorf("RawEnv CLASSPATH = %q, want the anchor %q", got, wantAnchor)
+	}
+	if strings.Contains(raw["CLASSPATH"], "guava-33.2.1-jre.jar") ||
+		strings.Contains(raw["CLASSPATH"], "jackson-core-2.17.2.jar") {
+		t.Errorf("RawEnv CLASSPATH must not enumerate individual jars, got: %q", raw["CLASSPATH"])
+	}
+
+	// BuildJavaClasspath (the value `fglpkg bdl` sets directly) must agree.
+	cp, err := g.BuildJavaClasspath()
+	if err != nil {
+		t.Fatalf("BuildJavaClasspath: %v", err)
+	}
+	if cp != wantAnchor {
+		t.Errorf("BuildJavaClasspath = %q, want the anchor %q", cp, wantAnchor)
+	}
+}
+
 func mustMkdir(t *testing.T, p string) {
 	t.Helper()
 	if err := os.MkdirAll(p, 0755); err != nil {
