@@ -70,6 +70,9 @@ UNLICENSED, detected repository) without prompting.
   --registry <name>        When adding a package, resolve it only from the named
                            repository and pin that choice in fglpkg.json. Use to
                            disambiguate a name available from more than one repo.
+                           Without it, a configured "defaultConsumeRegistry"
+                           (or FGLPKG_CONSUME_REGISTRY) scopes the resolve
+                           without writing a pin.
   --no-manifest-fallback   Do not install Java dependencies a package's bundled
                            manifest declares but its registry record omits; the
                            divergence is still reported
@@ -120,7 +123,9 @@ shared across projects and are left on disk.
 		Long: `FLAGS:
   --local, -l              Force local project directory (.fglpkg/)
   --global, -g             Force global home directory (~/.fglpkg/)
-  --registry <name>        Restrict this re-resolution to the named repository
+  --registry <name>        Restrict this re-resolution to the named repository.
+                           Without it, a configured "defaultConsumeRegistry"
+                           (or FGLPKG_CONSUME_REGISTRY) restricts it instead
   --production, --prod     Skip devDependencies (does not rewrite fglpkg.lock)
   --no-manifest-fallback   Do not install Java dependencies a package's bundled
                            manifest declares but its registry record omits; the
@@ -138,11 +143,25 @@ global ~/.fglpkg/ is shared across projects.
 	},
 	{
 		Name:    "list",
-		Summary: "List installed packages",
-		Usage:   "fglpkg list [--local|--global]",
+		Summary: "List installed dependencies as a tree",
+		Usage:   "fglpkg list [--local|--global] [--flat] [--depth <n>]",
 		Long: `FLAGS:
   --local, -l              Force local project directory (.fglpkg/)
   --global, -g             Force global home directory (~/.fglpkg/)
+  --flat                   One line per installed package, then the JARs, with
+                           no tree structure and no parentage
+  --depth <n>              Limit the tree to n levels (0 = unlimited, default)
+
+Prints the installed dependency tree: at every level, Genero packages and
+webcomponents first, then the Java JARs they pull in. A subtree already shown
+above is collapsed to a "(*)" leaf rather than repeated.
+
+Package parentage comes from fglpkg.lock. JAR parentage is not recorded there,
+so it is read from each installed package's bundled fglpkg.json — a JAR no
+installed manifest declares is shown at the top level.
+
+Needs a fglpkg.lock in the current directory. Without one — and always under
+--global, which has no lock — the output falls back to --flat.
 `,
 	},
 	{
@@ -215,7 +234,11 @@ the local root (when run inside a project) and the global root.
                            of the detected one (overrides FGLPKG_GENERO_VERSION)
   --registry <name>        Search only the named repository (results are still
                            source-tagged). Errors if the name isn't a configured
-                           registry.
+                           registry. Without it, a configured
+                           "defaultConsumeRegistry" (or FGLPKG_CONSUME_REGISTRY)
+                           scopes the search the same way, so results match what
+                           install can resolve; pass --registry <name> to look
+                           in a different repository.
 
 Each result is annotated with a compatibility marker against the running Genero
 version (detected, or overridden with --genero / FGLPKG_GENERO_VERSION):
@@ -500,9 +523,11 @@ login".
 			"fglpkg registry add <name> <url> [--type genero|artifactory] [--repo-key K]\n" +
 			"                                 [--auth bearer|basic|apikey|anonymous] [--priority N]\n" +
 			"                                 [--packages 'acme-*,foo-*'] [--project]\n" +
+			"                                 [--consume-default]\n" +
 			"fglpkg registry remove <name> [--project]",
 		Long: `SUBCOMMANDS:
-  list                     Show configured repositories, priority, auth scheme, and login status
+  list                     Show configured repositories, priority, auth scheme, login status,
+                           and which default (consume/publish) each one serves
   add <name> <url>         Add a repository descriptor (defaults to type=artifactory)
   remove <name> (rm)       Remove a configured repository
 
@@ -517,6 +542,8 @@ FLAGS (add):
   --priority <n>           Lower is tried first; unique. Defaults to max+1 when omitted
   --packages <globs>       Comma-separated name-scope allow-list (e.g. 'acme-*,foo-*')
   --project                Write to the project fglpkg.json instead of ~/.fglpkg/config.json
+  --consume-default        Also record this repo as "defaultConsumeRegistry" in the same
+                           file, so install/update/search/info/outdated resolve from it
 
 Repositories are configured via a "registries" array in fglpkg.json and/or
 ~/.fglpkg/config.json, alongside the built-in Genero Intelligence registry.
@@ -529,9 +556,20 @@ LOGIN column values:
   no      no usable credentials found
   anon    the repo's auth scheme is "anonymous" (no login required)
 
+DEFAULT column values:
+  consume  install/update/search/info/outdated resolve from this repo by default
+  publish  'fglpkg publish' targets this repo by default
+  both     this repo serves both defaults
+  -        no default points here
+
 Sign in to a secondary repo with 'fglpkg login --registry <name>'. Set which
 repo 'fglpkg publish' targets by default with a top-level "defaultRegistry" in
-fglpkg.json (or the FGLPKG_PUBLISH_REGISTRY env var).
+fglpkg.json (or the FGLPKG_PUBLISH_REGISTRY env var), and which repo packages
+are consumed from with "defaultConsumeRegistry" (or FGLPKG_CONSUME_REGISTRY /
+'registry add --consume-default'). The consume default is exclusion, not
+precedence: only that repo is consulted, so a name in two repos is never
+silently tie-broken. A per-dependency "registry" pin and an explicit
+--registry both override it.
 See specs/artifactory-secondary-repository.md.
 `,
 	},

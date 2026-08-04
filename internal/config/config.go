@@ -100,6 +100,19 @@ type GlobalFile struct {
 	Registries      []Registry `json:"registries"`
 	DefaultRegistry string     `json:"defaultRegistry"` // logical name of the default publish target
 
+	// DefaultConsumeRegistry names the repository the consuming commands
+	// (install/update/search/info/outdated) resolve against when no --registry
+	// flag is given (GIS-364). Machine-wide fallback; the project fglpkg.json and
+	// FGLPKG_CONSUME_REGISTRY take precedence. "" => consult every configured
+	// repository, as before.
+	//
+	// This is *exclusion*, not precedence: the named repository is the only one
+	// consulted for an unpinned name, so it never silently picks between two
+	// repositories. Carries omitempty so the read-modify-write cycle in `registry
+	// add`/`remove` cannot inject "defaultConsumeRegistry": "" into a config that
+	// never set it.
+	DefaultConsumeRegistry string `json:"defaultConsumeRegistry,omitempty"`
+
 	// MavenMirror, when set, reroutes JAR downloads from Maven Central to the
 	// given Maven repository (GIS-365). Machine-wide fallback; the project
 	// fglpkg.json and FGLPKG_MAVEN_URL take precedence. nil => Maven Central.
@@ -202,6 +215,13 @@ func WriteGlobalFile(home string, g GlobalFile) error {
 func GlobalDefaultRegistry(home string) (string, error) {
 	g, err := loadGlobalFile(home)
 	return g.DefaultRegistry, err
+}
+
+// GlobalConsumeRegistry returns the defaultConsumeRegistry declared in the
+// global config file, or "" if none (or no file). Errors mirror LoadGlobal.
+func GlobalConsumeRegistry(home string) (string, error) {
+	g, err := loadGlobalFile(home)
+	return g.DefaultConsumeRegistry, err
 }
 
 // GlobalMavenMirror returns the mavenMirror declared in the global config file,
