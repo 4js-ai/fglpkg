@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/checksum"
+	"github.com/4js-mikefolcher/fglpkg/internal/classpath"
 	"github.com/4js-mikefolcher/fglpkg/internal/genero"
 	gh "github.com/4js-mikefolcher/fglpkg/internal/github"
 	"github.com/4js-mikefolcher/fglpkg/internal/lockfile"
@@ -392,6 +393,13 @@ func (i *Installer) InstallAllWithOptions(m *manifest.Manifest, projectDir strin
 							return err
 						}
 					}
+					// Heal a missing/stale classpath anchor even on a no-op
+					// install — the migration case (jars installed by a
+					// pre-anchor fglpkg, or the anchor deleted by hand). Sync
+					// byte-compares and skips the write when already current.
+					if err := classpath.Sync(i.jarsDir); err != nil {
+						return err
+					}
 					fmt.Printf("Lock file is up to date (Genero %s). Nothing to install.\n", gv)
 					return nil
 				}
@@ -617,6 +625,14 @@ func (i *Installer) installFromLock(lf *lockfile.LockFile, root *manifest.Manife
 		i.recordManifestJARs(projectDir, supplemental)
 	}
 
+	// The jar set is settled: bring the CLASSPATH anchor in line with it
+	// (write when jars exist, delete when none remain). install/update/remove
+	// are the only commands that change the jar set — env only references the
+	// anchor, so it must be kept current here or it goes stale.
+	if err := classpath.Sync(i.jarsDir); err != nil {
+		return err
+	}
+
 	// Materialize the PACKAGE-correct merged FGLLDPATH root from the installed
 	// stores. A namespace clash aborts (strict one-package-per-namespace).
 	if err := i.syncMergedRoot(projectDir, !opts.Production); err != nil {
@@ -736,6 +752,12 @@ func (i *Installer) installFromPlan(plan *resolver.Plan, root *manifest.Manifest
 
 	if !opts.Production {
 		i.recordManifestJARs(projectDir, supplemental)
+	}
+
+	// The jar set is settled: bring the CLASSPATH anchor in line with it —
+	// see installFromLock for the write/read split rationale.
+	if err := classpath.Sync(i.jarsDir); err != nil {
+		return err
 	}
 
 	// Materialize the PACKAGE-correct merged FGLLDPATH root from the now-installed
@@ -966,6 +988,13 @@ func (i *Installer) ReconcileAfterRemove(m *manifest.Manifest, projectDir string
 		pruned = append(pruned, lockNote) // reported after the pruned artifacts
 	}
 
+	// Refresh the CLASSPATH anchor now that unreferenced JARs are pruned
+	// (deleting it if the last jar is gone). Best-effort like the merged-root
+	// rebuild below: an anchor write problem must never block a remove — a
+	// leftover stale anchor only lists jars that no longer exist, entries the
+	// JVM classloader silently skips.
+	_ = classpath.Sync(i.jarsDir)
+
 	// Rebuild the merged root so a removed package's modules disappear from it
 	// (and record ownership into the rewritten lock). Best-effort on removal: a
 	// merged-root issue — even a pre-existing namespace clash — must never block
@@ -1084,7 +1113,10 @@ func (i *Installer) pruneTo(wantPkg, wantWC, wantJar map[string]bool) ([]string,
 			return pruned, err
 		}
 		for _, e := range jarEntries {
-			if e.IsDir() || wantJar[e.Name()] {
+			// The classpath anchor is fglpkg-managed metadata, not a
+			// dependency jar — never a prune candidate. classpath.Sync
+			// (called after every prune) deletes it when it should go.
+			if e.IsDir() || wantJar[e.Name()] || e.Name() == classpath.AnchorName {
 				continue
 			}
 			if err := os.Remove(filepath.Join(i.jarsDir, e.Name())); err != nil {

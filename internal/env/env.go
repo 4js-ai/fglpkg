@@ -39,6 +39,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/4js-mikefolcher/fglpkg/internal/classpath"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 	"github.com/4js-mikefolcher/fglpkg/internal/workspace"
 )
@@ -557,15 +558,17 @@ func (g *Generator) buildPlan(s *scanner, scopes []envScope, includeWorkspace bo
 			p.addPath(varLD, sc.mergedDir)
 		}
 
-		// One classpath anchor jar per jars dir that actually has jars,
-		// rather than every individual jar's own path — see
-		// classpathAnchorPath's doc comment for why.
-		anchor, err := classpathAnchorPath(sc.jarsDir)
-		if err != nil {
-			return nil, err
-		}
-		if anchor != "" {
+		// CLASSPATH carries one anchor jar per jars dir, never the individual
+		// jars — see internal/classpath's package comment for why. The anchor
+		// is REFERENCED here, never written: install/update/remove keep it
+		// current (classpath.Sync), while env/bdl are read→stdout commands —
+		// env is typically eval'd from shell profiles, so a disk write here
+		// would race concurrent shells and fail on a read-only global home.
+		if anchor := classpath.AnchorPath(sc.jarsDir); anchor != "" {
 			p.addPath(varClass, anchor)
+		} else if classpath.HasDependencyJars(sc.jarsDir) {
+			p.warn("%s holds JAR dependencies but no %s; run 'fglpkg install' to regenerate the classpath anchor.",
+				sc.jarsDir, classpath.AnchorName)
 		}
 
 		// FGLIMAGEPATH points at the PARENT of webcomponents/ (i.e. .fglpkg/),

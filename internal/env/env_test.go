@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/4js-mikefolcher/fglpkg/internal/classpath"
 )
 
 // TestGenerateGWAEmitsFlags verifies --gwa output: one --webcomponent flag
@@ -170,13 +172,15 @@ func TestGenerateGlobalIsGlobalOnly(t *testing.T) {
 
 // TestGenerateLocalClasspathIsAnchorJarNotEnumeratedJars verifies the
 // CLASSPATH export line for a project with multiple jars is the single
-// anchor jar path, never the individual jar paths themselves.
+// anchor jar path, never the individual jar paths themselves. The anchor is
+// laid down by classpath.Sync (what install does); env only references it.
 func TestGenerateLocalClasspathIsAnchorJarNotEnumeratedJars(t *testing.T) {
 	projectDir := t.TempDir()
 	jarsDir := filepath.Join(projectDir, ".fglpkg", "jars")
 	mustMkdir(t, jarsDir)
 	mustWriteFile(t, filepath.Join(jarsDir, "guava-33.2.1-jre.jar"), "guava")
 	mustWriteFile(t, filepath.Join(jarsDir, "jackson-core-2.17.2.jar"), "jackson")
+	mustSyncAnchor(t, jarsDir)
 
 	origDir, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(origDir) })
@@ -193,7 +197,7 @@ func TestGenerateLocalClasspathIsAnchorJarNotEnumeratedJars(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantAnchor := filepath.Join(cwd, ".fglpkg", "jars", classpathAnchorName)
+	wantAnchor := filepath.Join(cwd, ".fglpkg", "jars", classpath.AnchorName)
 
 	g := New(t.TempDir())
 	exports, err := g.GenerateLocal()
@@ -217,11 +221,13 @@ func TestGenerateClasspathMergesLocalAndGlobalAnchors(t *testing.T) {
 	globalHome := t.TempDir()
 	mustMkdir(t, filepath.Join(globalHome, "jars"))
 	mustWriteFile(t, filepath.Join(globalHome, "jars", "global-dep.jar"), "g")
+	mustSyncAnchor(t, filepath.Join(globalHome, "jars"))
 
 	projectDir := t.TempDir()
 	localJars := filepath.Join(projectDir, ".fglpkg", "jars")
 	mustMkdir(t, localJars)
 	mustWriteFile(t, filepath.Join(localJars, "local-dep.jar"), "l")
+	mustSyncAnchor(t, localJars)
 
 	origDir, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(origDir) })
@@ -236,8 +242,8 @@ func TestGenerateClasspathMergesLocalAndGlobalAnchors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	localAnchor := filepath.Join(cwd, ".fglpkg", "jars", classpathAnchorName)
-	globalAnchor := filepath.Join(globalHome, "jars", classpathAnchorName)
+	localAnchor := filepath.Join(cwd, ".fglpkg", "jars", classpath.AnchorName)
+	globalAnchor := filepath.Join(globalHome, "jars", classpath.AnchorName)
 
 	g := New(globalHome)
 	exports, err := g.Generate()
@@ -260,6 +266,7 @@ func TestGenerateGlobalClasspathIsAnchorJar(t *testing.T) {
 	jarsDir := filepath.Join(globalHome, "jars")
 	mustMkdir(t, jarsDir)
 	mustWriteFile(t, filepath.Join(jarsDir, "guava.jar"), "guava")
+	mustSyncAnchor(t, jarsDir)
 
 	g := New(globalHome)
 	exports, err := g.GenerateGlobal()
@@ -267,7 +274,7 @@ func TestGenerateGlobalClasspathIsAnchorJar(t *testing.T) {
 		t.Fatalf("GenerateGlobal: %v", err)
 	}
 	joined := strings.Join(exports, "\n")
-	if !strings.Contains(joined, "CLASSPATH="+filepath.Join(jarsDir, classpathAnchorName)) {
+	if !strings.Contains(joined, "CLASSPATH="+filepath.Join(jarsDir, classpath.AnchorName)) {
 		t.Errorf("expected CLASSPATH to point at the anchor jar, got:\n%s", joined)
 	}
 	if strings.Contains(joined, "guava.jar") {
@@ -282,6 +289,7 @@ func TestGenerateGSTClasspathIsAnchorJar(t *testing.T) {
 	jarsDir := filepath.Join(projectDir, ".fglpkg", "jars")
 	mustMkdir(t, jarsDir)
 	mustWriteFile(t, filepath.Join(jarsDir, "guava.jar"), "guava")
+	mustSyncAnchor(t, jarsDir)
 
 	origDir, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(origDir) })
@@ -295,7 +303,7 @@ func TestGenerateGSTClasspathIsAnchorJar(t *testing.T) {
 		t.Fatalf("GenerateGST: %v", err)
 	}
 	joined := strings.Join(exports, "\n")
-	want := "CLASSPATH=$(ProjectDir)/.fglpkg/jars/" + classpathAnchorName + ";$(CLASSPATH)"
+	want := "CLASSPATH=$(ProjectDir)/.fglpkg/jars/" + classpath.AnchorName + ";$(CLASSPATH)"
 	if !strings.Contains(joined, want) {
 		t.Errorf("expected %q in:\n%s", want, joined)
 	}
@@ -326,9 +334,67 @@ func TestGenerateLocalClasspathEmptyWhenNoJars(t *testing.T) {
 	}
 }
 
+// TestEnvNeverWritesAnchorAndWarnsWhenMissing pins the write/read split: with
+// jars on disk but no anchor (a pre-anchor install, or the anchor deleted by
+// hand), env must NOT create the anchor — env/bdl are read→stdout commands,
+// often eval'd from shell profiles — and must instead emit no CLASSPATH line
+// plus a warning telling the user to run `fglpkg install`.
+func TestEnvNeverWritesAnchorAndWarnsWhenMissing(t *testing.T) {
+	projectDir := t.TempDir()
+	jarsDir := filepath.Join(projectDir, ".fglpkg", "jars")
+	mustMkdir(t, jarsDir)
+	mustWriteFile(t, filepath.Join(jarsDir, "dep.jar"), "dep")
+	// Deliberately NO classpath.Sync here.
+
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	g := New(t.TempDir())
+	exports, err := g.GenerateLocal()
+	if err != nil {
+		t.Fatalf("GenerateLocal: %v", err)
+	}
+	for _, line := range exports {
+		if strings.Contains(line, "CLASSPATH") {
+			t.Errorf("no CLASSPATH line expected when the anchor is missing, got: %q", line)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(jarsDir, classpath.AnchorName)); err == nil {
+		t.Error("env must never write the anchor jar to disk")
+	}
+	warned := false
+	for _, w := range g.Warnings() {
+		if strings.Contains(w, classpath.AnchorName) && strings.Contains(w, "fglpkg install") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("expected a missing-anchor warning pointing at 'fglpkg install', got: %q", g.Warnings())
+	}
+}
+
 func mustMkdir(t *testing.T, p string) {
 	t.Helper()
 	if err := os.MkdirAll(p, 0755); err != nil {
 		t.Fatalf("mkdir %s: %v", p, err)
+	}
+}
+
+func mustWriteFile(t *testing.T, p, content string) {
+	t.Helper()
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", p, err)
+	}
+}
+
+// mustSyncAnchor lays down <dir>/.classpath.jar the way install does — env
+// tests never write the anchor themselves, mirroring the production split.
+func mustSyncAnchor(t *testing.T, dir string) {
+	t.Helper()
+	if err := classpath.Sync(dir); err != nil {
+		t.Fatalf("classpath.Sync(%s): %v", dir, err)
 	}
 }

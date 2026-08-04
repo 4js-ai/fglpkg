@@ -1,4 +1,4 @@
-package env
+package classpath
 
 import (
 	"archive/zip"
@@ -45,17 +45,17 @@ func readManifest(t *testing.T, path string) string {
 	return ""
 }
 
-func TestClasspathAnchorPathBuildsValidJarWithClassPath(t *testing.T) {
+func TestSyncBuildsValidJarWithClassPath(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "zeta.jar"), "zeta")
 	mustWriteFile(t, filepath.Join(dir, "alpha.jar"), "alpha")
 	mustWriteFile(t, filepath.Join(dir, "readme.txt"), "not a jar")
 
-	anchor, err := classpathAnchorPath(dir)
-	if err != nil {
-		t.Fatalf("classpathAnchorPath: %v", err)
+	if err := Sync(dir); err != nil {
+		t.Fatalf("Sync: %v", err)
 	}
-	wantPath := filepath.Join(dir, classpathAnchorName)
+	anchor := AnchorPath(dir)
+	wantPath := filepath.Join(dir, AnchorName)
 	if anchor != wantPath {
 		t.Fatalf("anchor path = %q, want %q", anchor, wantPath)
 	}
@@ -73,47 +73,65 @@ func TestClasspathAnchorPathBuildsValidJarWithClassPath(t *testing.T) {
 	}
 }
 
-func TestClasspathAnchorPathEmptyDirReturnsEmpty(t *testing.T) {
+func TestSyncEmptyDirWritesNothing(t *testing.T) {
 	dir := t.TempDir() // no jars
-	anchor, err := classpathAnchorPath(dir)
-	if err != nil {
-		t.Fatalf("classpathAnchorPath: %v", err)
+	if err := Sync(dir); err != nil {
+		t.Fatalf("Sync: %v", err)
 	}
-	if anchor != "" {
-		t.Errorf("expected empty anchor path for a jar-less directory, got %q", anchor)
-	}
-	if _, err := os.Stat(filepath.Join(dir, classpathAnchorName)); err == nil {
+	if _, err := os.Stat(filepath.Join(dir, AnchorName)); err == nil {
 		t.Error("anchor jar should not be created when there are no dependency jars")
 	}
-}
-
-func TestClasspathAnchorPathMissingDirReturnsEmpty(t *testing.T) {
-	anchor, err := classpathAnchorPath(filepath.Join(t.TempDir(), "does-not-exist"))
-	if err != nil {
-		t.Fatalf("classpathAnchorPath: %v", err)
-	}
-	if anchor != "" {
-		t.Errorf("expected empty anchor path for a missing directory, got %q", anchor)
+	if got := AnchorPath(dir); got != "" {
+		t.Errorf("AnchorPath = %q, want \"\"", got)
 	}
 }
 
-// TestClasspathAnchorPathExcludesItself verifies that a previously-generated
-// anchor jar is never listed as one of its own Class-Path dependencies —
-// otherwise every regeneration would grow the manifest by referencing
-// itself.
-func TestClasspathAnchorPathExcludesItself(t *testing.T) {
+func TestSyncMissingDirIsNoOp(t *testing.T) {
+	if err := Sync(filepath.Join(t.TempDir(), "does-not-exist")); err != nil {
+		t.Fatalf("Sync on missing dir: %v", err)
+	}
+}
+
+// TestSyncRemovesAnchorWhenLastJarGone verifies the remove/prune contract:
+// once no dependency jars remain, Sync deletes the anchor instead of leaving
+// a stale, pointless CLASSPATH entry behind.
+func TestSyncRemovesAnchorWhenLastJarGone(t *testing.T) {
+	dir := t.TempDir()
+	jar := filepath.Join(dir, "dep.jar")
+	mustWriteFile(t, jar, "dep")
+	if err := Sync(dir); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if AnchorPath(dir) == "" {
+		t.Fatal("anchor should exist while dep.jar is present")
+	}
+
+	if err := os.Remove(jar); err != nil {
+		t.Fatal(err)
+	}
+	if err := Sync(dir); err != nil {
+		t.Fatalf("Sync after removing last jar: %v", err)
+	}
+	if AnchorPath(dir) != "" {
+		t.Error("anchor should be deleted once no dependency jars remain")
+	}
+}
+
+// TestSyncExcludesItself verifies that a previously-generated anchor jar is
+// never listed as one of its own Class-Path dependencies — otherwise every
+// regeneration would grow the manifest by referencing itself.
+func TestSyncExcludesItself(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "dep.jar"), "dep")
 
-	if _, err := classpathAnchorPath(dir); err != nil {
-		t.Fatalf("first classpathAnchorPath: %v", err)
+	if err := Sync(dir); err != nil {
+		t.Fatalf("first Sync: %v", err)
 	}
-	anchor, err := classpathAnchorPath(dir) // regenerate
-	if err != nil {
-		t.Fatalf("second classpathAnchorPath: %v", err)
+	if err := Sync(dir); err != nil { // regenerate
+		t.Fatalf("second Sync: %v", err)
 	}
-	manifest := readManifest(t, anchor)
-	if strings.Contains(manifest, classpathAnchorName) {
+	manifest := readManifest(t, AnchorPath(dir))
+	if strings.Contains(manifest, AnchorName) {
 		t.Errorf("manifest must not reference the anchor jar itself:\n%s", manifest)
 	}
 	if !strings.Contains(manifest, "Class-Path: dep.jar") {
@@ -121,28 +139,74 @@ func TestClasspathAnchorPathExcludesItself(t *testing.T) {
 	}
 }
 
-// TestClasspathAnchorPathRefreshesOnJarSetChange verifies the anchor is
-// regenerated (not left stale) when the jar set in dir changes between
-// calls, matching buildJavaClasspath's own no-caching design.
-func TestClasspathAnchorPathRefreshesOnJarSetChange(t *testing.T) {
+// TestSyncRefreshesOnJarSetChange verifies the anchor is regenerated (not
+// left stale) when the jar set in dir changes between calls — the
+// install/update/remove contract.
+func TestSyncRefreshesOnJarSetChange(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "one.jar"), "one")
 
-	anchor, err := classpathAnchorPath(dir)
-	if err != nil {
-		t.Fatalf("classpathAnchorPath: %v", err)
+	if err := Sync(dir); err != nil {
+		t.Fatalf("Sync: %v", err)
 	}
-	if m := readManifest(t, anchor); !strings.Contains(m, "Class-Path: one.jar") {
+	if m := readManifest(t, AnchorPath(dir)); !strings.Contains(m, "Class-Path: one.jar") {
 		t.Fatalf("expected one.jar only, got:\n%s", m)
 	}
 
 	mustWriteFile(t, filepath.Join(dir, "two.jar"), "two")
-	anchor, err = classpathAnchorPath(dir)
-	if err != nil {
-		t.Fatalf("classpathAnchorPath (after add): %v", err)
+	if err := Sync(dir); err != nil {
+		t.Fatalf("Sync (after add): %v", err)
 	}
-	if m := readManifest(t, anchor); !strings.Contains(m, "Class-Path: one.jar two.jar") {
+	if m := readManifest(t, AnchorPath(dir)); !strings.Contains(m, "Class-Path: one.jar two.jar") {
 		t.Fatalf("expected both jars after refresh, got:\n%s", m)
+	}
+}
+
+// TestSyncSkipsWriteWhenCurrent verifies the byte-compare fast path: a Sync
+// against an unchanged jar set leaves the anchor file untouched (same mtime),
+// so repeated installs don't churn a file that fglrun may be reading.
+func TestSyncSkipsWriteWhenCurrent(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "dep.jar"), "dep")
+	if err := Sync(dir); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	anchor := AnchorPath(dir)
+	before, err := os.Stat(anchor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Backdate the anchor so an (unwanted) rewrite would visibly change mtime
+	// even on filesystems with coarse timestamps.
+	old := before.ModTime().Add(-1 * 60 * 1e9)
+	if err := os.Chtimes(anchor, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Sync(dir); err != nil {
+		t.Fatalf("second Sync: %v", err)
+	}
+	after, err := os.Stat(anchor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(old) {
+		t.Error("Sync rewrote an already-current anchor (mtime changed)")
+	}
+}
+
+func TestHasDependencyJars(t *testing.T) {
+	dir := t.TempDir()
+	if HasDependencyJars(dir) {
+		t.Error("empty dir should have no dependency jars")
+	}
+	mustWriteFile(t, filepath.Join(dir, AnchorName), "anchor only")
+	if HasDependencyJars(dir) {
+		t.Error("the anchor itself must not count as a dependency jar")
+	}
+	mustWriteFile(t, filepath.Join(dir, "dep.jar"), "dep")
+	if !HasDependencyJars(dir) {
+		t.Error("dep.jar should count as a dependency jar")
 	}
 }
 
@@ -194,8 +258,8 @@ func assertUnwrapsTo(t *testing.T, wrapped, name, want string) {
 }
 
 // TestBuildClasspathManifestIsValidZipEntry is a belt-and-suspenders check
-// that buildClasspathManifest's output, once written into a zip archive by
-// writeClasspathAnchorJar, survives a normal zip round-trip byte-for-byte.
+// that buildClasspathManifest's output, once written into a zip archive,
+// survives a normal zip round-trip byte-for-byte.
 func TestBuildClasspathManifestIsValidZipEntry(t *testing.T) {
 	want := buildClasspathManifest([]string{"a.jar", "b.jar"})
 
