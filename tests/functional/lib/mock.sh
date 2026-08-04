@@ -86,6 +86,23 @@ mock_maven_start() {  # mock_maven_start [--require-token <tok>]
   return 0
 }
 
+# ---- a reachable secondary repository (served by the SAME mock process) ----
+# registry_server.py answers 404 to any path it does not recognise, so an
+# artifactory descriptor pointed under /mirror is a repository that is REACHABLE
+# and says "not found" — rather than one that fails DNS. Two things that buys
+# which an unreachable URL cannot:
+#   * the unpinned fan-out COMPLETES. A non-not-found error aborts it ("never
+#     silently drop a repo", spec §7.2), so with an unreachable secondary a test
+#     can only assert that install failed — never what it resolved.
+#   * MOCK_LOG records the probe, so "was the secondary dialed?" is directly
+#     assertable in both directions, the way 52's _cd_excludes_gi asserts on gi.
+# The /mirror path (rather than the bare mock base) keeps the descriptor's URL
+# prefix disjoint from gi's download URLs, so the installer's per-repo auth
+# matching (GIS-267) is unaffected and the log needle is unambiguous.
+mock_secondary_url() { printf 'http://127.0.0.1:%s/mirror' "$MOCK_PORT"; }
+assert_secondary_dialed()     { assert_contains     "/mirror/api/storage" "$(cat "$MOCK_LOG")"; }
+assert_secondary_not_dialed() { assert_not_contains "/mirror/api/storage" "$(cat "$MOCK_LOG")"; }
+
 # Dump a server's request log (debugging).
 mock_dump_log() { [[ -n "${MOCK_LOG:-}" ]] && sed 's/^/    reg| /' "$MOCK_LOG" >&2; [[ -n "${OSV_LOG:-}" ]] && sed 's/^/    osv| /' "$OSV_LOG" >&2; [[ -n "${MAVEN_LOG:-}" ]] && sed 's/^/    mvn| /' "$MAVEN_LOG" >&2; return 0; }
 

@@ -133,7 +133,17 @@ it() {  # it "description" <function-name>
   local desc="$1" fn="$2"
   TESTS_RUN=$((TESTS_RUN + 1))
   local log; log="$(mktemp "$_SANDBOX_ROOT/log.XXXXXX")"
-  if ( set -eo pipefail; sandbox; "$fn" ) >"$log" 2>&1; then
+  # The test subshell MUST be a plain command with $? read on the next line.
+  # Bash suspends errexit for the whole dynamic extent of a command used as an
+  # `if`/`while` condition, in a `&&`/`||` list, or under `!` — and that
+  # suspension reaches inside the subshell and into the functions it calls, so
+  # the body's own `set -e` becomes inert. Written as `if ( ... ); then`, a
+  # failing assertion mid-body was silently ignored and the verdict came from
+  # whatever the body's LAST command returned. run.sh deliberately does not set
+  # -e, so a failing subshell here cannot abort the runner.
+  ( set -eo pipefail; sandbox; "$fn" ) >"$log" 2>&1
+  local rc=$?
+  if [[ $rc -eq 0 ]]; then
     TESTS_PASS=$((TESTS_PASS + 1))
     printf '  %sok%s   %s\n' "$C_G" "$C_0" "$desc"
   else

@@ -2,9 +2,16 @@ suite "default consume registry (GIS-364)"
 
 # The consume default scopes install/update/search/info/outdated to ONE repository
 # so a team whose Artifactory proxies every public name is not blocked by the
-# collision guard. There is no Artifactory mock, so — as in 102-search-registry.sh
-# — the secondary is an unreachable URL and the assertions turn on WHO gets
-# dialed: the mock registry's request log is the proof of exclusion.
+# collision guard. The assertions turn on WHO gets dialed, and the mock registry's
+# request log is the proof. Two shapes of secondary appear below:
+#
+#   * an UNREACHABLE URL (as in 102-search-registry.sh) where the test wants the
+#     secondary's failure to be the observable thing;
+#   * mock_secondary_url — reachable, 404s everything (see lib/mock.sh) — where
+#     the fan-out has to complete so the test can assert what install resolved
+#     and whether the secondary was consulted at all. An unreachable secondary
+#     cannot serve that: the fan-out aborts on its hard error (spec §7.2) before
+#     there is anything to observe.
 
 # ── single-registry sandbox (only the built-in gi) ────────────────────────────
 
@@ -140,17 +147,29 @@ it "installing under the default writes no per-dependency pin" _cd_writes_no_pin
 
 # ── config surfaces and their precedence ─────────────────────────────────────
 
-# The committed project block is the GIS-366 "clone → install just works" surface.
+# The committed project block is the GIS-366 "clone → install just works" surface:
+# the registry set AND the default that scopes it both travel in fglpkg.json.
+#
+# A second registry is required for this test to mean anything. With only gi
+# configured, buildRepositorySet returns no set and applyConsumeRegistry treats a
+# default of "gi" as the no-op it is — scoping to the only configured repository
+# restricts nothing, and noteConsumeDefault stays deliberately silent. Nothing
+# would be exercised. The reachable secondary makes the exclusion observable:
+# unscoped, the fan-out would probe myrepo; scoped, it must not.
 _cd_project_block() {
   mock_registry_start
-  cat > fglpkg.json <<'EOF'
+  cat > fglpkg.json <<EOF
 { "name":"app", "version":"1.0.0", "genero":">=3.20",
+  "registries":[{"name":"myrepo","type":"artifactory","url":"$(mock_secondary_url)","repoKey":"generic-local","priority":2}],
   "defaultConsumeRegistry": "gi" }
 EOF
   run install demo.pkg@1.0.0
   assert_success
   assert_contains "scoped to default consume registry"
   assert_dir ".fglpkg/packages/demo-pkg"
+  # The scoping proof: myrepo answers, so an unscoped fan-out WOULD have probed
+  # it. It was never dialed, so routing really was restricted to gi.
+  assert_secondary_not_dialed
 }
 it "a committed defaultConsumeRegistry block scopes the install" _cd_project_block
 
@@ -190,19 +209,34 @@ EOF
 it "the project block overrides the global config.json" _cd_project_beats_global
 
 # The publish default is a separate knob: setting it must NOT scope consumption.
-# myrepo is unreachable, so if defaultRegistry leaked into consume routing this
-# install would fail.
+#
+# myrepo has to be REACHABLE for this to test anything. Against an unreachable
+# one the install fails on its DNS error whatever defaultRegistry says — the
+# fan-out aborts on any non-not-found error — so the test would fail identically
+# with the publish default removed, never touching the separation it names.
+#
+# Reachable, the discrimination is sharp and runs the other way: with no consume
+# default the fan-out consults every admitting repository, so myrepo IS dialed,
+# and that dial is the proof routing was never scoped. Had defaultRegistry leaked,
+# route() would have taken the consumeDefault branch, consulted myrepo alone, and
+# failed not-found.
 _cd_publish_default_does_not_leak() {
   mock_registry_start
-  cat > fglpkg.json <<'EOF'
+  cat > fglpkg.json <<EOF
 { "name":"app", "version":"1.0.0", "genero":">=3.20",
-  "registries":[{"name":"myrepo","type":"artifactory","url":"https://example.invalid/repo","repoKey":"generic-local","priority":2}],
+  "registries":[{"name":"myrepo","type":"artifactory","url":"$(mock_secondary_url)","repoKey":"generic-local","priority":2}],
   "defaultRegistry": "myrepo" }
 EOF
   run install demo.pkg@1.0.0
   assert_success
   assert_dir ".fglpkg/packages/demo-pkg"
   assert_not_contains "scoped to default consume registry"
+  # No leak: routing stayed unscoped, so the fan-out really did consult myrepo.
+  assert_secondary_dialed
+  # ...and gi won it. The lock collapses a "gi" source to absent (GIS-249 C2), so
+  # a secondary having served the package would show up here.
+  assert_file_contains "fglpkg.lock" "demo-pkg"
+  assert_not_contains '"source"' "$(cat fglpkg.lock)"
 }
 it "the publish defaultRegistry does not scope consumption" _cd_publish_default_does_not_leak
 
