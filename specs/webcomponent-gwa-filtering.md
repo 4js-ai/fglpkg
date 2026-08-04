@@ -195,7 +195,9 @@ Because ancillary trees now live under the per-package `packages/<name>/`, two W
 
 `componentDirsInZip` is a small, defensive helper (same "what is a component" notion as `isComponentDir`, applied to zip entries): return each top-level dir `D` for which the zip contains `D/D.html`. In practice a WC-variant zip always carries the manifest's `webcomponents` array, so this fallback rarely fires; it exists so a hand-built or legacy zip still routes correctly instead of dumping components into `packages/<name>/`.
 
-**Bonus:** because the manifest and docs now land in `packages/<name>/`, pure-WC packages become visible to `fglpkg list` and `fglpkg docs <name>` (which read `packages/<name>/fglpkg.json` via [`findInstalledPackage`](../internal/cli/cli.go#L1907-L1923)) — today a pure-WC package appears in neither. See [Risks](#risks--backward-compatibility) for the one behavior shift this implies.
+**Bonus:** because the manifest and docs now land in `packages/<name>/`, pure-WC packages become visible to `fglpkg docs <name>` (which reads `packages/<name>/fglpkg.json` via [`findInstalledPackage`](../internal/cli/cli.go#L1907-L1923)) — today a pure-WC package is not addressable there. See [Risks](#risks--backward-compatibility) for the one behavior shift this implies.
+
+Note: this no longer applies to `fglpkg list`. Its default tree output reads the lock file's `webcomponents` array, so a pure-WC package is already shown (tagged `(webcomponent)`) wherever it appears in the dependency graph, independent of where its files land. Only `fglpkg list --flat`, which scans `packages/`, still misses one.
 
 ### Deferred — the lockfile `components` array
 

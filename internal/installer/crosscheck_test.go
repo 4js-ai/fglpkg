@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -188,6 +190,64 @@ func TestCollectDeclared(t *testing.T) {
 	}
 	if len(set.fgl) != 1 || set.fgl[0].name != "logger" || set.fgl[0].pkg != "poiapi" {
 		t.Errorf("expected one FGL declaration (logger from poiapi), got %+v", set.fgl)
+	}
+}
+
+// TestJarDeclarers covers the attribution `fglpkg list` uses to place JARs
+// under the package that asked for them: the map is keyed by coordinate without
+// the version, each declaring package appears once, and the root's own JARs are
+// tagged with the "<root>" sentinel the lock file also uses.
+func TestJarDeclarers(t *testing.T) {
+	home := t.TempDir()
+	inst := New(home, "", "", "")
+	if err := inst.ensureDirs(); err != nil {
+		t.Fatal(err)
+	}
+
+	writePkgManifest(t, inst.packagesDir, "poiapi", `{
+		"name":"poiapi","version":"1.4.0",
+		"dependencies":{
+			"java":[
+				{"groupId":"org.apache.poi","artifactId":"poi","version":"5.3.0"},
+				{"groupId":"commons-io","artifactId":"commons-io","version":"2.15.1"}
+			]
+		},
+		"optionalDependencies":{
+			"java":[{"groupId":"org.apache.poi","artifactId":"poi","version":"5.3.0"}]
+		}
+	}`)
+	// A second package sharing a coordinate: the JAR is declared twice and must
+	// list both parents, since it legitimately appears twice in the tree.
+	writePkgManifest(t, inst.packagesDir, "reportkit", `{
+		"name":"reportkit","version":"2.0.0",
+		"dependencies":{
+			"java":[{"groupId":"commons-io","artifactId":"commons-io","version":"2.15.1"}]
+		}
+	}`)
+	// No manifest on disk (webcomponent-only) must be skipped, not fail.
+	if err := os.MkdirAll(filepath.Join(inst.packagesDir, "wc-only"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	root := manifest.New("app", "1.0.0", "", "")
+	root.AddJavaDependency(jd("com.google.code.gson", "gson", "2.10.1"))
+
+	got := inst.JarDeclarers(root, []string{"poiapi", "reportkit", "wc-only"})
+
+	want := map[string][]string{
+		"com.google.code.gson:gson": {rootPkgLabel},
+		"org.apache.poi:poi":        {"poiapi"},
+		"commons-io:commons-io":     {"poiapi", "reportkit"},
+	}
+	if len(got) != len(want) {
+		t.Errorf("got %d coordinates, want %d: %+v", len(got), len(want), got)
+	}
+	for key, wantParents := range want {
+		gotParents := got[key]
+		sort.Strings(gotParents)
+		if !reflect.DeepEqual(gotParents, wantParents) {
+			t.Errorf("%s declared by %v, want %v", key, gotParents, wantParents)
+		}
 	}
 }
 
