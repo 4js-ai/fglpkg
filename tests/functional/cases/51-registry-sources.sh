@@ -7,7 +7,7 @@ _rs_source_column_builtin() {
   run registry list
   assert_success
   assert_contains "SOURCE"
-  assert_match "LOGIN +SOURCE +URL"      # column order in the header
+  assert_match "LOGIN +SOURCE +DEFAULT +URL"   # column order in the header (DEFAULT: GIS-364)
   assert_match "gi.*genero.*builtin"     # the built-in row is tagged builtin
 }
 it "registry list prints the SOURCE column and marks gi builtin" _rs_source_column_builtin

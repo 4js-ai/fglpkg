@@ -98,6 +98,15 @@ Note: E1 backs several client calls — `FetchVersionList` (1 GET), `FetchInfo`/
 packages: constraints (`latest`, `*`, `^1.2.0`, …) are resolved entirely
 client-side from the returned `versions[].version` list.
 
+**Unrecognised paths must 404.** Not merely a sensible default — the suite depends
+on it. `lib/mock.sh`'s `mock_secondary_url` points a `type=artifactory` descriptor
+at `/mirror` on this same server precisely so its `/mirror/api/storage/…` probes
+answer 404 → `ErrNotFound`. That gives the functional tests a secondary repository
+that is *reachable and empty* rather than unreachable, which is the only way a
+multi-repository fan-out can run to completion in a test (a non-not-found error
+aborts it). Returning anything else there — 500, a connection reset, a stub 200 —
+silently changes what those tests are exercising.
+
 ---
 
 ## 3. Exact response bodies
