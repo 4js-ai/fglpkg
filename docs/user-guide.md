@@ -444,8 +444,9 @@ Resolution of the global package root, highest precedence first:
 
 Config and credentials always resolve from `FGLPKG_HOME` (or `~/.fglpkg`), never from
 `FGLPKG_GLOBAL_DIR`. If you relocate the package root on a machine that already had global packages
-under `~/.fglpkg`, `fglpkg` prints a one-time note pointing at the old location so nothing appears to
-silently vanish.
+under `~/.fglpkg`, `fglpkg` prints a note (on stderr) pointing at the old location so nothing appears
+to silently vanish. The note repeats on each command until the relocation is resolved — either
+reinstall the packages under the new root, or set `FGLPKG_GLOBAL_DIR=~/.fglpkg` to keep the old one.
 
 ## Creating a New Project
 
@@ -665,7 +666,7 @@ Flags:
 |---|---|
 | `--flat` | One line per installed package, then the installed JAR files — the pre-tree output, with no parentage |
 | `--depth <n>` | Show only the first `n` levels (`0`, the default, means unlimited). The counts still reflect everything rendered |
-| `--local`, `--global` | Force the project store (`.fglpkg/`) or the shared one (`~/.fglpkg/`) |
+| `--local`, `--global` | Force the project store (`.fglpkg/`) or the global one (default `~/.fglpkg/`; relocatable via `FGLPKG_GLOBAL_DIR`) |
 
 **In a project**, the tree's package parentage comes from `fglpkg.lock`. Without a lock in the current directory, `list` falls back to `--flat` and says why:
 

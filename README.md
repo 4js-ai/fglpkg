@@ -381,12 +381,12 @@ fglpkg install myutils@1.2.0             # Add + install specific version
 fglpkg install tester -D                 # Add under devDependencies
 fglpkg install telemetry -O              # Add under optionalDependencies
 fglpkg install --production              # Skip devDependencies (CI / deploy)
-fglpkg install --global                  # Force install to ~/.fglpkg/
+fglpkg install --global                  # Force install to the global store (default ~/.fglpkg/)
 fglpkg install --local                   # Force install to .fglpkg/
 fglpkg remove myutils                    # Remove a package (any scope)
 fglpkg update                            # Re-resolve and update all dependencies
 fglpkg list                              # Dependency tree: packages, then their JARs
-fglpkg list --global                     # Dependency forest of the shared store (~/.fglpkg/)
+fglpkg list --global                     # Dependency forest of the global store (default ~/.fglpkg/)
 fglpkg list --flat                       # One line per package, then the JAR files
 fglpkg list --depth 1                    # Only the directly declared dependencies
 fglpkg env                               # Print export statements (auto-detects scope)

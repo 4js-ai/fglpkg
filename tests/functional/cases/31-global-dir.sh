@@ -38,3 +38,59 @@ _gd_defaults_to_home_when_unset() {
   assert_dir "$FGLPKG_HOME/packages/demo-pkg"
 }
 it "global install stays under FGLPKG_HOME when FGLPKG_GLOBAL_DIR is unset" _gd_defaults_to_home_when_unset
+
+# The split has to reach the bin-command and relink paths too, not just install
+# and env. `run --list`, `run <cmd>` and `relink --global` all resolve the global
+# PACKAGE root; if any still used FGLPKG_HOME, a globally installed command would
+# be unrunnable and `relink --global` would rebuild the wrong merged/ dir. These
+# are reporting/resolving commands over what is on disk, so hand-place a package
+# with a bin command under the relocated root — no install needed.
+_gd_write_bin_pkg() {  # _gd_write_bin_pkg <global-root>
+  mkdir -p "$1/packages/democli"
+  cat > "$1/packages/democli/fglpkg.json" <<'EOF'
+{ "name":"democli", "version":"1.0.0", "genero":">=3.20",
+  "bin": { "demo-cmd": "run.sh" } }
+EOF
+  cat > "$1/packages/democli/run.sh" <<'EOF'
+#!/bin/sh
+echo "demo-cmd ran"
+EOF
+  chmod +x "$1/packages/democli/run.sh"
+}
+
+_gd_run_list_uses_global_dir() {
+  local gdir="$TESTWD/global-pkgs"
+  export FGLPKG_GLOBAL_DIR="$gdir"
+  _gd_write_bin_pkg "$gdir"
+  run run --list
+  assert_success
+  assert_contains "demo-cmd"                 # discovered from the relocated root...
+  assert_contains "democli"                  # ...not from the (empty) FGLPKG_HOME
+  assert_not_contains "No commands available"
+}
+it "run --list scans FGLPKG_GLOBAL_DIR, not FGLPKG_HOME" _gd_run_list_uses_global_dir
+
+_gd_run_cmd_resolves_from_global_dir() {
+  local gdir="$TESTWD/global-pkgs"
+  export FGLPKG_GLOBAL_DIR="$gdir"
+  _gd_write_bin_pkg "$gdir"
+  run run demo-cmd
+  assert_success
+  assert_contains "demo-cmd ran"             # the script was actually found and run
+}
+it "run <cmd> resolves a bin command from FGLPKG_GLOBAL_DIR" _gd_run_cmd_resolves_from_global_dir
+
+_gd_relink_global_targets_global_dir() {
+  local gdir="$TESTWD/global-pkgs"
+  export FGLPKG_GLOBAL_DIR="$gdir"
+  _gd_write_bin_pkg "$gdir"
+  run relink --global
+  assert_success
+  # The merged root is rebuilt under the relocated global dir (…/global-pkgs/merged),
+  # not beside config/credentials under FGLPKG_HOME — "global-pkgs" never appears in
+  # the home path, so this substring alone discriminates the fix from the old bug.
+  # (A relative substring, not the absolute path: TESTWD can carry a // that the
+  # binary's filepath.Join collapses.)
+  assert_contains "global-pkgs/merged"
+}
+it "relink --global rebuilds the merged root under FGLPKG_GLOBAL_DIR" _gd_relink_global_targets_global_dir

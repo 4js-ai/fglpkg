@@ -1311,13 +1311,16 @@ func cmdRelink(args []string) error {
 		}
 		did = true
 	}
-	// Global scope: when forced, or by default (always).
+	// Global scope: when forced, or by default (always). relink rebuilds the
+	// merged root under the global PACKAGE root, which GIS-367 split from the
+	// config/credentials home — so it must resolve fglpkgGlobalDir(), not
+	// fglpkgHome(), or it would rebuild an empty merged/ beside the config.
 	if !forceLocal {
-		globalHome, err := fglpkgHome()
+		globalRoot, err := fglpkgGlobalDir()
 		if err != nil {
 			return err
 		}
-		if err := relinkScope(globalHome, projectDir, false, "global"); err != nil {
+		if err := relinkScope(globalRoot, projectDir, false, "global"); err != nil {
 			return err
 		}
 		did = true
@@ -4153,9 +4156,11 @@ func cmdRunList() error {
 		wd, _ := os.Getwd()
 		scanPackagesDir(filepath.Join(wd, ".fglpkg", "packages"), "local")
 	}
-	globalHome, err := fglpkgHome()
+	// Global bin commands live under the global PACKAGE root (GIS-367), not the
+	// config/credentials home.
+	globalRoot, err := fglpkgGlobalDir()
 	if err == nil {
-		scanPackagesDir(filepath.Join(globalHome, "packages"), "global")
+		scanPackagesDir(filepath.Join(globalRoot, "packages"), "global")
 	}
 
 	if len(entries) == 0 {
@@ -4209,10 +4214,12 @@ func findBinCommand(commandName string) (scriptPath, pkgName string, err error) 
 		}
 	}
 
-	globalHome, homeErr := fglpkgHome()
+	// Resolve bin commands from the global PACKAGE root (GIS-367), not the
+	// config/credentials home.
+	globalRoot, rootErr := fglpkgGlobalDir()
 	globalPkgs := ""
-	if homeErr == nil {
-		globalPkgs = filepath.Join(globalHome, "packages")
+	if rootErr == nil {
+		globalPkgs = filepath.Join(globalRoot, "packages")
 	}
 
 	// Scan local packages first (higher priority).
@@ -4560,8 +4567,12 @@ func fglpkgHome() (string, error) {
 	return filepath.Join(home, ".fglpkg"), nil
 }
 
-// globalDirNoted guards the one-time FGLDIR-relocation note (see fglpkgGlobalDir).
-// A command runs single-threaded, so a plain bool is enough.
+// globalDirNoted dedups the FGLDIR-relocation note WITHIN a single command:
+// fglpkgGlobalDir can be called several times per invocation, and the note should
+// print at most once. It is intentionally not persisted, so the note reappears on
+// each command until the relocation is resolved (the new root is populated, or
+// FGLPKG_GLOBAL_DIR is set) — a standing reminder, not a one-shot that hides an
+// unresolved problem. A command runs single-threaded, so a plain bool suffices.
 var globalDirNoted bool
 
 // fglpkgGlobalDir returns the root under which GLOBAL packages are installed
@@ -4589,10 +4600,16 @@ func fglpkgGlobalDir() (string, error) {
 		return "", err
 	}
 	if fgldir := strings.TrimSpace(os.Getenv("FGLDIR")); fgldir != "" {
-		cand := filepath.Join(fgldir, "fglpkg")
-		if dirWritable(cand) {
-			noteGlobalDirRelocation(cand, home)
-			return cand, nil
+		// FGLDIR must be an existing Genero installation directory. A stale or
+		// mistyped value — whose parent merely happens to be writable — must not
+		// capture the global store and strand the packages under ~/.fglpkg, so
+		// require the directory itself, not just a creatable path, before binding.
+		if fi, err := os.Stat(fgldir); err == nil && fi.IsDir() {
+			cand := filepath.Join(fgldir, "fglpkg")
+			if dirWritable(cand) {
+				noteGlobalDirRelocation(cand, home)
+				return cand, nil
+			}
 		}
 	}
 	return home, nil
@@ -4627,10 +4644,12 @@ func dirWritable(dir string) bool {
 	return true
 }
 
-// noteGlobalDirRelocation prints a one-time stderr note when global packages have
-// moved under FGLDIR but a pre-split install still sits under ~/.fglpkg, so a user
-// whose `list`/`bdl` suddenly looks empty learns where their packages went and how
-// to keep the old location. Silent when there is nothing to strand.
+// noteGlobalDirRelocation prints a stderr note (at most once per command, and
+// only until the relocation is resolved) when global packages have moved under
+// FGLDIR but a pre-split install still sits under ~/.fglpkg, so a user whose
+// `list`/`bdl` suddenly looks empty learns where their packages went and how to
+// keep the old location. Silent once the new root is populated, or when there is
+// nothing to strand.
 func noteGlobalDirRelocation(chosen, home string) {
 	if globalDirNoted || chosen == home {
 		return

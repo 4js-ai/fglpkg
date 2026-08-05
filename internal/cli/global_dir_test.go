@@ -21,6 +21,9 @@ func TestFglpkgGlobalDir(t *testing.T) {
 	if err := os.WriteFile(fileAsFGLDIR, []byte("x"), 0o600); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
+	// A stale/mistyped FGLDIR: the path does not exist, but its parent (a temp
+	// dir) is writable — so a create-a-file probe alone would wrongly accept it.
+	missingFGLDIR := filepath.Join(t.TempDir(), "uninstalled-genero")
 
 	cases := []struct {
 		name      string
@@ -48,8 +51,13 @@ func TestFglpkgGlobalDir(t *testing.T) {
 			want:   filepath.Join(writableFGLDIR, "fglpkg"),
 		},
 		{
-			name:   "non-writable FGLDIR falls back to ~/.fglpkg",
-			fgldir: fileAsFGLDIR, // parent of the candidate is a file → not writable
+			name:   "file-as-FGLDIR falls back to ~/.fglpkg",
+			fgldir: fileAsFGLDIR, // FGLDIR is a file, not a directory → rejected
+			want:   defaultHome,
+		},
+		{
+			name:   "non-existent FGLDIR falls back to ~/.fglpkg",
+			fgldir: missingFGLDIR, // stale/mistyped FGLDIR must not capture the store
 			want:   defaultHome,
 		},
 		{
