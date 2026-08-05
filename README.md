@@ -201,6 +201,16 @@ For shell profiles, always use `--global` so all installed packages are availabl
 eval "$(fglpkg env --global)"
 ```
 
+## Configuration Precedence
+
+Configuration resolves in one order across every layer — highest precedence first:
+
+```
+environment  >  project fglpkg.json  >  ~/.fglpkg/config.json  >  built-in default
+```
+
+`registries` **merge** by name (a project entry overrides a same-named global one); scalar keys like `defaultRegistry`, `defaultConsumeRegistry`, and `mavenMirror` **replace** (the first value set in precedence order wins). A checked-in `fglpkg.json` may set **routing** — those registries and defaults — but **not policy**: `signing.enforce`, the update-check preference, and credentials are user/global only, so cloning a repo can point you at its registries yet never weaken *your* signature enforcement or read your tokens. Add a registry to the checked-in project config with `fglpkg registry add <name> <url> --local` (without a scope flag it writes `~/.fglpkg/config.json`). Full details in the [user guide](docs/user-guide.md#precedence-and-merge-across-all-config).
+
 ## fglpkg.json Format
 
 ### For a project (consuming packages)
@@ -279,6 +289,7 @@ eval "$(fglpkg env --global)"
 | `mavenMirror` | No | Route JAR downloads through an internal Maven mirror (e.g. a JFrog Artifactory Maven repo) instead of Maven Central: `{ "url": "…", "auth": "bearer" }`. A per-dependency `url` still wins. See [Routing JARs through an internal Maven mirror](docs/user-guide.md#routing-jars-through-an-internal-maven-mirror) |
 | `registries` | No | Additional package repositories (e.g. a JFrog Artifactory instance) consulted alongside the built-in GI registry. See [Secondary Package Repositories](#secondary-package-repositories-jfrog-artifactory) |
 | `defaultRegistry` | No | Name of the repository `fglpkg publish` targets when no `--registry` is given (publish-only; does not affect where packages are consumed from) |
+| `defaultConsumeRegistry` | No | Name of the repository `install`/`update`/`search`/`info`/`outdated` resolve from when no `--registry` is given |
 | `devDependencies` | No | Test / tooling deps (fgl + java), skipped with `--production` |
 | `optionalDependencies` | No | Attempted like prod, failures emit a warning instead of aborting |
 | `programs` | No | List of module names with MAIN blocks (e.g., `["PoiConvert"]`) |
@@ -431,7 +442,7 @@ fglpkg deprecate chart-3d@1.2.3 --undo         # Lift the deprecation
 # Secondary repositories (JFrog Artifactory) — see section below
 fglpkg registry list                     # Show configured repositories + auth status
 fglpkg registry add acme https://a.example --repo-key GeneroBDL   # Add a repo (global)
-fglpkg registry add acme https://a.example --repo-key K --project # Add to fglpkg.json instead
+fglpkg registry add acme https://a.example --repo-key K --local # Add to fglpkg.json instead
 fglpkg registry remove acme              # Remove a configured repo
 fglpkg login --registry acme --token …   # Sign in to a secondary repo
 fglpkg install pkg --registry acme        # Add a package, pinning its source repo
@@ -660,7 +671,7 @@ entries for you (validated before write, with the priority auto-assigned after
 ```bash
 fglpkg registry add acme https://artifactory.acme.example/artifactory \
     --repo-key fgl-internal-generic --packages "acme-*"   # → ~/.fglpkg/config.json
-fglpkg registry add acme https://… --repo-key K --project # → project fglpkg.json
+fglpkg registry add acme https://… --repo-key K --local # → project fglpkg.json
 fglpkg registry remove acme
 ```
 
@@ -770,7 +781,7 @@ consume registry** — the one repository packages are resolved from:
 
 ```bash
 # or write both at once
-fglpkg registry add acme https://acme.jfrog.io/artifactory/GeneroBDL --project --consume-default
+fglpkg registry add acme https://acme.jfrog.io/artifactory/GeneroBDL --local --consume-default
 ```
 
 Resolved in decreasing precedence: `FGLPKG_CONSUME_REGISTRY` → the project's
