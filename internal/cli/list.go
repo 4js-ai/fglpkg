@@ -259,7 +259,7 @@ func listGlobalForest(w io.Writer, inst *installer.Installer, globalRoot string,
 		// is nothing to re-derive here — only the dependency lists.
 		if m, err := manifest.Load(filepath.Join(inst.PackagesDir(), ip.Name)); err == nil {
 			gp.fglDeps = installedFGLDeps(m)
-			gp.jars = append(append([]manifest.JavaDependency(nil), m.Dependencies.Java...), m.OptionalDependencies.Java...)
+			gp.jars = installedJARs(m)
 		}
 		pkgs = append(pkgs, gp)
 	}
@@ -269,25 +269,61 @@ func listGlobalForest(w io.Writer, inst *installer.Installer, globalRoot string,
 	return nil
 }
 
-// installedFGLDeps returns the de-duplicated FGL dependency names a manifest
-// declares across the prod and optional scopes — the scopes a consumer installs
-// transitively. Dev deps are excluded: they are stripped at publish and never
-// installed globally. Mirrors installer.manifestFGLNames, kept local rather than
-// exporting it.
-func installedFGLDeps(m *manifest.Manifest) []string {
+// scopeOptional is the tag rendered for an optionally-declared dependency,
+// matching the string the lock stores and the local tree renders (production is
+// the empty scope, and so untagged).
+const scopeOptional = string(manifest.ScopeOptional)
+
+// fglDep is one declared FGL-package dependency and the scope its declarer put it
+// under. scope is per-EDGE: the same package can be a production dep of one
+// package and an optional dep of another.
+type fglDep struct {
+	name  string
+	scope string // "" production, "optional"
+}
+
+// jarDep is one declared JAR dependency and its declarer's scope.
+type jarDep struct {
+	dep   manifest.JavaDependency
+	scope string // "" production, "optional"
+}
+
+// installedFGLDeps returns the de-duplicated FGL dependencies a manifest declares
+// across the prod and optional scopes — the scopes a consumer installs
+// transitively — each tagged with the scope it was declared under. Production is
+// collected first so it wins when a name appears in both buckets. Dev deps are
+// excluded: they are stripped at publish and never installed globally.
+func installedFGLDeps(m *manifest.Manifest) []fglDep {
 	seen := map[string]bool{}
-	var out []string
-	add := func(fgl map[string]string) {
+	var out []fglDep
+	add := func(fgl map[string]string, scope string) {
+		names := make([]string, 0, len(fgl))
 		for name := range fgl {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
 			if !seen[name] {
 				seen[name] = true
-				out = append(out, name)
+				out = append(out, fglDep{name: name, scope: scope})
 			}
 		}
 	}
-	add(m.Dependencies.FGL)
-	add(m.OptionalDependencies.FGL)
-	sort.Strings(out)
+	add(m.Dependencies.FGL, "")
+	add(m.OptionalDependencies.FGL, scopeOptional)
+	return out
+}
+
+// installedJARs returns the JAR dependencies a manifest declares across the prod
+// and optional scopes, each tagged with the scope it was declared under.
+func installedJARs(m *manifest.Manifest) []jarDep {
+	out := make([]jarDep, 0, len(m.Dependencies.Java)+len(m.OptionalDependencies.Java))
+	for _, j := range m.Dependencies.Java {
+		out = append(out, jarDep{dep: j})
+	}
+	for _, j := range m.OptionalDependencies.Java {
+		out = append(out, jarDep{dep: j, scope: scopeOptional})
+	}
 	return out
 }
 
@@ -297,8 +333,8 @@ func installedFGLDeps(m *manifest.Manifest) []string {
 type globalPkg struct {
 	name    string
 	version string
-	fglDeps []string                  // direct FGL-package dependency names (prod+optional)
-	jars    []manifest.JavaDependency // direct JAR dependencies (prod+optional)
+	fglDeps []fglDep // direct FGL-package dependencies (prod+optional), scope-tagged
+	jars    []jarDep // direct JAR dependencies (prod+optional), scope-tagged
 }
 
 // buildGlobalForest reconstructs the global store's dependency forest from the
@@ -336,8 +372,8 @@ func buildGlobalForest(pkgs []globalPkg, maxDepth int) []listNode {
 	requiredByOther := map[string]bool{}
 	for _, name := range names {
 		for _, dep := range byName[name].fglDeps {
-			if _, ok := byName[dep]; ok && dep != name {
-				requiredByOther[dep] = true
+			if _, ok := byName[dep.name]; ok && dep.name != name {
+				requiredByOther[dep.name] = true
 			}
 		}
 	}
@@ -361,8 +397,8 @@ func buildGlobalForest(pkgs []globalPkg, maxDepth int) []listNode {
 		}
 		reachable[name] = true
 		for _, dep := range byName[name].fglDeps {
-			if _, ok := byName[dep]; ok {
-				mark(dep)
+			if _, ok := byName[dep.name]; ok {
+				mark(dep.name)
 			}
 		}
 	}
@@ -397,28 +433,33 @@ func buildGlobalForest(pkgs []globalPkg, maxDepth int) []listNode {
 		}
 		// FGL-package children first (alphabetical), then JAR leaves
 		// (alphabetical by coordinate, then version) — the package-before-JAR
-		// ordering buildListTree applies at every level.
-		kids := append([]string(nil), p.fglDeps...)
-		sort.Strings(kids)
+		// ordering buildListTree applies at every level. Scope is a property of
+		// the EDGE, so it is stamped on the child node here (after expansion),
+		// not carried inside the package: the same package can be optional under
+		// one parent and production under another.
+		kids := append([]fglDep(nil), p.fglDeps...)
+		sort.SliceStable(kids, func(a, b int) bool { return kids[a].name < kids[b].name })
 		for _, dep := range kids {
-			if _, ok := byName[dep]; !ok {
+			if _, ok := byName[dep.name]; !ok {
 				continue // declared but not installed → not shown
 			}
-			n.children = append(n.children, expand(dep, depth+1))
+			child := expand(dep.name, depth+1)
+			child.scope = dep.scope
+			n.children = append(n.children, child)
 		}
-		js := append([]manifest.JavaDependency(nil), p.jars...)
+		js := append([]jarDep(nil), p.jars...)
 		sort.SliceStable(js, func(a, b int) bool {
-			if js[a].Key() != js[b].Key() {
-				return js[a].Key() < js[b].Key()
+			if js[a].dep.Key() != js[b].dep.Key() {
+				return js[a].dep.Key() < js[b].dep.Key()
 			}
-			return js[a].Version < js[b].Version
+			return js[a].dep.Version < js[b].dep.Version
 		})
 		for _, j := range js {
-			jn := listNode{label: j.Key(), version: j.Version, kind: kindJar}
-			if seen[jarKey(j)] {
+			jn := listNode{label: j.dep.Key(), version: j.dep.Version, kind: kindJar, scope: j.scope}
+			if seen[jarKey(j.dep)] {
 				jn.repeat = true
 			} else {
-				seen[jarKey(j)] = true
+				seen[jarKey(j.dep)] = true
 			}
 			n.children = append(n.children, jn)
 		}

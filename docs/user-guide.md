@@ -696,7 +696,7 @@ Global packages — /opt/fourjs/fgl/fglpkg
 2 packages, 3 JARs.
 ```
 
-Because the global store installs each package's *own* declared JARs — there is no cross-package resolution picking one shared version — the same coordinate can legitimately appear at two versions under two different packages, and both are shown. Only BDL packages and the JARs they declare appear in the forest; for the raw on-disk package and JAR listing, use `fglpkg list --global --flat`. (A webcomponent installed globally extracts into a shared tree with no per-package manifest, so it is not listed by either mode.)
+Because the global store installs each package's *own* declared JARs — there is no cross-package resolution picking one shared version — the same coordinate can legitimately appear at two versions under two different packages, and both are shown. A dependency a package declares under `optionalDependencies` is tagged `(optional)`, just as in the local tree. Only BDL packages and the JARs they declare appear in the forest; for the raw on-disk package and JAR listing, use `fglpkg list --global --flat`. (A webcomponent installed globally extracts into a shared tree with no per-package manifest, so it is not listed by either mode.)
 
 ### Searching the Registry
 

@@ -252,6 +252,29 @@ EOF
 }
 it "list --global keeps per-package JAR versions distinct" _list_global_distinct_jar_versions
 
+# An optionally-declared dependency (package or JAR) is tagged (optional) in the
+# forest, just as in the local tree; a production dependency stays untagged.
+_list_global_marks_optional() {
+  mkdir -p "$FGLPKG_HOME/packages/app" "$FGLPKG_HOME/packages/plugin"
+  cat > "$FGLPKG_HOME/packages/app/fglpkg.json" <<'EOF'
+{ "name":"app", "version":"1.0.0", "genero":">=3.20",
+  "dependencies": { "java": [ { "groupId":"org.apache.poi", "artifactId":"poi", "version":"5.5.1" } ] },
+  "optionalDependencies": {
+    "fgl": { "plugin": "^2.0.0" },
+    "java": [ { "groupId":"com.google.code.gson", "artifactId":"gson", "version":"2.10.1" } ] } }
+EOF
+  cat > "$FGLPKG_HOME/packages/plugin/fglpkg.json" <<'EOF'
+{ "name":"plugin", "version":"2.0.0", "genero":">=3.20" }
+EOF
+  run list --global
+  assert_success
+  assert_contains "plugin@2.0.0 (optional)"                  # optional FGL dep tagged
+  assert_contains "com.google.code.gson:gson  2.10.1 (optional)"  # optional JAR tagged
+  assert_contains "org.apache.poi:poi  5.5.1"                # production JAR untagged
+  assert_not_contains "org.apache.poi:poi  5.5.1 (optional)"
+}
+it "list --global tags optional dependencies" _list_global_marks_optional
+
 # Argument handling: the scope flags conflict, and a stray argument is a typo
 # worth reporting rather than silently ignoring.
 _list_rejects_bad_args() {

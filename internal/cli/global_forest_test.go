@@ -19,6 +19,25 @@ func gjar(group, artifact, version string) manifest.JavaDependency {
 	return manifest.JavaDependency{GroupID: group, ArtifactID: artifact, Version: version}
 }
 
+// fdeps builds production-scope FGL dependency edges (the common case in these
+// tests). Optional edges are written out as fglDep literals where they matter.
+func fdeps(names ...string) []fglDep {
+	out := make([]fglDep, len(names))
+	for i, n := range names {
+		out[i] = fglDep{name: n}
+	}
+	return out
+}
+
+// gjars wraps JavaDependency values as production-scope JAR edges.
+func gjars(js ...manifest.JavaDependency) []jarDep {
+	out := make([]jarDep, len(js))
+	for i, j := range js {
+		out[i] = jarDep{dep: j}
+	}
+	return out
+}
+
 // renderForest is the whole forest pipeline under test: bundled-manifest
 // metadata -> text, through the same writeTree the local tree uses.
 func renderForest(pkgs []globalPkg, maxDepth int) string {
@@ -31,8 +50,8 @@ func renderForest(pkgs []globalPkg, maxDepth int) string {
 // carrying its own declared JARs.
 func TestBuildGlobalForestIndependentRoots(t *testing.T) {
 	pkgs := []globalPkg{
-		{name: "beta", version: "2.0.0", jars: []manifest.JavaDependency{gjar("g", "b", "1")}},
-		{name: "alpha", version: "1.0.0", jars: []manifest.JavaDependency{gjar("g", "a", "1")}},
+		{name: "beta", version: "2.0.0", jars: gjars(gjar("g", "b", "1"))},
+		{name: "alpha", version: "1.0.0", jars: gjars(gjar("g", "a", "1"))},
 	}
 	got := renderForest(pkgs, 0)
 	for _, want := range []string{"alpha@1.0.0", "beta@2.0.0", "g:a  1", "g:b  1", "2 packages, 2 JARs."} {
@@ -50,8 +69,8 @@ func TestBuildGlobalForestIndependentRoots(t *testing.T) {
 // is not itself a root.
 func TestBuildGlobalForestNestsInstalledDep(t *testing.T) {
 	pkgs := []globalPkg{
-		{name: "app", version: "1.0.0", fglDeps: []string{"lib"}},
-		{name: "lib", version: "2.0.0", jars: []manifest.JavaDependency{gjar("g", "x", "1")}},
+		{name: "app", version: "1.0.0", fglDeps: fdeps("lib")},
+		{name: "lib", version: "2.0.0", jars: gjars(gjar("g", "x", "1"))},
 	}
 	got := renderForest(pkgs, 0)
 	// app is the sole root; lib hangs beneath it (indented), not at column 0.
@@ -73,8 +92,8 @@ func TestBuildGlobalForestNestsInstalledDep(t *testing.T) {
 // coordinate at two versions under two packages must show both — no dedup.
 func TestBuildGlobalForestSameCoordDistinctVersions(t *testing.T) {
 	pkgs := []globalPkg{
-		{name: "alpha", version: "1", jars: []manifest.JavaDependency{gjar("org", "log4j-api", "2.17.1")}},
-		{name: "beta", version: "1", jars: []manifest.JavaDependency{gjar("org", "log4j-api", "2.26.1")}},
+		{name: "alpha", version: "1", jars: gjars(gjar("org", "log4j-api", "2.17.1"))},
+		{name: "beta", version: "1", jars: gjars(gjar("org", "log4j-api", "2.26.1"))},
 	}
 	got := renderForest(pkgs, 0)
 	if strings.Contains(got, "(*)") {
@@ -91,8 +110,8 @@ func TestBuildGlobalForestSameCoordDistinctVersions(t *testing.T) {
 // second occurrence collapses to a (*) leaf and is not double-counted.
 func TestBuildGlobalForestSameCoordSameVersionCollapses(t *testing.T) {
 	pkgs := []globalPkg{
-		{name: "alpha", version: "1", jars: []manifest.JavaDependency{gjar("org", "x", "1.0")}},
-		{name: "beta", version: "1", jars: []manifest.JavaDependency{gjar("org", "x", "1.0")}},
+		{name: "alpha", version: "1", jars: gjars(gjar("org", "x", "1.0"))},
+		{name: "beta", version: "1", jars: gjars(gjar("org", "x", "1.0"))},
 	}
 	got := renderForest(pkgs, 0)
 	if strings.Count(got, "org:x") != 2 {
@@ -114,8 +133,8 @@ func TestBuildGlobalForestSameCoordSameVersionCollapses(t *testing.T) {
 // each a root and the (*) dedup closes the cycle.
 func TestBuildGlobalForestCycleTerminates(t *testing.T) {
 	pkgs := []globalPkg{
-		{name: "a", version: "1", fglDeps: []string{"b"}},
-		{name: "b", version: "1", fglDeps: []string{"a"}},
+		{name: "a", version: "1", fglDeps: fdeps("b")},
+		{name: "b", version: "1", fglDeps: fdeps("a")},
 	}
 	got := renderForest(pkgs, 0) // completing at all is half the assertion
 	if !strings.Contains(got, "(*)") {
@@ -130,7 +149,7 @@ func TestBuildGlobalForestCycleTerminates(t *testing.T) {
 // what is on disk, not what a manifest merely declares.
 func TestBuildGlobalForestUninstalledDepIgnored(t *testing.T) {
 	pkgs := []globalPkg{
-		{name: "app", version: "1", fglDeps: []string{"missing"}},
+		{name: "app", version: "1", fglDeps: fdeps("missing")},
 	}
 	got := renderForest(pkgs, 0)
 	if strings.Contains(got, "missing") {
@@ -145,7 +164,7 @@ func TestBuildGlobalForestUninstalledDepIgnored(t *testing.T) {
 // single-root tree's ordering — even when a JAR sorts alphabetically first.
 func TestBuildGlobalForestPackagesBeforeJars(t *testing.T) {
 	pkgs := []globalPkg{
-		{name: "app", version: "1", fglDeps: []string{"zlib"}, jars: []manifest.JavaDependency{gjar("aaa", "aaa", "1")}},
+		{name: "app", version: "1", fglDeps: fdeps("zlib"), jars: gjars(gjar("aaa", "aaa", "1"))},
 		{name: "zlib", version: "1"},
 	}
 	got := renderForest(pkgs, 0)
@@ -164,8 +183,8 @@ func TestBuildGlobalForestPackagesBeforeJars(t *testing.T) {
 // each still-unvisited package to a root of its own rather than dropping it.
 func TestBuildGlobalForestIsolatedCycleStillShown(t *testing.T) {
 	pkgs := []globalPkg{
-		{name: "a", version: "1", fglDeps: []string{"b"}},
-		{name: "b", version: "1", fglDeps: []string{"a"}},
+		{name: "a", version: "1", fglDeps: fdeps("b")},
+		{name: "b", version: "1", fglDeps: fdeps("a")},
 		{name: "c", version: "1"},
 	}
 	got := renderForest(pkgs, 0)
@@ -184,8 +203,8 @@ func TestBuildGlobalForestIsolatedCycleStillShown(t *testing.T) {
 // shows only them and their transitive nodes are truncated.
 func TestBuildGlobalForestMaxDepth(t *testing.T) {
 	pkgs := []globalPkg{
-		{name: "app", version: "1", fglDeps: []string{"lib"}},
-		{name: "lib", version: "1", jars: []manifest.JavaDependency{gjar("g", "x", "1")}},
+		{name: "app", version: "1", fglDeps: fdeps("lib")},
+		{name: "lib", version: "1", jars: gjars(gjar("g", "x", "1"))},
 	}
 	full := renderForest(pkgs, 0)
 	if !strings.Contains(full, "lib@1") || !strings.Contains(full, "g:x  1") {
@@ -200,8 +219,9 @@ func TestBuildGlobalForestMaxDepth(t *testing.T) {
 	}
 }
 
-// installedFGLDeps unions the prod and optional FGL scopes, de-duplicates, and
-// sorts; dev deps are excluded.
+// installedFGLDeps unions the prod and optional FGL scopes and de-duplicates,
+// tagging each with its scope; production wins when a name is in both buckets,
+// and dev deps are excluded.
 func TestInstalledFGLDeps(t *testing.T) {
 	m := &manifest.Manifest{}
 	m.Dependencies.FGL = map[string]string{"b": "1", "a": "1"}
@@ -209,13 +229,41 @@ func TestInstalledFGLDeps(t *testing.T) {
 	m.DevDependencies.FGL = map[string]string{"devonly": "1"}
 
 	got := installedFGLDeps(m)
-	want := []string{"a", "b", "c"}
+	// a,b are production (untagged); c is optional; b appears in both → production
+	// wins; devonly is excluded.
+	want := []fglDep{{name: "a"}, {name: "b"}, {name: "c", scope: "optional"}}
 	if len(got) != len(want) {
-		t.Fatalf("installedFGLDeps = %v, want %v", got, want)
+		t.Fatalf("installedFGLDeps = %+v, want %+v", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Fatalf("installedFGLDeps = %v, want %v", got, want)
+			t.Fatalf("installedFGLDeps = %+v, want %+v", got, want)
 		}
+	}
+}
+
+// The forest tags an optionally-declared dependency (package or JAR) with
+// (optional), just like the local tree; a production dependency stays untagged,
+// and a root — which has no incoming edge — never carries a scope.
+func TestBuildGlobalForestOptionalScopeTag(t *testing.T) {
+	pkgs := []globalPkg{
+		{name: "app", version: "1.0.0",
+			fglDeps: []fglDep{{name: "plugin", scope: "optional"}, {name: "core"}},
+			jars:    []jarDep{{dep: gjar("g", "x", "1"), scope: "optional"}}},
+		{name: "plugin", version: "2.0.0"},
+		{name: "core", version: "1.5.0"},
+	}
+	got := renderForest(pkgs, 0)
+	if !strings.Contains(got, "plugin@2.0.0 (optional)") {
+		t.Errorf("an optional FGL dependency should be tagged (optional), got:\n%s", got)
+	}
+	if !strings.Contains(got, "g:x  1 (optional)") {
+		t.Errorf("an optional JAR dependency should be tagged (optional), got:\n%s", got)
+	}
+	if !strings.Contains(got, "core@1.5.0") || strings.Contains(got, "core@1.5.0 (optional)") {
+		t.Errorf("a production FGL dependency must stay untagged, got:\n%s", got)
+	}
+	if strings.Contains(got, "app@1.0.0 (") {
+		t.Errorf("a root package has no incoming edge and must not carry a scope, got:\n%s", got)
 	}
 }
