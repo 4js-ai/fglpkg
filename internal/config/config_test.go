@@ -66,6 +66,40 @@ func TestResolve_ProjectWinsPerName(t *testing.T) {
 	}
 }
 
+// A same-named project registry REPLACES the global one wholesale, it does not
+// field-merge: fields the project omits (auth, packages) revert to their own
+// defaults/empty rather than inheriting the global entry's values. Guards the
+// documented "repeat url/auth/repoKey when you override" contract against a
+// future accidental field-merge.
+func TestResolve_ProjectReplacesSameNameWholesale(t *testing.T) {
+	global := []Registry{{
+		Name: "acme", Type: TypeArtifactory, URL: "https://global/artifactory", RepoKey: "G",
+		Priority: 2, Auth: AuthBasic, Packages: []string{"acme-*"},
+	}}
+	// The project restates only url/repoKey/priority — no auth, no packages.
+	project := []Registry{{Name: "acme", Type: TypeArtifactory, URL: "https://local/artifactory", RepoKey: "L", Priority: 2}}
+	regs, err := Resolve(BuiltinGI(""), global, project)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	acme, ok := Find(regs, "acme")
+	if !ok {
+		t.Fatal("acme missing from merged set")
+	}
+	if acme.URL != "https://local/artifactory" || acme.RepoKey != "L" {
+		t.Errorf("project url/repoKey should win: %+v", acme)
+	}
+	if acme.Auth == AuthBasic {
+		t.Errorf("global auth leaked into the project entry (field-merge, not wholesale replace): %+v", acme)
+	}
+	if acme.Auth != AuthBearer { // omitted auth normalises to the bearer default
+		t.Errorf("omitted project auth should default to bearer, got %q", acme.Auth)
+	}
+	if len(acme.Packages) != 0 {
+		t.Errorf("global packages allow-list leaked into the project entry: %+v", acme.Packages)
+	}
+}
+
 func TestResolve_RetargetGIByName(t *testing.T) {
 	project := []Registry{{Name: "gi", Type: TypeGenero, URL: "https://internal-gi.example"}}
 	regs, err := Resolve(BuiltinGI(""), nil, project)
