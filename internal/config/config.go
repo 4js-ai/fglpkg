@@ -231,6 +231,22 @@ func GlobalMavenMirror(home string) (*MavenMirror, error) {
 	return g.MavenMirror, err
 }
 
+// ResolveScalar returns the effective value of a "replace-semantics" config key
+// under the standard GIS-368 precedence — environment > local (project) > global
+// (user) — or "" when none is set. A whitespace-only value counts as unset, so a
+// blank higher layer never shadows a set lower one, and the returned value is
+// trimmed. It is the single source of truth for scalar config precedence;
+// collection keys (registries) merge via Resolve instead. Callers pass the
+// already-read values so this package stays free of the manifest import.
+func ResolveScalar(env, local, global string) string {
+	for _, v := range []string{env, local, global} {
+		if t := strings.TrimSpace(v); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
 // Load resolves the effective registry set: built-in GI (honoring
 // FGLPKG_REGISTRY) ⊕ the global ~/.fglpkg/config.json ⊕ the project's manifest
 // registries. The project registries are passed in by the caller so this
@@ -366,4 +382,82 @@ func Find(regs []Registry, name string) (Registry, bool) {
 		}
 	}
 	return Registry{}, false
+}
+
+// RoutingLint is one project-layer config diagnostic from LintProjectRouting: a
+// field-tagged message the caller renders as an error or a warning.
+type RoutingLint struct {
+	Field   string
+	Message string
+	Warning bool // false = error
+}
+
+// LintProjectRouting validates a project's routing config — its registries and
+// the defaults/mirror that reference them — in ISOLATION, deliberately without
+// the user's global config, so a checked-in fglpkg.json can be checked for
+// portability across machines (GIS-368).
+//
+// A malformed registry is an error (Load would reject it anyway); a default that
+// names a registry this project does not itself declare is a warning, since it
+// may legitimately be supplied by the user's global config on some machines but
+// would not resolve on a fresh clone.
+func LintProjectRouting(registries []Registry, defaultRegistry, defaultConsumeRegistry string, mirror *MavenMirror) []RoutingLint {
+	var out []RoutingLint
+	declared := map[string]bool{GIName: true} // the built-in GI always resolves
+	// Reserve priority 1 for the built-in GI: Resolve adds it first at priority 1,
+	// so a project registry that also claims priority 1 hard-fails load. Seeding it
+	// here makes lint catch that collision instead of emitting a false OK.
+	seenPriority := map[int]string{1: GIName}
+	for _, r := range registries {
+		rc := r // normalise a copy so the checks match load-time behaviour
+		rc.URL = strings.TrimRight(rc.URL, "/")
+		if rc.Auth == "" {
+			rc.Auth = AuthBearer
+		}
+		if rc.Name == GIName {
+			out = append(out, RoutingLint{Field: "registries", Message: fmt.Sprintf("%q is the built-in registry and cannot be redeclared", GIName)})
+			continue
+		}
+		if err := validate(rc); err != nil {
+			out = append(out, RoutingLint{Field: "registries", Message: err.Error()})
+			continue
+		}
+		if other, dup := seenPriority[rc.Priority]; dup {
+			out = append(out, RoutingLint{Field: "registries", Message: fmt.Sprintf(
+				"registries %q and %q share priority %d; priorities must be unique", other, rc.Name, rc.Priority)})
+		}
+		seenPriority[rc.Priority] = rc.Name
+		declared[rc.Name] = true
+	}
+	checkDefault := func(field, name string) {
+		if name != "" && !declared[name] {
+			out = append(out, RoutingLint{Field: field, Warning: true, Message: fmt.Sprintf(
+				"%s %q is not declared in this project's registries; it resolves only if the user's global config defines it",
+				field, name)})
+		}
+	}
+	checkDefault("defaultRegistry", defaultRegistry)
+	checkDefault("defaultConsumeRegistry", defaultConsumeRegistry)
+	if mirror != nil {
+		switch {
+		case strings.TrimSpace(mirror.URL) == "":
+			out = append(out, RoutingLint{Field: "mavenMirror", Warning: true, Message: "mavenMirror has no 'url'; it will be ignored"})
+		case !isHTTPURL(mirror.URL):
+			out = append(out, RoutingLint{Field: "mavenMirror", Warning: true, Message: fmt.Sprintf(
+				"mavenMirror url %q should be an http(s) URL", strings.TrimSpace(mirror.URL))})
+		}
+		switch mirror.Auth {
+		case "", AuthBearer, AuthBasic, AuthAPIKey, AuthAnonymous:
+			// ok — "" defaults to bearer
+		default:
+			out = append(out, RoutingLint{Field: "mavenMirror", Message: fmt.Sprintf(
+				"mavenMirror auth %q is unknown (expected bearer|basic|apikey|anonymous)", mirror.Auth)})
+		}
+	}
+	return out
+}
+
+func isHTTPURL(s string) bool {
+	s = strings.ToLower(strings.TrimSpace(s))
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
 }

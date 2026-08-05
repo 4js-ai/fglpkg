@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/4js-mikefolcher/fglpkg/internal/config"
 )
 
 // Severity classifies a lint Diagnostic. Errors block (fglpkg lint exits
@@ -116,6 +118,18 @@ func (m *Manifest) LintInto(r *Report) {
 	// file to pack; the message reports the canonical spelling.
 	if dups := duplicatePaths(m.Profile); len(dups) > 0 {
 		r.Warnf("profile", "duplicate profile file(s): %s", strings.Join(dups, ", "))
+	}
+
+	// Routing config (registries + the defaults/mirror that reference them),
+	// validated as the checked-in project layer in isolation so it stays portable
+	// across machines (GIS-368). config owns the rule; we map its findings to the
+	// report's error/warning severities.
+	for _, d := range config.LintProjectRouting(m.Registries, m.DefaultRegistry, m.DefaultConsumeRegistry, m.MavenMirror) {
+		if d.Warning {
+			r.Warnf(d.Field, "%s", d.Message)
+		} else {
+			r.Errorf(d.Field, "%s", d.Message)
+		}
 	}
 }
 
