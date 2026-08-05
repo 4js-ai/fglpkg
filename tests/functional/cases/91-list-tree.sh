@@ -170,16 +170,110 @@ EOF
 }
 it "list reports a really-installed JAR, and falls back to flat with no lock" _list_after_real_install
 
-# The global store has no lock file at all, so it is always flat — and must not
-# claim a missing lock is a problem there.
-_list_global_is_flat() {
+# The global store has no lock file — that lives beside a project's fglpkg.json —
+# so an EMPTY global store has nothing to report and must not claim a missing lock
+# is a problem there. (A project lock nearby is irrelevant: --global ignores it.)
+_list_global_empty() {
   _fixture_lock
   run list --global
   assert_success
   assert_contains "No packages installed."
   assert_not_contains "no fglpkg.lock"
 }
-it "list --global stays flat and reports the empty global store" _list_global_is_flat
+it "list --global reports an empty global store without a lock complaint" _list_global_empty
+
+# A POPULATED global store gets a tree too, even with no lock: parentage is
+# reconstructed from the bundled fglpkg.json of every installed package. Here app
+# requires lib (so lib nests under app, not at the top level) and each declares a
+# JAR, which hangs under the package whose manifest declares it. No install — the
+# manifests are placed directly in the global store, as _fixture_lock does for a
+# project.
+_list_global_forest_nests() {
+  mkdir -p "$FGLPKG_HOME/packages/app" "$FGLPKG_HOME/packages/lib"
+  cat > "$FGLPKG_HOME/packages/app/fglpkg.json" <<'EOF'
+{ "name":"app", "version":"1.0.0", "genero":">=3.20",
+  "dependencies": {
+    "fgl": { "lib": "^2.0.0" },
+    "java": [ { "groupId":"com.google.code.gson", "artifactId":"gson", "version":"2.10.1" } ]
+  } }
+EOF
+  cat > "$FGLPKG_HOME/packages/lib/fglpkg.json" <<'EOF'
+{ "name":"lib", "version":"2.0.0", "genero":">=3.20",
+  "dependencies": { "java": [ { "groupId":"org.apache.poi", "artifactId":"poi", "version":"5.3.0" } ] } }
+EOF
+  run list --global
+  assert_success
+  assert_contains "Global packages"
+  # app is the sole root; lib nests beneath it (Genero package child before JARs).
+  assert_contains "└─ app@1.0.0"
+  assert_contains "   ├─ lib@2.0.0"
+  # poi hangs off lib, the package that declared it — not off app.
+  assert_contains "   │  └─ org.apache.poi:poi  5.3.0"
+  # app's own JAR stays under app, after the package children.
+  assert_contains "   └─ com.google.code.gson:gson  2.10.1"
+  assert_contains "2 packages, 2 JARs."
+}
+it "list --global reconstructs a dependency forest from bundled manifests" _list_global_forest_nests
+
+# --flat still forces the pre-tree listing on a populated global store, for
+# scripts: packages then JARs, no glyphs.
+_list_global_flat_override() {
+  mkdir -p "$FGLPKG_HOME/packages/app"
+  cat > "$FGLPKG_HOME/packages/app/fglpkg.json" <<'EOF'
+{ "name":"app", "version":"1.0.0", "genero":">=3.20" }
+EOF
+  run list --global --flat
+  assert_success
+  assert_contains "Installed packages:"
+  assert_contains "app"
+  assert_not_contains "└─"
+  assert_not_contains "├─"
+}
+it "list --global --flat keeps the plain listing" _list_global_flat_override
+
+# The global store installs each package's own declared JARs, so the same
+# coordinate at two versions (under two independent packages) shows both — the
+# faithful reconstruction a single shared lock could not represent.
+_list_global_distinct_jar_versions() {
+  mkdir -p "$FGLPKG_HOME/packages/alpha" "$FGLPKG_HOME/packages/beta"
+  cat > "$FGLPKG_HOME/packages/alpha/fglpkg.json" <<'EOF'
+{ "name":"alpha", "version":"1.0.0", "genero":">=3.20",
+  "dependencies": { "java": [ { "groupId":"org.apache.logging.log4j", "artifactId":"log4j-api", "version":"2.17.1" } ] } }
+EOF
+  cat > "$FGLPKG_HOME/packages/beta/fglpkg.json" <<'EOF'
+{ "name":"beta", "version":"1.0.0", "genero":">=3.20",
+  "dependencies": { "java": [ { "groupId":"org.apache.logging.log4j", "artifactId":"log4j-api", "version":"2.26.1" } ] } }
+EOF
+  run list --global
+  assert_success
+  assert_contains "org.apache.logging.log4j:log4j-api  2.17.1"
+  assert_contains "org.apache.logging.log4j:log4j-api  2.26.1"
+  assert_contains "2 packages, 2 JARs."
+}
+it "list --global keeps per-package JAR versions distinct" _list_global_distinct_jar_versions
+
+# An optionally-declared dependency (package or JAR) is tagged (optional) in the
+# forest, just as in the local tree; a production dependency stays untagged.
+_list_global_marks_optional() {
+  mkdir -p "$FGLPKG_HOME/packages/app" "$FGLPKG_HOME/packages/plugin"
+  cat > "$FGLPKG_HOME/packages/app/fglpkg.json" <<'EOF'
+{ "name":"app", "version":"1.0.0", "genero":">=3.20",
+  "dependencies": { "java": [ { "groupId":"org.apache.poi", "artifactId":"poi", "version":"5.5.1" } ] },
+  "optionalDependencies": {
+    "fgl": { "plugin": "^2.0.0" },
+    "java": [ { "groupId":"com.google.code.gson", "artifactId":"gson", "version":"2.10.1" } ] } }
+EOF
+  cat > "$FGLPKG_HOME/packages/plugin/fglpkg.json" <<'EOF'
+{ "name":"plugin", "version":"2.0.0", "genero":">=3.20" }
+EOF
+  run list --global
+  assert_success
+  assert_contains "plugin@2.0.0 (optional)"                  # optional FGL dep tagged
+  assert_contains "com.google.code.gson:gson  2.10.1 (optional)"  # optional JAR tagged
+  assert_contains "org.apache.poi:poi  5.5.1"                # production JAR untagged
+  assert_not_contains "org.apache.poi:poi  5.5.1 (optional)"
+}
+it "list --global tags optional dependencies" _list_global_marks_optional
 
 # Argument handling: the scope flags conflict, and a stray argument is a typo
 # worth reporting rather than silently ignoring.

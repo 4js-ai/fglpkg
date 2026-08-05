@@ -840,7 +840,7 @@ func resolveHome(forceLocal, forceGlobal bool) (home string, isLocal bool, err e
 		return filepath.Join(wd, ".fglpkg"), true, nil
 	}
 	if forceGlobal {
-		h, err := fglpkgHome()
+		h, err := fglpkgGlobalDir()
 		return h, false, err
 	}
 	// Context-aware: check if we're inside a project.
@@ -848,7 +848,7 @@ func resolveHome(forceLocal, forceGlobal bool) (home string, isLocal bool, err e
 		wd, _ := os.Getwd()
 		return filepath.Join(wd, ".fglpkg"), true, nil
 	}
-	h, err := fglpkgHome()
+	h, err := fglpkgGlobalDir()
 	return h, false, err
 }
 
@@ -1204,7 +1204,10 @@ func cmdEnv(args []string) error {
 		return err
 	}
 
-	home, err := fglpkgHome()
+	// env's global scope reads the global package root, which may live apart from
+	// the config/credentials home (GIS-367). The local scope is derived from the
+	// working directory independently inside the generator.
+	home, err := fglpkgGlobalDir()
 	if err != nil {
 		return err
 	}
@@ -1308,13 +1311,16 @@ func cmdRelink(args []string) error {
 		}
 		did = true
 	}
-	// Global scope: when forced, or by default (always).
+	// Global scope: when forced, or by default (always). relink rebuilds the
+	// merged root under the global PACKAGE root, which GIS-367 split from the
+	// config/credentials home — so it must resolve fglpkgGlobalDir(), not
+	// fglpkgHome(), or it would rebuild an empty merged/ beside the config.
 	if !forceLocal {
-		globalHome, err := fglpkgHome()
+		globalRoot, err := fglpkgGlobalDir()
 		if err != nil {
 			return err
 		}
-		if err := relinkScope(globalHome, projectDir, false, "global"); err != nil {
+		if err := relinkScope(globalRoot, projectDir, false, "global"); err != nil {
 			return err
 		}
 		did = true
@@ -3015,8 +3021,10 @@ func cmdBdl(args []string) error {
 		return err
 	}
 
-	// Build the environment.
-	home, err := fglpkgHome()
+	// Build the environment. Programs run through `fglpkg bdl` resolve their
+	// modules and resources from the global package root (GIS-367), which may
+	// live apart from the config/credentials home.
+	home, err := fglpkgGlobalDir()
 	if err != nil {
 		return err
 	}
@@ -3093,7 +3101,7 @@ func cmdBdlList() error {
 	scanPackages(localPkgs, "local")
 
 	// Global packages.
-	home, err := fglpkgHome()
+	home, err := fglpkgGlobalDir()
 	if err == nil {
 		globalPkgs := filepath.Join(home, "packages")
 		if globalPkgs != localPkgs {
@@ -4148,9 +4156,11 @@ func cmdRunList() error {
 		wd, _ := os.Getwd()
 		scanPackagesDir(filepath.Join(wd, ".fglpkg", "packages"), "local")
 	}
-	globalHome, err := fglpkgHome()
+	// Global bin commands live under the global PACKAGE root (GIS-367), not the
+	// config/credentials home.
+	globalRoot, err := fglpkgGlobalDir()
 	if err == nil {
-		scanPackagesDir(filepath.Join(globalHome, "packages"), "global")
+		scanPackagesDir(filepath.Join(globalRoot, "packages"), "global")
 	}
 
 	if len(entries) == 0 {
@@ -4204,10 +4214,12 @@ func findBinCommand(commandName string) (scriptPath, pkgName string, err error) 
 		}
 	}
 
-	globalHome, homeErr := fglpkgHome()
+	// Resolve bin commands from the global PACKAGE root (GIS-367), not the
+	// config/credentials home.
+	globalRoot, rootErr := fglpkgGlobalDir()
 	globalPkgs := ""
-	if homeErr == nil {
-		globalPkgs = filepath.Join(globalHome, "packages")
+	if rootErr == nil {
+		globalPkgs = filepath.Join(globalRoot, "packages")
 	}
 
 	// Scan local packages first (higher priority).
@@ -4322,7 +4334,7 @@ func findInstalledPackage(name string) (string, *manifest.Manifest, error) {
 			return localDir, m, nil
 		}
 	}
-	globalHome, err := fglpkgHome()
+	globalHome, err := fglpkgGlobalDir()
 	if err == nil {
 		globalDir := filepath.Join(globalHome, "packages", slug)
 		if m, err := manifest.Load(globalDir); err == nil {
@@ -4495,7 +4507,11 @@ COMMANDS:
 Run 'fglpkg <command> --help' for command-specific options.
 
 ENVIRONMENT:
-  FGLPKG_HOME              Override ~/.fglpkg
+  FGLPKG_HOME              Override ~/.fglpkg (user config + credentials; also the
+                           global package root unless FGLPKG_GLOBAL_DIR is set)
+  FGLPKG_GLOBAL_DIR        Root for globally-installed packages, kept separate from
+                           config/credentials. When unset, defaults to
+                           $FGLDIR/fglpkg if FGLDIR is set and writable, else ~/.fglpkg
   FGLPKG_REGISTRY          GI registry URL for install/search/audit/whoami/publish.
                            Default: https://service.generointelligence.ai
   FGLPKG_TOKEN             Bearer token for the GI registry. Takes precedence over
@@ -4549,6 +4565,106 @@ func fglpkgHome() (string, error) {
 		return "", fmt.Errorf("cannot determine home directory: %w", err)
 	}
 	return filepath.Join(home, ".fglpkg"), nil
+}
+
+// globalDirNoted dedups the FGLDIR-relocation note WITHIN a single command:
+// fglpkgGlobalDir can be called several times per invocation, and the note should
+// print at most once. It is intentionally not persisted, so the note reappears on
+// each command until the relocation is resolved (the new root is populated, or
+// FGLPKG_GLOBAL_DIR is set) — a standing reminder, not a one-shot that hides an
+// unresolved problem. A command runs single-threaded, so a plain bool suffices.
+var globalDirNoted bool
+
+// fglpkgGlobalDir returns the root under which GLOBAL packages are installed
+// (packages/, jars/, webcomponents/, merged/). It is deliberately distinct from
+// fglpkgHome(), which holds user config + credentials — GIS-367 split the two so
+// global installs can be bound to a Genero version without also moving
+// credentials. Precedence (first match wins):
+//
+//  1. $FGLPKG_GLOBAL_DIR — explicit override for the package root;
+//  2. $FGLPKG_HOME       — honoured for back-compat: it has always governed the
+//     global package root, so a user (or the test harness) that sets it keeps
+//     that behaviour and nothing silently moves;
+//  3. $FGLDIR/fglpkg     — when FGLDIR is set and that path is writable, binding a
+//     default install to the Genero version;
+//  4. ~/.fglpkg          — the historical default.
+func fglpkgGlobalDir() (string, error) {
+	if d := strings.TrimSpace(os.Getenv("FGLPKG_GLOBAL_DIR")); d != "" {
+		return d, nil
+	}
+	if strings.TrimSpace(os.Getenv("FGLPKG_HOME")) != "" {
+		return fglpkgHome() // explicit home still governs the package root
+	}
+	home, err := fglpkgHome()
+	if err != nil {
+		return "", err
+	}
+	if fgldir := strings.TrimSpace(os.Getenv("FGLDIR")); fgldir != "" {
+		// FGLDIR must be an existing Genero installation directory. A stale or
+		// mistyped value — whose parent merely happens to be writable — must not
+		// capture the global store and strand the packages under ~/.fglpkg, so
+		// require the directory itself, not just a creatable path, before binding.
+		if fi, err := os.Stat(fgldir); err == nil && fi.IsDir() {
+			cand := filepath.Join(fgldir, "fglpkg")
+			if dirWritable(cand) {
+				noteGlobalDirRelocation(cand, home)
+				return cand, nil
+			}
+		}
+	}
+	return home, nil
+}
+
+// dirWritable reports whether dir is a directory we can create files in — or, if
+// it does not exist yet, whether its nearest existing ancestor is, so it could be
+// created. It probes by creating and removing a temp file, which is portable
+// across Windows and Unix where the mode bits alone are unreliable.
+func dirWritable(dir string) bool {
+	probe := dir
+	for {
+		if fi, err := os.Stat(probe); err == nil {
+			if !fi.IsDir() {
+				return false
+			}
+			break
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return false // reached the filesystem root; nothing on the path exists
+		}
+		probe = parent
+	}
+	f, err := os.CreateTemp(probe, ".fglpkg-writetest-*")
+	if err != nil {
+		return false
+	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
+	return true
+}
+
+// noteGlobalDirRelocation prints a stderr note (at most once per command, and
+// only until the relocation is resolved) when global packages have moved under
+// FGLDIR but a pre-split install still sits under ~/.fglpkg, so a user whose
+// `list`/`bdl` suddenly looks empty learns where their packages went and how to
+// keep the old location. Silent once the new root is populated, or when there is
+// nothing to strand.
+func noteGlobalDirRelocation(chosen, home string) {
+	if globalDirNoted || chosen == home {
+		return
+	}
+	legacy, err := os.ReadDir(filepath.Join(home, "packages"))
+	if err != nil || len(legacy) == 0 {
+		return // no pre-split global install to strand
+	}
+	if moved, err := os.ReadDir(filepath.Join(chosen, "packages")); err == nil && len(moved) > 0 {
+		return // the new location is already in use
+	}
+	globalDirNoted = true
+	fmt.Fprintf(os.Stderr, "note: global packages now resolve under %s (bound to FGLDIR).\n", chosen)
+	fmt.Fprintf(os.Stderr, "      Existing global packages under %s are not on this path;\n", filepath.Join(home, "packages"))
+	fmt.Fprintf(os.Stderr, "      reinstall them, or set FGLPKG_GLOBAL_DIR=%s to keep the old location.\n", home)
 }
 
 func newInstaller(home string, m *manifest.Manifest) *installer.Installer {
