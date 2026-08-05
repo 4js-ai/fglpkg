@@ -255,12 +255,11 @@ func listGlobalForest(w io.Writer, inst *installer.Installer, globalRoot string,
 		gp := globalPkg{name: ip.Name, version: ip.Version}
 		// A package with no readable manifest still shows as a childless node —
 		// we know it is installed, we just cannot recover its dependencies.
+		// inst.List() already read the version from this same manifest, so there
+		// is nothing to re-derive here — only the dependency lists.
 		if m, err := manifest.Load(filepath.Join(inst.PackagesDir(), ip.Name)); err == nil {
 			gp.fglDeps = installedFGLDeps(m)
 			gp.jars = append(append([]manifest.JavaDependency(nil), m.Dependencies.Java...), m.OptionalDependencies.Java...)
-			if gp.version == "" || gp.version == "unknown" {
-				gp.version = m.Version
-			}
 		}
 		pkgs = append(pkgs, gp)
 	}
