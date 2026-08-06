@@ -472,16 +472,28 @@ func reportPruned(pruned []string) {
 	}
 }
 
-// installFromLock installs every entry in the lock file using its pinned
-// URLs and checksums, bypassing the resolver entirely. When opts.Production
-// is true, dev-scoped entries are skipped.
-// lockInstallError turns a per-artifact failure during a lock-based install
-// into an actionable message (GIS-283). A pin the registry no longer serves
-// (ErrArtifactGone) names name@version and the ways out; a transient failure
-// says so and suggests a retry; any other error keeps its detail with
-// name@version context. `fglpkg remove <name>` and `fglpkg update` apply equally
-// to BDL and webcomponent packages, so no kind distinction is needed.
-func lockInstallError(name, version string, err error) error {
+// lockError carries an actionable, user-facing message while still unwrapping to
+// the failure that caused it, so errors.Is/As keep working on the download
+// sentinels after translation. fmt.Errorf's %w cannot be used for this: it splices
+// the wrapped error's text into the message, and removing that raw HTTP wording is
+// the whole point of GIS-283 — so the message and the cause are carried separately.
+type lockError struct {
+	msg   string
+	cause error
+}
+
+func (e *lockError) Error() string { return e.msg }
+func (e *lockError) Unwrap() error { return e.cause }
+
+// lockInstallError turns a per-artifact failure during a lock-based install into
+// an actionable message (GIS-283). A pin the registry no longer serves
+// (ErrArtifactGone) names name@version and the ways out; a transient failure says
+// so and suggests a retry; any other error keeps its detail with name@version
+// context. `fglpkg remove <name>` and `fglpkg update` apply equally to BDL and
+// webcomponent packages, so the remedies need no kind distinction — kind is used
+// only to keep the fallback message specific ("" for a package).
+// Every branch preserves err in the chain, so a caller can still classify.
+func lockInstallError(kind, name, version string, err error) error {
 	switch {
 	case errors.Is(err, ErrArtifactGone):
 		// A "not found" is evidence the registry will not serve this pin, NOT
@@ -492,15 +504,30 @@ func lockInstallError(name, version string, err error) error {
 		// unauthenticated user to `fglpkg remove` — dropping a dependency they
 		// still need. So name the observation, list the causes, and offer login
 		// alongside update/remove.
-		return errors.New(goneMessage(name, version))
+		return &lockError{msg: goneMessage(name, version), cause: err}
 	case errors.Is(err, ErrDownloadTransient):
-		return fmt.Errorf(
-			"could not download %s@%s from the registry: %v\n"+
-				"  this looks like a temporary network problem — check your connection and retry",
-			name, version, err)
+		// The cause already ends in the sentinel's "temporary download failure",
+		// so the advice line adds only the action — restating the transience
+		// here said it twice. (Wording the sentinel itself for a caller-facing
+		// read is tracked separately.)
+		return &lockError{
+			msg: fmt.Sprintf("could not install %s@%s: %v\n"+
+				"  this is usually transient — check your connection and retry",
+				name, version, err),
+			cause: err,
+		}
 	default:
-		return fmt.Errorf("failed to install %s@%s: %w", name, version, err)
+		return fmt.Errorf("failed to install %s%s@%s: %w", kindPrefix(kind), name, version, err)
 	}
+}
+
+// kindPrefix renders an artifact-kind label for a message, e.g. "webcomponent ".
+// Empty for an ordinary BDL package, which needs no qualifier.
+func kindPrefix(kind string) string {
+	if kind == "" {
+		return ""
+	}
+	return kind + " "
 }
 
 // goneMessage renders the ErrArtifactGone advice: what was observed, the causes
@@ -531,6 +558,9 @@ func goneMessage(name, version string) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// installFromLock installs every entry in the lock file using its pinned
+// URLs and checksums, bypassing the resolver entirely. When opts.Production
+// is true, dev-scoped entries are skipped.
 func (i *Installer) installFromLock(lf *lockfile.LockFile, root *manifest.Manifest, opts Options, projectDir string) error {
 	var pkgs []lockfile.LockedPackage
 	var jars []lockfile.LockedJAR
@@ -567,7 +597,7 @@ func (i *Installer) installFromLock(lf *lockfile.LockFile, root *manifest.Manife
 			Signature:   lockSignature(pkg.SignatureKeyID, pkg.Signature),
 		}
 		if err := i.Install(info); err != nil {
-			return lockInstallError(pkg.Name, pkg.Version, err)
+			return lockInstallError("", pkg.Name, pkg.Version, err)
 		}
 		// The signed artifact variant is "genero<major>" (or the record's
 		// own variant when the lock predates that field).
@@ -602,7 +632,7 @@ func (i *Installer) installFromLock(lf *lockfile.LockFile, root *manifest.Manife
 			Signature:   lockSignature(wc.SignatureKeyID, wc.Signature),
 		}
 		if err := i.Install(info); err != nil {
-			return lockInstallError(wc.Name, wc.Version, err)
+			return lockInstallError("webcomponent", wc.Name, wc.Version, err)
 		}
 		if err := i.verifySignature(info, "webcomponent"); err != nil {
 			return fmt.Errorf("failed to install webcomponent %s: %w", wc.Name, err)

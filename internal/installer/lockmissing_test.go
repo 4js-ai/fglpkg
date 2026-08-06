@@ -2,6 +2,7 @@ package installer
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -150,5 +151,48 @@ func TestDownloadErrorClassification(t *testing.T) {
 	dead.Close()
 	if err := call(deadURL + "/x"); !errors.Is(err, ErrDownloadTransient) {
 		t.Errorf("a transport failure should classify as ErrDownloadTransient, got %v", err)
+	}
+}
+
+// TestLockInstallErrorPreservesChain: translating a download failure into an
+// actionable message must not sever the error chain. ErrArtifactGone and
+// ErrDownloadTransient are exported for classification, so a caller (a CI wrapper,
+// a retry loop) has to be able to errors.Is the translated error — while the
+// message stays free of the raw HTTP wording GIS-283 removed.
+func TestLockInstallErrorPreservesChain(t *testing.T) {
+	cases := []struct {
+		name     string
+		cause    error
+		sentinel error
+	}{
+		{"gone", fmt.Errorf("HTTP 404 downloading x from http://r/x.zip: %w", ErrArtifactGone), ErrArtifactGone},
+		{"transient", fmt.Errorf("HTTP 503 downloading x from http://r/x.zip: %w", ErrDownloadTransient), ErrDownloadTransient},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := lockInstallError("", "ghostpkg", "2.1.0", tc.cause)
+			if !errors.Is(got, tc.sentinel) {
+				t.Errorf("translated error should still unwrap to the sentinel, got: %v", got)
+			}
+		})
+	}
+	// The gone message must remain clean despite now wrapping the cause: %w would
+	// have spliced "HTTP 404 downloading ..." back into the text.
+	msg := lockInstallError("", "ghostpkg", "2.1.0", cases[0].cause).Error()
+	if strings.Contains(msg, "downloading") {
+		t.Errorf("wrapping must not reintroduce the raw HTTP wording:\n%s", msg)
+	}
+}
+
+// TestLockInstallErrorKeepsWebcomponentQualifier: the fallback branch names the
+// artifact kind, so an unclassified webcomponent failure still reads as one —
+// matching the signature-verification error reported alongside it.
+func TestLockInstallErrorKeepsWebcomponentQualifier(t *testing.T) {
+	plain := errors.New("boom")
+	if got := lockInstallError("webcomponent", "chart", "1.0.0", plain).Error(); !strings.Contains(got, "webcomponent chart@1.0.0") {
+		t.Errorf("webcomponent failure should name the kind, got: %s", got)
+	}
+	if got := lockInstallError("", "mypkg", "1.0.0", plain).Error(); !strings.Contains(got, "install mypkg@1.0.0") {
+		t.Errorf("a package needs no qualifier, got: %s", got)
 	}
 }
