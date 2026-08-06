@@ -92,6 +92,14 @@ func cmdPack(args []string) error {
 		fmt.Printf("  %8d  %s\n", e.size, e.name)
 	}
 
+	// Flag an asset-less package inline with the listing so the mistake is
+	// visible right where the user is inspecting contents (GIS-276). pack still
+	// succeeds — it is publish that refuses this unless --allow-empty.
+	if built.empty {
+		fmt.Printf("\n⚠ no assets: only %s and files matched by \"docs\" were staged.\n", manifest.Filename)
+		fmt.Printf("  'fglpkg publish' will refuse this package unless you pass --allow-empty.\n")
+	}
+
 	if listOnly {
 		return nil
 	}

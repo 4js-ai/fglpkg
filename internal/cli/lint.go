@@ -50,15 +50,26 @@ type builtPackage struct {
 	zip      []byte
 	checksum string
 	entries  []zipEntry
+	// empty is the GIS-276 verdict: the staged archive holds no asset — nothing
+	// but fglpkg.json and files matched solely by `docs`. pack flags it, publish
+	// refuses it unless --allow-empty.
+	empty bool
 }
 
 // lintManifest runs the full lint pass and returns the combined report. It is
 // the report-only view used by `fglpkg lint` and the tests; pack/publish call
 // lintProject directly so they can reuse the built package.
 func lintManifest(m *manifest.Manifest, srcDir string) *manifest.Report {
-	report, _, buildErr := lintProject(m, srcDir)
+	report, built, buildErr := lintProject(m, srcDir)
 	if buildErr != nil {
 		report.Errorf("", "package cannot be built: %s", buildErr.Error())
+	}
+	// An asset-less package is a warning, not an error: it is legitimately
+	// publishable with `fglpkg publish --allow-empty`, so `lint` flags it loudly
+	// but still exits 0 (GIS-276). pack/publish read built.empty directly.
+	if built != nil && built.empty {
+		report.Warnf("", "package would publish with no assets — only %s and files matched by \"docs\" were staged; check your \"files\" / \"webcomponents\" declarations",
+			manifest.Filename)
 	}
 	return report
 }
@@ -101,7 +112,7 @@ func lintProject(m *manifest.Manifest, srcDir string) (*manifest.Report, *builtP
 
 	// Zero-match globs. Only explicit patterns are checked — the default
 	// *.42m/*.42f/*.sch set is not user-authored, so its not-matching is
-	// covered by the no-modules error instead.
+	// covered by the empty-package guard instead.
 	lintZeroMatchFiles(m, srcDir, root, report)
 	lintZeroMatchDocs(m, srcDir, report)
 
@@ -109,7 +120,7 @@ func lintProject(m *manifest.Manifest, srcDir string) (*manifest.Report, *builtP
 	// error (importRoot escape, missing bin script, webcomponent entry point,
 	// path collision, nonexistent root, …) is a real, blocking build failure —
 	// returned as buildErr so the caller frames it honestly.
-	zipData, checksum, err := buildPackageZip(m)
+	zipData, checksum, empty, err := buildPackageZipClassified(m)
 	if err != nil {
 		return report, nil, err
 	}
@@ -117,29 +128,22 @@ func lintProject(m *manifest.Manifest, srcDir string) (*manifest.Report, *builtP
 	if err != nil {
 		return report, nil, err
 	}
-	built := &builtPackage{zip: zipData, checksum: checksum, entries: entries}
+	built := &builtPackage{zip: zipData, checksum: checksum, entries: entries, empty: empty}
 
-	// Collect the basenames of staged .42m modules for the program and
-	// no-modules checks.
+	// Collect the basenames of staged .42m modules for the program check.
 	modules := make(map[string]bool)
-	hasBDL := false
 	for _, e := range entries {
 		base := filepath.Base(e.name)
 		if strings.HasSuffix(base, ".42m") {
 			modules[base] = true
 		}
-		if isBDLSourceFile(base) {
-			hasBDL = true
-		}
 	}
 
-	// No BDL modules / empty package. Scoped with the same gate stagePackage
-	// uses to decide whether to run the BDL walk, so pure-webcomponent packages
-	// (which legitimately ship no BDL) are exempt.
-	if (m.HasBDLContent() || !m.HasWebcomponents()) && !hasBDL {
-		report.Errorf("", "package would contain no BDL modules or source files — "+
-			"check `root` and `files`, or add modules under %q", root)
-	}
+	// The empty-package check (a staged archive holding nothing but fglpkg.json
+	// and docs) is kind-agnostic and lives on built.empty. lintManifest turns it
+	// into a warning for `fglpkg lint`; pack flags it; publish refuses it unless
+	// --allow-empty (GIS-276). It replaces the old BDL-only "no modules" error,
+	// which mis-fired on legitimate bin-/include-/webcomponent-only packages.
 
 	// Program resolution: each declared program must have a staged <name>.42m.
 	for _, p := range m.Programs {
@@ -244,19 +248,6 @@ func lintZeroMatchDocs(m *manifest.Manifest, srcDir string, report *manifest.Rep
 			report.Warnf("docs", "pattern %q matched no files", p)
 		}
 	}
-}
-
-// bdlSourceExtensions are the file kinds that count as "BDL content" for the
-// no-modules check: compiled modules/forms/schemas and 4gl/per source.
-var bdlSourceExtensions = []string{".42m", ".42f", ".42s", ".sch", ".4gl", ".per"}
-
-func isBDLSourceFile(base string) bool {
-	for _, ext := range bdlSourceExtensions {
-		if strings.HasSuffix(base, ext) {
-			return true
-		}
-	}
-	return false
 }
 
 // printLintReport writes the human-readable errors + warnings report, using the

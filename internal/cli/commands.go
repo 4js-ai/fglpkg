@@ -351,7 +351,7 @@ Arguments after the module name are passed to the program unchanged.
 		ListDetail: "\n(--dry-run prints what would happen without calling out;\n" +
 			" --ci for non-interactive pipelines: requires FGLPKG_TOKEN,\n" +
 			" prints a machine-readable status line)",
-		Usage: "fglpkg publish [--dry-run] [--ci] [--private|--public] [--changelog <text>] [--registry <name>] [--force]",
+		Usage: "fglpkg publish [--dry-run] [--ci] [--private|--public] [--changelog <text>] [--registry <name>] [--force] [--allow-empty]",
 		Long: `FLAGS:
   --dry-run, -n            Print what would happen without any network calls
   --ci                     Non-interactive mode for pipelines: requires
@@ -363,6 +363,10 @@ Arguments after the module name are passed to the program unchanged.
                            Artifactory repo) instead of the GI registry
   --force, -f              When publishing to Artifactory, overwrite an existing
                            variant instead of refusing
+  --allow-empty            Publish even when the archive stages no assets (only
+                           fglpkg.json and files matched by "docs"). Off by
+                           default: such a publish is refused with an actionable
+                           message.
 
 Builds the package zip, uploads it, and submits the version for admin review.
 When --registry names an Artifactory repository, the zip and its sidecar
@@ -419,7 +423,9 @@ package (that is a separate operation).
   -o, --output <file>      Write the zip to <file>
   --list, -l               Print the zip contents and metadata without writing
 
-Builds the same zip 'fglpkg publish' would upload, for local inspection.
+Builds the same zip 'fglpkg publish' would upload, for local inspection. If the
+archive would stage no assets (only fglpkg.json and files matched by "docs"),
+pack flags it — 'fglpkg publish' refuses such a package unless --allow-empty.
 `,
 	},
 	{
@@ -435,7 +441,8 @@ Reports (among others):
   - malformed or mistyped manifest fields, named in plain language
   - a 'files' or 'docs' pattern that matches no files
   - a declared 'program' with no matching staged .42m module
-  - a package that would contain no BDL modules at all (error)
+  - a package that would publish with no assets — only fglpkg.json and files
+    matched by 'docs' (warning; 'fglpkg publish' refuses it unless --allow-empty)
   - missing publish metadata: description, license, repository, author (warning)
 
 The same validation runs automatically inside 'fglpkg pack' and

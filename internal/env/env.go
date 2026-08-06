@@ -63,10 +63,10 @@ const (
 // namespaced package ships its forms at <store>/com/fourjs/poiapi/Customer.42f,
 // and the store root alone would never resolve them.
 //
-// Deliberately NOT shared with cli.bdlSourceExtensions (internal/cli/lint.go),
-// which answers a different question — "does this project contain BDL source at
-// all" — and so includes .4gl/.per (never installed) and .42m (FGLLDPATH, not a
-// resource). Fusing the two would force one list to grow .png.
+// Deliberately NOT a generic "BDL source" list: a build-time source check would
+// include .4gl/.per (never installed) and .42m (FGLLDPATH, not a resource),
+// whereas this list answers the resource-installation question. Fusing the two
+// would force one list to grow .png.
 // The three lists below are transcribed from the Genero 6.00 reference manual,
 // not from what fglpkg happens to have seen in the wild. Each cites its source
 // so a future reader can re-check it against a newer BDL release rather than
