@@ -116,3 +116,60 @@ func TestLoadScriptsHintPreserved(t *testing.T) {
 		t.Errorf("error should mention the hooks replacement, got: %v", err)
 	}
 }
+
+// TestLoadRejectsPolicyKeys guards the GIS-368 boundary: signature enforcement,
+// update-check preferences, and credentials are user/global settings and must
+// never be settable by a checked-in fglpkg.json. Each is rejected with a hint
+// naming where it belongs, not a bare "unknown field".
+func TestLoadRejectsPolicyKeys(t *testing.T) {
+	cases := []struct {
+		name       string
+		raw        string
+		wantSubstr []string
+	}{
+		{
+			name:       "signing",
+			raw:        `{"name":"x","version":"1.0.0","signing":{"enforce":"off"}}`,
+			wantSubstr: []string{"signing", "user/global setting", "config.json"},
+		},
+		{
+			name:       "updateCheck",
+			raw:        `{"name":"x","version":"1.0.0","updateCheck":false}`,
+			wantSubstr: []string{"updateCheck", "user setting"},
+		},
+		{
+			name:       "credentials",
+			raw:        `{"name":"x","version":"1.0.0","credentials":{"token":"t"}}`,
+			wantSubstr: []string{"credentials", "credentials.json"},
+		},
+		{
+			name:       "token",
+			raw:        `{"name":"x","version":"1.0.0","token":"abc"}`,
+			wantSubstr: []string{"token", "login"},
+		},
+		{
+			// Odd casing still gets the guardrail hint, not the generic typo text.
+			name:       "odd-case Signing",
+			raw:        `{"name":"x","version":"1.0.0","Signing":{"enforce":"off"}}`,
+			wantSubstr: []string{"user/global setting"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := loadWithManifest(t, tc.raw)
+			if err == nil {
+				t.Fatalf("expected a policy-key rejection for %q, got nil", tc.name)
+			}
+			msg := err.Error()
+			for _, sub := range tc.wantSubstr {
+				if !strings.Contains(msg, sub) {
+					t.Errorf("error for %q should contain %q, got: %v", tc.name, sub, err)
+				}
+			}
+			// It must NOT read like a plain typo.
+			if strings.Contains(msg, "check for a typo") {
+				t.Errorf("policy key %q should get the guardrail hint, not the generic typo message: %v", tc.name, err)
+			}
+		})
+	}
+}

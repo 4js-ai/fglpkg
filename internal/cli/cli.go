@@ -3482,18 +3482,25 @@ type registryEditFlags struct {
 
 const registryAddUsage = "usage: fglpkg registry add <name> <url> " +
 	"[--type genero|artifactory] [--repo-key K] [--auth bearer|basic|apikey|anonymous] " +
-	"[--priority N] [--packages 'acme-*,foo-*'] [--project] [--consume-default]\n" +
+	"[--priority N] [--packages 'acme-*,foo-*'] [--local] [--consume-default]\n" +
+	"       writes ~/.fglpkg/config.json by default; --local writes the project fglpkg.json\n" +
 	"       <url> may include the Artifactory repo key (https://acme.jfrog.io/artifactory/GeneroBDL), " +
 	"in which case --repo-key is optional"
 
 func parseRegistryAddFlags(args []string) (registryEditFlags, error) {
 	f := registryEditFlags{typ: config.TypeArtifactory}
 	var positional []string
+	var localSeen, globalSeen bool
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
-		case a == "--project":
-			f.project = true
+		// --local (project fglpkg.json) mirrors install/env/list/relink; global is
+		// the default, so --global is an explicit no-op selector. --project is the
+		// original spelling, kept as a hidden alias. (GIS-368)
+		case a == "--local" || a == "-l" || a == "--project":
+			localSeen = true
+		case a == "--global" || a == "-g":
+			globalSeen = true
 		case a == "--consume-default":
 			f.consumeDefault = true
 		case a == "--type" || strings.HasPrefix(a, "--type="):
@@ -3540,6 +3547,10 @@ func parseRegistryAddFlags(args []string) (registryEditFlags, error) {
 			positional = append(positional, a)
 		}
 	}
+	if localSeen && globalSeen {
+		return f, fmt.Errorf("--local and --global are mutually exclusive")
+	}
+	f.project = localSeen // global is the default target
 	if len(positional) != 2 {
 		return f, fmt.Errorf("registry add needs exactly <name> and <url>\n%s", registryAddUsage)
 	}
@@ -3696,7 +3707,7 @@ func cmdRegistryAdd(args []string) error {
 	if f.project {
 		m, err := manifest.Load(".")
 		if err != nil {
-			return fmt.Errorf("registry add --project requires an fglpkg.json in the current directory: %w", err)
+			return fmt.Errorf("registry add --local requires an fglpkg.json in the current directory: %w", err)
 		}
 		proj := append(append([]config.Registry(nil), m.Registries...), r)
 		global, err := config.LoadGlobal(home)
@@ -3759,21 +3770,29 @@ func noteConsumeDefaultSet(f registryEditFlags, file string) {
 
 func cmdRegistryRemove(args []string) error {
 	var name string
-	project := false
+	var localSeen, globalSeen bool
 	for _, a := range args {
 		switch {
-		case a == "--project":
-			project = true
+		// --local (project) mirrors the rest of the CLI; global is the default, so
+		// --global is an explicit no-op. --project is a hidden alias. (GIS-368)
+		case a == "--local" || a == "-l" || a == "--project":
+			localSeen = true
+		case a == "--global" || a == "-g":
+			globalSeen = true
 		case strings.HasPrefix(a, "-"):
-			return fmt.Errorf("unknown flag %q\nusage: fglpkg registry remove <name> [--project]", a)
+			return fmt.Errorf("unknown flag %q\nusage: fglpkg registry remove <name> [--local]", a)
 		case name == "":
 			name = a
 		default:
 			return fmt.Errorf("registry remove takes a single <name>")
 		}
 	}
+	if localSeen && globalSeen {
+		return fmt.Errorf("--local and --global are mutually exclusive")
+	}
+	project := localSeen // global is the default target
 	if name == "" {
-		return fmt.Errorf("usage: fglpkg registry remove <name> [--project]")
+		return fmt.Errorf("usage: fglpkg registry remove <name> [--local]")
 	}
 	if name == config.GIName {
 		return fmt.Errorf("the built-in %q registry cannot be removed", config.GIName)
@@ -3782,7 +3801,7 @@ func cmdRegistryRemove(args []string) error {
 	if project {
 		m, err := manifest.Load(".")
 		if err != nil {
-			return fmt.Errorf("registry remove --project requires an fglpkg.json in the current directory: %w", err)
+			return fmt.Errorf("registry remove --local requires an fglpkg.json in the current directory: %w", err)
 		}
 		kept, removed := dropRegistry(m.Registries, name)
 		if !removed {
@@ -3816,7 +3835,7 @@ func cmdRegistryRemove(args []string) error {
 	}
 	kept, removed := dropRegistry(g.Registries, name)
 	if !removed {
-		return fmt.Errorf("no registry named %q in %s (use --project to remove one declared in fglpkg.json)",
+		return fmt.Errorf("no registry named %q in %s (use --local to remove one declared in fglpkg.json)",
 			name, config.GlobalFilename)
 	}
 	g.Registries = kept
@@ -4680,12 +4699,22 @@ func buildInstaller(home string, m *manifest.Manifest) (*installer.Installer, *p
 	// Always look up credentials from the global home directory, even when
 	// installing to a local project directory (--local).
 	globalHome, err := fglpkgHome()
-	if err != nil {
+	homeKnown := err == nil
+	if !homeKnown {
+		// The user home is undeterminable (no FGLPKG_HOME and no OS home). Routing
+		// reads below may still use the install dir, but credentials and signing
+		// policy must NOT come from a possibly project-controlled .fglpkg/ — that
+		// is exactly the GIS-368 boundary. They are gated on homeKnown so an
+		// unknown home falls back to no stored credentials and the built-in signing
+		// default rather than reading the project directory.
 		globalHome = home
 	}
 	registryURL := defaultRegistry()
-	githubToken := credentials.GitHubTokenFor(globalHome, registryURL)
-	registryToken, _ := credentials.ActiveBearer(context.Background(), globalHome, registryURL, oauth.Refresh)
+	var githubToken, registryToken string
+	if homeKnown {
+		githubToken = credentials.GitHubTokenFor(globalHome, registryURL)
+		registryToken, _ = credentials.ActiveBearer(context.Background(), globalHome, registryURL, oauth.Refresh)
+	}
 	inst := installer.New(home, githubToken, registryToken, registryURL)
 
 	// Resolve the Maven mirror (GIS-365): env FGLPKG_MAVEN_URL → project
@@ -4698,7 +4727,10 @@ func buildInstaller(home string, m *manifest.Manifest) (*installer.Installer, *p
 	var mirrorAuth []installer.RepoAuth
 	if mavenBase != "" {
 		inst = inst.WithMavenBase(mavenBase)
-		creds, _ := credentials.Load(globalHome)
+		var creds *credentials.File
+		if homeKnown {
+			creds, _ = credentials.Load(globalHome)
+		}
 		var headers map[string]string
 		if creds != nil {
 			// Resolve the mirror credential by URL prefix, not exact key: a
@@ -4742,10 +4774,18 @@ func buildInstaller(home string, m *manifest.Manifest) (*installer.Installer, *p
 		inst = inst.WithRepoAuth(repoAuth)
 	}
 
-	// Layer 1 signature verification. The keys manifest is cached in the
-	// global home even for a local install. Mode comes from FGLPKG_SIGNING /
-	// config.json / the built-in default (warn).
-	inst.WithSigning(signing.EnforceMode(globalHome), globalHome, registryURL)
+	// Layer 1 signature verification. The keys manifest is cached in the global
+	// home even for a local install. Mode comes from FGLPKG_SIGNING / config.json
+	// / the built-in default (warn). With no known user home, use the built-in
+	// default and no keys home rather than the project's .fglpkg/ (GIS-368): a repo
+	// must never be able to lower a user's enforcement or supply its own keys.
+	enforce := signing.DefaultEnforce
+	keysHome := ""
+	if homeKnown {
+		enforce = signing.EnforceMode(globalHome)
+		keysHome = globalHome
+	}
+	inst.WithSigning(enforce, keysHome, registryURL)
 	return inst, set
 }
 
@@ -4839,16 +4879,12 @@ func defaultPublishRegistry() string {
 // none is set — the caller then publishes to GI as before. This is a
 // publish-only default and never influences consume-side routing.
 func resolveDefaultPublishRegistry(home string, m *manifest.Manifest) string {
-	if v := strings.TrimSpace(os.Getenv("FGLPKG_PUBLISH_REGISTRY")); v != "" {
-		return v
+	var local string
+	if m != nil {
+		local = m.DefaultRegistry
 	}
-	if m != nil && m.DefaultRegistry != "" {
-		return m.DefaultRegistry
-	}
-	if v, err := config.GlobalDefaultRegistry(home); err == nil && v != "" {
-		return v
-	}
-	return ""
+	global, _ := config.GlobalDefaultRegistry(home) // a read error yields "" — treated as unset
+	return config.ResolveScalar(os.Getenv("FGLPKG_PUBLISH_REGISTRY"), local, global)
 }
 
 // resolveDefaultConsumeRegistry returns the logical name of the repository the
@@ -4862,16 +4898,12 @@ func resolveDefaultPublishRegistry(home string, m *manifest.Manifest) string {
 // documented publish-only, so widening it would silently restrict installs for
 // every team that set it just to publish to their own Artifactory.
 func resolveDefaultConsumeRegistry(home string, m *manifest.Manifest) string {
-	if v := strings.TrimSpace(os.Getenv("FGLPKG_CONSUME_REGISTRY")); v != "" {
-		return v
+	var local string
+	if m != nil {
+		local = m.DefaultConsumeRegistry
 	}
-	if m != nil && m.DefaultConsumeRegistry != "" {
-		return m.DefaultConsumeRegistry
-	}
-	if v, err := config.GlobalConsumeRegistry(home); err == nil && v != "" {
-		return v
-	}
-	return ""
+	global, _ := config.GlobalConsumeRegistry(home) // a read error yields "" — treated as unset
+	return config.ResolveScalar(os.Getenv("FGLPKG_CONSUME_REGISTRY"), local, global)
 }
 
 // applyConsumeRegistry decides which repository a consuming command resolves
@@ -4943,20 +4975,26 @@ func noteConsumeDefault(rs *provider.RepositorySet, name string, fromDefault boo
 // the auth scheme comes from whichever config object supplied a mirror
 // (defaulting to bearer), since a bare URL carries no scheme.
 func resolveMavenMirror(home string, m *manifest.Manifest) (base, authScheme string) {
-	// Establish the configured mirror (manifest wins over global) first, so its
-	// auth scheme survives even when the env var overrides just the URL.
+	// The configured mirror object (manifest wins over global) supplies the auth
+	// scheme, and its presence is decided on a non-blank URL — so its scheme
+	// survives even when FGLPKG_MAVEN_URL overrides just the URL below.
 	var mm *config.MavenMirror
 	if m != nil && m.MavenMirror != nil && strings.TrimSpace(m.MavenMirror.URL) != "" {
 		mm = m.MavenMirror
 	} else if g, err := config.GlobalMavenMirror(home); err == nil && g != nil && strings.TrimSpace(g.URL) != "" {
 		mm = g
 	}
-	if mm != nil {
-		base = strings.TrimRight(strings.TrimSpace(mm.URL), "/")
-		authScheme = mm.Auth
+	var localURL, globalURL string
+	if m != nil && m.MavenMirror != nil {
+		localURL = m.MavenMirror.URL
 	}
-	if v := strings.TrimSpace(os.Getenv("FGLPKG_MAVEN_URL")); v != "" {
-		base = strings.TrimRight(v, "/")
+	if g, err := config.GlobalMavenMirror(home); err == nil && g != nil {
+		globalURL = g.URL
+	}
+	// Same env > local > global precedence as every other scalar (GIS-368).
+	base = strings.TrimRight(config.ResolveScalar(os.Getenv("FGLPKG_MAVEN_URL"), localURL, globalURL), "/")
+	if mm != nil {
+		authScheme = mm.Auth
 	}
 	if base != "" && authScheme == "" {
 		authScheme = config.AuthBearer

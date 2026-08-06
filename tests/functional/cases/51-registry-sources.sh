@@ -12,7 +12,7 @@ _rs_source_column_builtin() {
 }
 it "registry list prints the SOURCE column and marks gi builtin" _rs_source_column_builtin
 
-# A registry added without --project lands in the per-user ~/.fglpkg/config.json
+# A registry added without --local lands in the per-user ~/.fglpkg/config.json
 # and is attributed to the global source.
 _rs_global_source() {
   run registry add myrepo https://example.com/repo --repo-key generic-local
@@ -26,12 +26,12 @@ _rs_global_source() {
 }
 it "registry list attributes a globally-added registry to global" _rs_global_source
 
-# A registry added with --project is written into the committed fglpkg.json (no
+# A registry added with --local is written into the committed fglpkg.json (no
 # machine config touched) and attributed to the project source — the "clone and
 # it just works" story.
 _rs_project_source() {
   mkpkg demo.pkg
-  run registry add acme https://a.example --repo-key GeneroBDL --project
+  run registry add acme https://a.example --repo-key GeneroBDL --local
   assert_success
   assert_contains 'Added registry "acme" to fglpkg.json'
   assert_file_contains "fglpkg.json" '"registries"'
@@ -47,7 +47,7 @@ it "a project fglpkg.json registry is inherited and shown as project" _rs_projec
 # a login secret goes only to ~/.fglpkg/credentials.json.
 _rs_credentials_stay_separate() {
   mkpkg demo.pkg
-  run registry add acme https://a.example --repo-key K --project
+  run registry add acme https://a.example --repo-key K --local
   assert_success
   run login --registry acme --token super-secret-bearer-token-9f3a
   assert_success

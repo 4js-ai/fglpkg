@@ -522,9 +522,9 @@ login".
 		Usage: "fglpkg registry list\n" +
 			"fglpkg registry add <name> <url> [--type genero|artifactory] [--repo-key K]\n" +
 			"                                 [--auth bearer|basic|apikey|anonymous] [--priority N]\n" +
-			"                                 [--packages 'acme-*,foo-*'] [--project]\n" +
+			"                                 [--packages 'acme-*,foo-*'] [--local]\n" +
 			"                                 [--consume-default]\n" +
-			"fglpkg registry remove <name> [--project]",
+			"fglpkg registry remove <name> [--local]",
 		Long: `SUBCOMMANDS:
   list                     Show configured repositories, priority, auth scheme, login status,
                            and which default (consume/publish) each one serves
@@ -541,7 +541,9 @@ FLAGS (add):
   --auth <scheme>          bearer | basic | apikey | anonymous (default bearer)
   --priority <n>           Lower is tried first; unique. Defaults to max+1 when omitted
   --packages <globs>       Comma-separated name-scope allow-list (e.g. 'acme-*,foo-*')
-  --project                Write to the project fglpkg.json instead of ~/.fglpkg/config.json
+  --local, -l              Write to the project fglpkg.json (checked-in repo config).
+                           Default is the user config ~/.fglpkg/config.json; --global/-g
+                           selects it explicitly. (--project is a deprecated alias for --local)
   --consume-default        Also record this repo as "defaultConsumeRegistry" in the same
                            file, so install/update/search/info/outdated resolve from it
 

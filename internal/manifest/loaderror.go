@@ -43,6 +43,15 @@ func friendlyLoadError(err error) error {
 	}
 
 	if field, ok := unknownField(err); ok {
+		// Case-insensitive: DisallowUnknownFields rejects "Signing"/"signing"
+		// alike (no such struct field in any case), so the hint should fire for
+		// either spelling rather than falling through to the generic typo message.
+		if hint, isPolicy := policyOnlyKeys[strings.ToLower(field)]; isPolicy {
+			return fmt.Errorf(
+				`invalid %s: %q is a user/global setting, not a project field — %s`,
+				Filename, field, hint,
+			)
+		}
 		return fmt.Errorf(
 			`invalid %s: unknown field %q — check for a typo; see the allowed fields in schema/fglpkg.schema.json`,
 			Filename, field,
@@ -50,6 +59,21 @@ func friendlyLoadError(err error) error {
 	}
 
 	return fmt.Errorf("invalid %s: %w", Filename, err)
+}
+
+// policyOnlyKeys are config keys that are deliberately NOT manifest fields:
+// signature enforcement, update-check preferences, and credentials are user/
+// global concerns and, per GIS-368, must not be settable by a checked-in repo
+// config (a repo could otherwise weaken a user's signature checks). Naming one in
+// fglpkg.json is rejected with a pointer to where it belongs rather than a bare
+// "unknown field".
+// Keyed by the lower-cased field name (see the strings.ToLower lookup above).
+var policyOnlyKeys = map[string]string{
+	"signing":             `set signature enforcement in ~/.fglpkg/config.json ("signing": {"enforce": "require|warn|off"}) or via FGLPKG_SIGNING`,
+	"updatecheck":         "the update-check preference is a user setting in ~/.fglpkg/config.json, not a per-project one",
+	"updatecheckinterval": "the update-check interval is a user setting in ~/.fglpkg/config.json, not a per-project one",
+	"credentials":         "credentials live in ~/.fglpkg/credentials.json (via 'fglpkg login'), never in a checked-in file",
+	"token":               "authentication tokens are never stored in fglpkg.json; use 'fglpkg login' or the FGLPKG_TOKEN env var",
 }
 
 // fieldHints maps a user-facing manifest key to a phrase describing the value

@@ -686,7 +686,7 @@ descriptor has these fields:
 ```
 
 Rather than editing this array by hand, `fglpkg registry add <name> <url> …
---project` writes a validated entry into `fglpkg.json` (omit `--project` to write
+--local` writes a validated entry into `fglpkg.json` (omit `--local` to write
 the global `~/.fglpkg/config.json` instead), and `fglpkg registry list` shows the
 effective set with each entry's `SOURCE` (`builtin` / `global` / `project`).
 
@@ -717,7 +717,7 @@ not-found naming that repository, never a silent fallback elsewhere.
 Overridden, strongest first, by `--registry <name>` (that command), a
 per-dependency `registry` pin (that dependency), and a lockfile-recorded source
 (that locked package). Write it with
-`fglpkg registry add <name> <url> --project --consume-default`, and see which
+`fglpkg registry add <name> <url> --local --consume-default`, and see which
 repository serves it in `fglpkg registry list`'s `DEFAULT` column.
 
 ```json
@@ -726,6 +726,19 @@ repository serves it in `fglpkg registry list`'s `DEFAULT` column.
   "defaultConsumeRegistry": "acme"
 }
 ```
+
+#### Not manifest fields: policy and credentials
+
+Signature enforcement (`signing.enforce`), the update-check preferences
+(`updateCheck`, `updateCheckInterval`), and credentials/tokens are **user/global**
+settings and are deliberately **not** `fglpkg.json` fields. A checked-in project
+config may steer *where* dependencies come from (the routing fields above) but
+must never weaken *your* signature enforcement or carry secrets — so those live
+only in `~/.fglpkg/config.json` (or `FGLPKG_SIGNING`) and
+`~/.fglpkg/credentials.json` (written by `fglpkg login`). Naming one of them in
+`fglpkg.json` is rejected on load with a hint pointing at where it belongs. See
+the precedence and routing-vs-policy split in the
+[user guide](user-guide.md#precedence-and-merge-across-all-config).
 
 ---
 
@@ -879,6 +892,7 @@ authority (see [§5](#5-parsing--validation-rules)).
 | `mavenMirror` | object | No | Maven mirror (`url` + `auth`) for JAR downloads; overrides Maven Central. |
 | `registries` | array | No | Extra package repositories (e.g. Artifactory); committed, no secrets. |
 | `defaultRegistry` | string | No | Default `publish` target when `--registry` is omitted (publish-only). |
+| `defaultConsumeRegistry` | string | No | Default repository `install`/`update`/`search`/`info`/`outdated` resolve from when `--registry` is omitted. |
 | `$schema` | string | No | Editor schema reference (ignored by fglpkg). |
 | `type` | string | No | **Deprecated**, accepted-but-ignored. |
 

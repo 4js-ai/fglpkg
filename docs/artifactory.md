@@ -109,7 +109,7 @@ fglpkg registry add acme https://artifactory.acme.example/artifactory \
 
 # Or committed to this project (writes fglpkg.json):
 fglpkg registry add acme https://artifactory.acme.example/artifactory \
-    --repo-key fgl-internal-generic --packages "acme-*" --project
+    --repo-key fgl-internal-generic --packages "acme-*" --local
 ```
 
 `registry add <name> <url>` defaults to `type=artifactory`, so you rarely pass
@@ -121,7 +121,7 @@ fglpkg registry add acme https://artifactory.acme.example/artifactory \
 | `--auth <scheme>` | `bearer` \| `basic` \| `apikey` \| `anonymous`. Default `bearer`. |
 | `--priority <n>` | Lower is tried first; must be unique. Defaults to `max + 1` when omitted (the built-in `gi` is priority `1`). |
 | `--packages <globs>` | Comma-separated name-scope allow-list, e.g. `'acme-*,foo-*'`. Omit to consult the repo for any name. |
-| `--project` | Write to the project `fglpkg.json` instead of `~/.fglpkg/config.json`. Requires an `fglpkg.json` in the current directory. |
+| `--local` | Write to the project `fglpkg.json` instead of `~/.fglpkg/config.json`. Requires an `fglpkg.json` in the current directory. |
 | `--consume-default` | Also make this the default consume registry (see [Choosing a default](#choosing-a-default-registry)). |
 | `--type <t>` | `genero` \| `artifactory` (default `artifactory`). Only the built-in `gi` may be `genero`. |
 
@@ -156,7 +156,7 @@ The three derived columns are worth reading:
   scheme), or `env` (the GI registry authenticated by `FGLPKG_TOKEN` — this only
   ever applies to `gi`, never to an Artifactory repo).
 
-Remove a repository with `fglpkg registry remove acme` (add `--project` to remove
+Remove a repository with `fglpkg registry remove acme` (add `--local` to remove
 one declared in `fglpkg.json`). The built-in `gi` registry cannot be redefined or
 removed.
 
@@ -295,7 +295,7 @@ Resolved in decreasing precedence: `FGLPKG_PUBLISH_REGISTRY` → the project
 configured repository). Set it with:
 
 ```bash
-fglpkg registry add acme https://acme.jfrog.io/artifactory/GeneroBDL --project --consume-default
+fglpkg registry add acme https://acme.jfrog.io/artifactory/GeneroBDL --local --consume-default
 ```
 
 The consume default is **exclusion, not precedence**: only that one repository is
@@ -366,7 +366,7 @@ Full detail — precedence, credential matching, and lockfile pinning — is in 
 ## Team & CI setup
 
 **"Clone → login → install just works."** Commit the repository declaration to the
-project `fglpkg.json` (with `--project`), so a teammate who clones the repo
+project `fglpkg.json` (with `--local`), so a teammate who clones the repo
 inherits the registry with no machine configuration — they only run
 `fglpkg login --registry <name>` once to store their own credentials:
 

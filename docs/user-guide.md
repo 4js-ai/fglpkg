@@ -1655,6 +1655,37 @@ clone needs no registry setup: **clone → `fglpkg login --registry <name>` →
 `fglpkg install`** just works. Each developer supplies only their own credentials;
 nobody re-declares the registries, and no secret is ever committed.
 
+#### Precedence and merge across all config
+
+The three layers apply to **every** config key in one predictable order — highest
+precedence first:
+
+```
+environment  >  project fglpkg.json  >  ~/.fglpkg/config.json  >  built-in default
+```
+
+- **Collections merge.** `registries` combine across layers by `name`: a higher
+  layer **replaces a same-named entry wholesale** (repeat its `url`/`auth`/`repoKey`
+  when you override one) and contributes any new names. The effective set is
+  priority-sorted.
+- **Scalars replace.** `defaultRegistry`, `defaultConsumeRegistry`, and
+  `mavenMirror` take the first value set in precedence order; a blank value is
+  "unset" and never shadows a lower layer.
+
+**Routing is repo-settable; policy is not.** A checked-in `fglpkg.json` may set
+*where* dependencies come from (`registries`, `defaultRegistry`,
+`defaultConsumeRegistry`, `mavenMirror`). It may **not** set security or UX policy:
+`signing.enforce`, the update-check preferences, and credentials are user/global
+only (environment or `~/.fglpkg/`). This is deliberate — cloning a repo can point
+you at its registries, but it can never weaken *your* signature enforcement or read
+your tokens. Naming one of those keys in `fglpkg.json` is rejected with a hint
+pointing at where it belongs.
+
+Manage the checked-in project layer from the CLI with `fglpkg registry add <name>
+<url> --local` (and `--local` on `registry remove`). Without a scope flag,
+`registry add` writes the per-user `~/.fglpkg/config.json`; `--global`/`-g` selects
+that explicitly.
+
 Descriptor fields:
 
 | Field | Required | Meaning |
@@ -1680,7 +1711,7 @@ fglpkg registry add acme https://artifactory.acme.example/artifactory/fgl-intern
 # Equivalent, spelling the key out explicitly:
 fglpkg registry add acme https://artifactory.acme.example/artifactory \
     --repo-key fgl-internal-generic --packages "acme-*"
-fglpkg registry add acme https://… --repo-key K --project # writes the project fglpkg.json
+fglpkg registry add acme https://… --repo-key K --local # writes the project fglpkg.json
 fglpkg registry remove acme
 ```
 
@@ -1793,7 +1824,7 @@ public name, because each one exists in both GI and your mirror. Declare a
 
 ```bash
 # writes the descriptor and the default together
-fglpkg registry add acme https://acme.jfrog.io/artifactory/GeneroBDL --project --consume-default
+fglpkg registry add acme https://acme.jfrog.io/artifactory/GeneroBDL --local --consume-default
 fglpkg registry list     # the DEFAULT column shows acme = consume
 ```
 
