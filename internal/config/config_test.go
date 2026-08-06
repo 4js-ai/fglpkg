@@ -289,6 +289,56 @@ func TestLoadGlobal_RejectsUnknownField(t *testing.T) {
 	}
 }
 
+// TestLoadGlobal_AcceptsSigningPolicy pins the fix for the PR #68 blocker:
+// config.json may carry a signing.enforce policy — the README and the manifest
+// policy-key hint both direct users to set it there. loadGlobalFile decodes with
+// DisallowUnknownFields, so without GlobalFile.Signing this exact JSON is
+// rejected, and the consuming path (LoadGlobal/Load) then silently drops EVERY
+// configured registry. Assert both halves: the file loads, and the registry
+// survives resolution.
+func TestLoadGlobal_AcceptsSigningPolicy(t *testing.T) {
+	home := t.TempDir()
+	body := `{
+  "signing": { "enforce": "require" },
+  "registries": [{"name":"acme","type":"artifactory","url":"https://a","repoKey":"k","priority":2}]
+}`
+	if err := os.WriteFile(filepath.Join(home, GlobalFilename), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := LoadGlobalFile(home)
+	if err != nil {
+		t.Fatalf("LoadGlobalFile rejected a signing-bearing config: %v", err)
+	}
+	if g.Signing == nil || g.Signing.Enforce != "require" {
+		t.Errorf("signing.enforce did not decode: %+v", g.Signing)
+	}
+	regs, err := LoadGlobal(home)
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	if _, ok := Find(regs, "acme"); !ok {
+		t.Errorf("acme registry was dropped despite a valid config; resolved set = %+v", regs)
+	}
+}
+
+// TestWriteGlobal_DoesNotInjectSigning: the `registry add`/`remove`
+// read-modify-write cycle must not inject an empty "signing" block into a config
+// that never set one — the same omitempty guarantee as updateCheck / mavenMirror.
+func TestWriteGlobal_DoesNotInjectSigning(t *testing.T) {
+	home := t.TempDir()
+	g := GlobalFile{Registries: []Registry{{Name: "acme", Type: TypeArtifactory, URL: "https://a", RepoKey: "k", Priority: 2}}}
+	if err := WriteGlobalFile(home, g); err != nil {
+		t.Fatalf("WriteGlobalFile: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(home, GlobalFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "signing") {
+		t.Errorf("write injected an empty signing block into a config that never set it:\n%s", data)
+	}
+}
+
 func TestLoad_CascadeGlobalThenProject(t *testing.T) {
 	home := t.TempDir()
 	body := `{"registries":[{"name":"acme","type":"artifactory","url":"https://global","repoKey":"k","priority":2}]}`

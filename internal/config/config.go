@@ -130,6 +130,27 @@ type GlobalFile struct {
 	// round-trips: the pointer is non-nil, so omitempty keeps it.
 	UpdateCheck         *bool  `json:"updateCheck,omitempty"`         // opt-out; nil => default (enabled)
 	UpdateCheckInterval string `json:"updateCheckInterval,omitempty"` // Go duration; "" => default 24h
+
+	// Signing carries the signature-enforcement policy. The README "Signing"
+	// section and this PR's policy-key hint both direct users to set
+	// signing.enforce here, so the loader must accept it — loadGlobalFile decodes
+	// with DisallowUnknownFields, and without this field that exact config.json
+	// is rejected, which (worst case) makes the consuming path silently drop
+	// every configured registry. Enforcement is resolved authoritatively by
+	// internal/signing.EnforceMode via its own tolerant decoder; this field
+	// exists only so the strict loader tolerates the key. omitempty keeps the
+	// `registry add`/`remove` read-modify-write cycle from injecting an empty
+	// "signing" block into a config that never set one — same reasoning as
+	// updateCheck / mavenMirror above.
+	Signing *SigningPolicy `json:"signing,omitempty"`
+}
+
+// SigningPolicy mirrors the shape internal/signing reads from config.json's
+// "signing" object. It is intentionally read-only here: config never resolves
+// enforcement from it — internal/signing.EnforceMode does — so only the fields
+// the strict loader must tolerate are declared.
+type SigningPolicy struct {
+	Enforce string `json:"enforce,omitempty"`
 }
 
 // UpdateSettings are the resolved passive-update-check preferences.
