@@ -84,9 +84,34 @@ func TestInstallFromLockTransient(t *testing.T) {
 	}
 }
 
+// TestInstallFromLockRateLimited: 408/429 are retryable, so they must surface as
+// transient (retry), not a dead-end (GIS-283 review #2).
+func TestInstallFromLockRateLimited(t *testing.T) {
+	for _, status := range []int{http.StatusRequestTimeout, http.StatusTooManyRequests} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+			}))
+			t.Cleanup(ts.Close)
+			inst, projectDir, lf := lockOnePkg(t, ts.URL+"/pkg.zip")
+			err := inst.installFromLock(lf, manifest.New("app", "1.0.0", "", ""), Options{}, projectDir)
+			if err == nil {
+				t.Fatalf("expected an error on HTTP %d", status)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "temporary") || !strings.Contains(msg, "retry") {
+				t.Errorf("HTTP %d should be reported as transient/retryable, got:\n%s", status, msg)
+			}
+			if strings.Contains(msg, "no longer available") {
+				t.Errorf("HTTP %d must not be reported as permanently gone:\n%s", status, msg)
+			}
+		})
+	}
+}
+
 // TestDownloadErrorClassification pins the sentinels the message dispatch keys
-// on: 404/410 -> ErrArtifactGone (permanent), 5xx and transport failures ->
-// ErrDownloadTransient (retryable).
+// on: 404/410 -> ErrArtifactGone (permanent); 5xx / 408 / 429 and transport
+// failures -> ErrDownloadTransient (retryable).
 func TestDownloadErrorClassification(t *testing.T) {
 	call := func(url string) error {
 		return downloadAndVerify(url, "", "x", io.Discard, "", "", "", nil, false)
@@ -98,10 +123,12 @@ func TestDownloadErrorClassification(t *testing.T) {
 		t.Errorf("404 should classify as ErrArtifactGone, got %v", err)
 	}
 
-	srvErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadGateway) }))
-	defer srvErr.Close()
-	if err := call(srvErr.URL); !errors.Is(err, ErrDownloadTransient) {
-		t.Errorf("502 should classify as ErrDownloadTransient, got %v", err)
+	for _, status := range []int{http.StatusBadGateway, http.StatusRequestTimeout, http.StatusTooManyRequests} {
+		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }))
+		if err := call(s.URL); !errors.Is(err, ErrDownloadTransient) {
+			t.Errorf("HTTP %d should classify as ErrDownloadTransient, got %v", status, err)
+		}
+		s.Close()
 	}
 
 	// A closed server yields a connection-refused transport error.

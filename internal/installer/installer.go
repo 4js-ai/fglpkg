@@ -1350,7 +1350,8 @@ var (
 	// server-side after the lock was written.
 	ErrArtifactGone = errors.New("artifact no longer available on the registry")
 	// ErrDownloadTransient means the download failed for a retryable reason: a
-	// transport error (DNS, connection refused, timeout) or a 5xx server response.
+	// transport error (DNS, connection refused, timeout), a 408/429 throttle, or
+	// a 5xx server response.
 	ErrDownloadTransient = errors.New("temporary download failure")
 )
 
@@ -1427,17 +1428,20 @@ func downloadAndVerify(url, expectedChecksum, name string, w io.Writer, githubTo
 	}
 	// Artifactory returns 403 (not 401) for a bad or missing credential on a
 	// protected repo; surface it as an auth failure rather than the generic
-	// message so a mis-scoped Maven mirror token is diagnosable (GIS-365).
+	// message so a mis-scoped Maven mirror token is diagnosable (GIS-365). NOTE:
+	// an anonymous 403 is ambiguous — a gone GI R2/CDN object vs an auth-required
+	// mirror — and cannot be told apart here without knowing the download's
+	// source, so it is intentionally NOT classified as "gone" (see PR #71 review).
 	if resp.StatusCode == http.StatusForbidden {
 		return fmt.Errorf("HTTP 403 downloading %s from %s: Forbidden — check your credentials for this repository (run 'fglpkg login')", name, url)
 	}
-	// 404/410 mean the artifact is gone (permanent); 5xx is a server-side blip
-	// (retryable). Both carry a sentinel so a lock-based install can classify the
-	// failure and print the right remedy (GIS-283).
+	// 404/410 mean the artifact is gone (permanent); 408/429 (timeout/rate-limit)
+	// and 5xx are retryable. Each carries a sentinel so a lock-based install can
+	// classify the failure and print the right remedy (GIS-283).
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
 		return fmt.Errorf("HTTP %d downloading %s from %s: %w", resp.StatusCode, name, url, ErrArtifactGone)
 	}
-	if resp.StatusCode >= 500 {
+	if resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 		return fmt.Errorf("HTTP %d downloading %s from %s: %w", resp.StatusCode, name, url, ErrDownloadTransient)
 	}
 	if resp.StatusCode != http.StatusOK {
