@@ -920,6 +920,8 @@ fglpkg publish
 fglpkg publish --dry-run     # preview every call without touching the network
 ```
 
+**Empty-package guard.** If the staged archive would contain no asset — nothing but `fglpkg.json` and files matched by `docs` — `publish` refuses it with an actionable message (a common symptom of a `files` pattern that matches nothing). Any real content counts as an asset: BDL modules, `bin` scripts, a `webcomponents/` tree (html/js/css), `include` files, or a `profile`. Run `fglpkg pack --list` first to see exactly what would ship; it flags the empty case too. Pass `--allow-empty` to publish anyway (e.g. a docs-only placeholder).
+
 Publishing is **additive and reviewed**: a freshly published version is marked *pending* and only becomes installable once a registry administrator approves it.
 
 The publish flow:
