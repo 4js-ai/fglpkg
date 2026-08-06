@@ -2006,6 +2006,7 @@ type publishFlags struct {
 	dryRun     bool
 	ci         bool
 	force      bool   // Artifactory: overwrite an existing variant
+	allowEmpty bool   // publish even when the archive stages no assets (GIS-276)
 	registry   string // target repository ("" or "gi" = GI)
 	visibility string // "private"/"public" (GI only)
 	changelog  string
@@ -2033,6 +2034,8 @@ func parsePublishFlags(args []string) (publishFlags, error) {
 			pf.ci = true
 		case "--force", "-f":
 			pf.force = true
+		case "--allow-empty":
+			pf.allowEmpty = true
 		case "--private":
 			wantPrivate = true
 		case "--public":
@@ -2085,6 +2088,18 @@ func cmdPublish(args []string) error {
 	built, err := enforceLint(m, ".")
 	if err != nil {
 		return err
+	}
+	// Empty-package guard (GIS-276): refuse to publish an archive that stages no
+	// asset — nothing but fglpkg.json and files matched solely by `docs` — before
+	// any Genero detection, auth, or network work. It is registry-agnostic (GI and
+	// Artifactory alike) and applies to --dry-run too, so the mistake surfaces at
+	// the earliest preview. --allow-empty is the explicit escape hatch.
+	if built.empty && !pf.allowEmpty {
+		return fmt.Errorf("refusing to publish a package with no assets — only %s and files matched by \"docs\" would be uploaded.\n"+
+			"Check your \"files\" / \"webcomponents\" declarations, or pass --allow-empty to override.", manifest.Filename)
+	}
+	if built.empty {
+		fmt.Fprintf(os.Stderr, "warning: publishing a package with no assets (only %s and docs) — --allow-empty was given\n", manifest.Filename)
 	}
 	// Detect Genero before the publish check so the latter can reject only
 	// when the SAME variant (not just the same version string) is already
@@ -2461,37 +2476,79 @@ func variantDescription(variant string) string {
 }
 
 func buildPackageZip(m *manifest.Manifest) ([]byte, string, error) {
+	data, sum, _, err := buildPackageZipClassified(m)
+	return data, sum, err
+}
+
+// buildPackageZipClassified is buildPackageZip plus the GIS-276 emptiness
+// verdict: empty is true when the staged archive holds no asset — nothing but
+// fglpkg.json and files matched solely by `docs`. Callers that need only the
+// bytes use the buildPackageZip wrapper above.
+func buildPackageZipClassified(m *manifest.Manifest) (data []byte, checksum string, empty bool, err error) {
 	// Package by staging the exact archive layout in a throwaway temp
 	// directory and zipping that — the publisher's source tree is never
 	// written to. See specs/import-root.md.
 	stageDir, err := os.MkdirTemp("", "fglpkg-pack-")
 	if err != nil {
-		return nil, "", fmt.Errorf("cannot create staging directory: %w", err)
+		return nil, "", false, fmt.Errorf("cannot create staging directory: %w", err)
 	}
 	defer os.RemoveAll(stageDir)
 
-	if err := stagePackage(stageDir, m); err != nil {
-		return nil, "", err
+	empty, err = stagePackage(stageDir, m)
+	if err != nil {
+		return nil, "", false, err
 	}
-	return zipStageDir(stageDir)
+	data, checksum, err = zipStageDir(stageDir)
+	if err != nil {
+		return nil, "", false, err
+	}
+	return data, checksum, empty, nil
 }
 
 // stagePackage materializes the full publishable layout under stageDir:
 // rebased BDL/bin files, webcomponents (with their "webcomponents/" strip),
 // docs at the archive root, explicit include files folded into the root by
 // basename, and the publish-safe manifest.
-func stagePackage(stageDir string, m *manifest.Manifest) error {
+// It reports whether the resulting archive is "empty" in the GIS-276 sense:
+// no file other than fglpkg.json and files matched solely by `docs`. That
+// verdict is kind-agnostic — BDL modules, bin scripts, webcomponent trees,
+// include files, and profiles all count as assets, so bin/include/webcomponent
+// packages are never flagged while a README-only package is.
+func stagePackage(stageDir string, m *manifest.Manifest) (empty bool, err error) {
 	// Load .fglpkgignore from the project root (current directory). The
 	// manifest is never excluded; everything else can be filtered.
 	ignore, err := loadIgnore(".")
 	if err != nil {
-		return fmt.Errorf("cannot read %s: %w", ignoreFilename, err)
+		return false, fmt.Errorf("cannot read %s: %w", ignoreFilename, err)
 	}
 
 	// staged maps an archive path to the source it came from, so a second
 	// distinct source claiming the same path is reported as a collision
 	// (while the same source matched twice is a harmless no-op).
 	staged := make(map[string]string)
+
+	// assetPaths tracks the archive paths contributed by an *asset* stager —
+	// anything but `docs`. fglpkg.json is written straight to disk below (never
+	// through `staged`), so it is intrinsically excluded. markAssets records the
+	// keys a stager added on top of the snapshot taken just before it ran; docs
+	// is deliberately never marked, so a file matched solely by `docs` leaves
+	// assetPaths untouched. A file already claimed by an earlier asset stager
+	// stays an asset even if `docs` later matches it too.
+	assetPaths := make(map[string]bool)
+	snapshot := func() map[string]bool {
+		s := make(map[string]bool, len(staged))
+		for k := range staged {
+			s[k] = true
+		}
+		return s
+	}
+	markAssets := func(before map[string]bool) {
+		for k := range staged {
+			if !before[k] {
+				assetPaths[k] = true
+			}
+		}
+	}
 
 	// include entries are folded in explicitly (below) and skipped by the
 	// BDL walk so they are not also picked up at a rebased path.
@@ -2504,26 +2561,42 @@ func stagePackage(stageDir string, m *manifest.Manifest) error {
 	// (HasBDLContent returns false); a pure-BDL manifest skips the webcomponent
 	// walk (HasWebcomponents returns false).
 	if m.HasBDLContent() || !m.HasWebcomponents() {
+		before := snapshot()
 		if err := stageBDLFiles(stageDir, m, ignore, staged, includeSet); err != nil {
-			return err
+			return false, err
 		}
+		markAssets(before)
 	}
 	if m.HasWebcomponents() {
+		before := snapshot()
 		if err := stageWebcomponentFiles(stageDir, m, ignore, staged); err != nil {
-			return err
+			return false, err
 		}
+		markAssets(before)
 	}
-	if err := stageDocFiles(stageDir, m, ignore, staged); err != nil {
-		return err
-	}
+	includeBefore := snapshot()
 	if err := stageIncludeFiles(stageDir, m, staged); err != nil {
-		return err
+		return false, err
 	}
+	markAssets(includeBefore)
 	// Unconditional: a webcomponent-only package may legitimately ship a
 	// profile too.
+	profileBefore := snapshot()
 	profilePaths, err := stageProfileFiles(stageDir, m, staged)
 	if err != nil {
-		return err
+		return false, err
+	}
+	markAssets(profileBefore)
+	// docs run LAST and are never marked as assets — this ordering is
+	// load-bearing. Every asset stager (BDL, webcomponents, include, profile) has
+	// already claimed its archive paths, so a file that an asset stager staged and
+	// a `docs` glob ALSO matches stays an asset (stageFile makes the second,
+	// same-source write a no-op). The only thing that reaches here unclaimed is a
+	// file matched SOLELY by `docs` — exactly the empty-package signal. Staging
+	// docs earlier would let that no-op dedup hide an include/profile asset behind
+	// a later docs match and mis-report the package as empty.
+	if err := stageDocFiles(stageDir, m, ignore, staged); err != nil {
+		return false, err
 	}
 
 	// Always write the manifest last, using a publish-safe copy so the shipped
@@ -2538,16 +2611,27 @@ func stagePackage(stageDir string, m *manifest.Manifest) error {
 	// "profiles/x.4gp", and env's existence check would silently drop it.
 	pub.Profile = profilePaths
 	if err := recordGeneroPackages(pub, staged, m.Programs); err != nil {
-		return err
+		return false, err
 	}
 	mfData, err := json.MarshalIndent(pub, "", "  ")
 	if err != nil {
-		return fmt.Errorf("cannot serialize publishable %s: %w", manifest.Filename, err)
+		return false, fmt.Errorf("cannot serialize publishable %s: %w", manifest.Filename, err)
 	}
 	if err := os.WriteFile(filepath.Join(stageDir, manifest.Filename), append(mfData, '\n'), 0o644); err != nil {
-		return fmt.Errorf("cannot stage %s: %w", manifest.Filename, err)
+		return false, fmt.Errorf("cannot stage %s: %w", manifest.Filename, err)
 	}
-	return nil
+	// fglpkg.json and .fglpkgignore are tooling metadata, never shippable
+	// content — the spec's invariant is that fglpkg.json never counts toward
+	// emptiness. A broad `files` glob ("*", "*.json") or an `include` naming the
+	// manifest can stage them through an asset walk, which would leave them in
+	// assetPaths and mask an otherwise-empty package (the manifest is overwritten
+	// on disk by the publish-safe copy above, but its assetPaths entry lingers).
+	// Drop them before the verdict so the guard still fires. (These plain names
+	// are the archive paths a root-level match produces; a non-empty importRoot
+	// cannot rebase a project-root file under itself without escaping.)
+	delete(assetPaths, manifest.Filename)
+	delete(assetPaths, ignoreFilename)
+	return len(assetPaths) == 0, nil
 }
 
 // filesPatternMatch reports whether a manifest `files` pattern matches a source

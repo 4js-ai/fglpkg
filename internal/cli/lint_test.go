@@ -102,7 +102,11 @@ func TestLintZeroMatchFilesWarning(t *testing.T) {
 	}
 }
 
-func TestLintNoModulesError(t *testing.T) {
+// TestLintEmptyPackageWarning: a package whose archive would hold nothing but
+// fglpkg.json and docs is a WARNING, not an error — it stays publishable via
+// `fglpkg publish --allow-empty`, so `fglpkg lint` flags it loudly but exits 0
+// (GIS-276). This replaces the old BDL-only "no modules" hard error.
+func TestLintEmptyPackageWarning(t *testing.T) {
 	writeLintProject(t, map[string]string{
 		"fglpkg.json": `{
   "name": "empty",
@@ -113,16 +117,94 @@ func TestLintNoModulesError(t *testing.T) {
 		"README.md": "# empty\n",
 	})
 	r := loadLintReport(t)
-	if !r.HasErrors() {
-		t.Fatalf("a package that stages no modules must be an error, got %+v", r.Diagnostics)
+	if r.HasErrors() {
+		t.Fatalf("an asset-less package is a warning, not an error, got errors: %+v", r.Errors())
 	}
 	var msg string
-	for _, d := range r.Errors() {
+	for _, d := range r.Warnings() {
 		msg += d.Message
 	}
-	if !strings.Contains(msg, "no BDL modules") {
-		t.Errorf("error should mention no BDL modules, got: %s", msg)
+	if !strings.Contains(msg, "no assets") {
+		t.Errorf("warning should mention no assets, got: %s", msg)
 	}
+}
+
+// TestLintFlagsDroppedBDLSource pins the GIS-276-review fix: the kind-agnostic
+// empty guard cannot see a dropped-modules mistake once any OTHER asset exists,
+// so lint must still error when BDL source is present in the tree but none of it
+// was staged. The check is keyed on BDL intent in the tree (not package kind),
+// so a legitimately BDL-free bin/include package and a pure-webcomponent package
+// with a stray example source both stay quiet.
+func TestLintFlagsDroppedBDLSource(t *testing.T) {
+	const meta = `"description":"d","license":"MIT","repository":"https://github.com/x/y","author":"a"`
+
+	t.Run("bin asset masks dropped BDL source -> error", func(t *testing.T) {
+		writeLintProject(t, map[string]string{
+			// No root/files: the default *.42m glob matches nothing, so src/Main.4gl
+			// (uncompiled source) never stages, yet deploy.sh keeps it non-empty.
+			"fglpkg.json":  `{"name":"c.demo","version":"1.0.0",` + meta + `,"bin":{"deploy":"deploy.sh"}}`,
+			"src/Main.4gl": "MAIN\nEND MAIN\n",
+			"deploy.sh":    "#!/bin/sh\necho hi\n",
+		})
+		r := loadLintReport(t)
+		if !r.HasErrors() {
+			t.Fatalf("BDL source present but none staged must error, got %+v", r.Diagnostics)
+		}
+		var msg string
+		for _, d := range r.Errors() {
+			msg += d.Message
+		}
+		if !strings.Contains(msg, "BDL source") {
+			t.Errorf("error should name the dropped BDL source, got: %s", msg)
+		}
+	})
+
+	t.Run("legit bin-only package with no BDL source stays quiet", func(t *testing.T) {
+		writeLintProject(t, map[string]string{
+			"fglpkg.json": `{"name":"b.demo","version":"1.0.0",` + meta + `,"bin":{"deploy":"deploy.sh"}}`,
+			"deploy.sh":   "#!/bin/sh\necho hi\n",
+		})
+		r := loadLintReport(t)
+		if r.HasErrors() {
+			t.Errorf("a bin-only package with no BDL source must not error, got %+v", r.Errors())
+		}
+	})
+
+	t.Run("pure-webcomponent package with a stray example .4gl stays quiet", func(t *testing.T) {
+		writeLintProject(t, map[string]string{
+			"fglpkg.json":                    `{"name":"w.demo","version":"1.0.0",` + meta + `,"webcomponents":["Chart"]}`,
+			"webcomponents/Chart/Chart.html": "<html></html>\n",
+			"examples/demo.4gl":              "MAIN\nEND MAIN\n",
+		})
+		r := loadLintReport(t)
+		if r.HasErrors() {
+			t.Errorf("a pure-webcomponent package must stay exempt, got %+v", r.Errors())
+		}
+	})
+
+	t.Run("staged BDL module -> no error", func(t *testing.T) {
+		writeLintProject(t, map[string]string{
+			"fglpkg.json": `{"name":"ok.demo","version":"1.0.0",` + meta + `,"files":["*.42m"]}`,
+			"Main.42m":    "MAIN\nEND MAIN\n",
+		})
+		r := loadLintReport(t)
+		if r.HasErrors() {
+			t.Errorf("a package that stages a .42m must not error, got %+v", r.Errors())
+		}
+	})
+
+	t.Run("ignored BDL source does not count as dropped", func(t *testing.T) {
+		writeLintProject(t, map[string]string{
+			"fglpkg.json":   `{"name":"i.demo","version":"1.0.0",` + meta + `,"bin":{"deploy":"deploy.sh"}}`,
+			"deploy.sh":     "#!/bin/sh\necho hi\n",
+			".fglpkgignore": "src/\n",
+			"src/Main.4gl":  "MAIN\nEND MAIN\n",
+		})
+		r := loadLintReport(t)
+		if r.HasErrors() {
+			t.Errorf("BDL source excluded by .fglpkgignore must not count as dropped, got %+v", r.Errors())
+		}
+	})
 }
 
 func TestLintUnresolvedProgramWarning(t *testing.T) {
@@ -190,10 +272,12 @@ func TestLintFriendlyTypeErrorSurfaced(t *testing.T) {
 	}
 }
 
-// TestPackRefusesEmptyPackage confirms the lint gate wired into pack blocks a
-// manifest that would stage no modules, rather than silently writing an empty
-// zip.
-func TestPackRefusesEmptyPackage(t *testing.T) {
+// TestPackFlagsEmptyPackage confirms `pack --list` no longer REFUSES an
+// asset-less package (that is publish's job, via --allow-empty) but flags it
+// inline with the listing so the user sees the problem while inspecting the zip
+// (GIS-276).
+func TestPackFlagsEmptyPackage(t *testing.T) {
+	t.Setenv("FGLPKG_GENERO_VERSION", "6.00.01")
 	writeLintProject(t, map[string]string{
 		"fglpkg.json": `{
   "name": "empty",
@@ -203,12 +287,12 @@ func TestPackRefusesEmptyPackage(t *testing.T) {
 }`,
 		"README.md": "# empty\n",
 	})
-	_, err := captureStdout(t, func() error { return cmdPack([]string{"--list"}) })
-	if err == nil {
-		t.Fatal("cmdPack should refuse a package that would contain no modules")
+	out, err := captureStdout(t, func() error { return cmdPack([]string{"--list"}) })
+	if err != nil {
+		t.Fatalf("pack --list should succeed and flag (not refuse) an empty package, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "no BDL modules") {
-		t.Errorf("pack error should explain the no-modules problem, got: %v", err)
+	if !strings.Contains(out, "no assets") {
+		t.Errorf("pack --list should flag the empty package on stdout, got:\n%s", out)
 	}
 }
 
