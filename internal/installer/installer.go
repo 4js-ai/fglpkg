@@ -475,6 +475,32 @@ func reportPruned(pruned []string) {
 // installFromLock installs every entry in the lock file using its pinned
 // URLs and checksums, bypassing the resolver entirely. When opts.Production
 // is true, dev-scoped entries are skipped.
+// lockInstallError turns a per-artifact failure during a lock-based install
+// into an actionable message (GIS-283). A pin the registry no longer serves
+// (ErrArtifactGone) names name@version and the two ways out; a transient failure
+// says so and suggests a retry; any other error keeps its detail with
+// name@version context. `fglpkg remove <name>` and `fglpkg update` apply equally
+// to BDL and webcomponent packages, so no kind distinction is needed.
+func lockInstallError(name, version string, err error) error {
+	switch {
+	case errors.Is(err, ErrArtifactGone):
+		return fmt.Errorf(
+			"%s@%s is no longer available on the registry (deleted or withdrawn), "+
+				"but fglpkg.lock still pins it.\n"+
+				"  Fix it with one of:\n"+
+				"    fglpkg update            re-resolve to a still-available version\n"+
+				"    fglpkg remove %s   drop this dependency from the project",
+			name, version, name)
+	case errors.Is(err, ErrDownloadTransient):
+		return fmt.Errorf(
+			"could not download %s@%s from the registry: %v\n"+
+				"  this looks like a temporary network problem — check your connection and retry",
+			name, version, err)
+	default:
+		return fmt.Errorf("failed to install %s@%s: %w", name, version, err)
+	}
+}
+
 func (i *Installer) installFromLock(lf *lockfile.LockFile, root *manifest.Manifest, opts Options, projectDir string) error {
 	var pkgs []lockfile.LockedPackage
 	var jars []lockfile.LockedJAR
@@ -511,7 +537,7 @@ func (i *Installer) installFromLock(lf *lockfile.LockFile, root *manifest.Manife
 			Signature:   lockSignature(pkg.SignatureKeyID, pkg.Signature),
 		}
 		if err := i.Install(info); err != nil {
-			return fmt.Errorf("failed to install %s: %w", pkg.Name, err)
+			return lockInstallError(pkg.Name, pkg.Version, err)
 		}
 		// The signed artifact variant is "genero<major>" (or the record's
 		// own variant when the lock predates that field).
@@ -546,7 +572,7 @@ func (i *Installer) installFromLock(lf *lockfile.LockFile, root *manifest.Manife
 			Signature:   lockSignature(wc.SignatureKeyID, wc.Signature),
 		}
 		if err := i.Install(info); err != nil {
-			return fmt.Errorf("failed to install webcomponent %s: %w", wc.Name, err)
+			return lockInstallError(wc.Name, wc.Version, err)
 		}
 		if err := i.verifySignature(info, "webcomponent"); err != nil {
 			return fmt.Errorf("failed to install webcomponent %s: %w", wc.Name, err)
@@ -1316,6 +1342,18 @@ func (i *Installer) JarsDir() string { return i.jarsDir }
 
 // ─── Download + verify ────────────────────────────────────────────────────────
 
+// Download-failure sentinels let a lock-based install turn an opaque HTTP/network
+// error into an actionable message that names the package and a remedy (GIS-283).
+var (
+	// ErrArtifactGone means the registry no longer has the artifact (HTTP 404 or
+	// 410) — a permanent condition, typically a package deleted or withdrawn
+	// server-side after the lock was written.
+	ErrArtifactGone = errors.New("artifact no longer available on the registry")
+	// ErrDownloadTransient means the download failed for a retryable reason: a
+	// transport error (DNS, connection refused, timeout) or a 5xx server response.
+	ErrDownloadTransient = errors.New("temporary download failure")
+)
+
 // downloadAndVerify fetches url, streams the body through a DigestingReader
 // into w, and verifies the SHA256 against expectedChecksum in a single pass.
 // name is used only in error messages.
@@ -1379,7 +1417,8 @@ func downloadAndVerify(url, expectedChecksum, name string, w io.Writer, githubTo
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("download failed for %s: %w", name, err)
+		// A transport-level failure (DNS, connection, timeout) is retryable.
+		return fmt.Errorf("download failed for %s (%v): %w", name, err, ErrDownloadTransient)
 	}
 	defer resp.Body.Close()
 
@@ -1391,6 +1430,15 @@ func downloadAndVerify(url, expectedChecksum, name string, w io.Writer, githubTo
 	// message so a mis-scoped Maven mirror token is diagnosable (GIS-365).
 	if resp.StatusCode == http.StatusForbidden {
 		return fmt.Errorf("HTTP 403 downloading %s from %s: Forbidden — check your credentials for this repository (run 'fglpkg login')", name, url)
+	}
+	// 404/410 mean the artifact is gone (permanent); 5xx is a server-side blip
+	// (retryable). Both carry a sentinel so a lock-based install can classify the
+	// failure and print the right remedy (GIS-283).
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		return fmt.Errorf("HTTP %d downloading %s from %s: %w", resp.StatusCode, name, url, ErrArtifactGone)
+	}
+	if resp.StatusCode >= 500 {
+		return fmt.Errorf("HTTP %d downloading %s from %s: %w", resp.StatusCode, name, url, ErrDownloadTransient)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d downloading %s from %s", resp.StatusCode, name, url)
