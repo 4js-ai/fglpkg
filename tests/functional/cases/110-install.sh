@@ -34,3 +34,34 @@ _install_bad_checksum() {
   assert_failure
 }
 it "install fails on a checksum mismatch" _install_bad_checksum
+
+# GIS-283: a lock that pins a package since deleted from the registry must fail
+# with an actionable message on a clean checkout, not a raw HTTP/download error.
+# Simulate it: install normally to generate the lock, repoint the locked
+# downloadUrl at a path the registry now 404s, drop .fglpkg/, then replay.
+_install_gone_locked_dep() {
+  mock_registry_start
+  run install demo.pkg@1.0.0
+  assert_success
+  assert_file "fglpkg.lock"
+
+  python3 - "$FGLPKG_REGISTRY" <<'PY'
+import json, sys
+reg = sys.argv[1]
+with open("fglpkg.lock") as f:
+    lock = json.load(f)
+lock["packages"][0]["downloadUrl"] = reg + "/artifacts/deleted/does-not-exist.zip"
+with open("fglpkg.lock", "w") as f:
+    json.dump(lock, f, indent=2)
+PY
+  rm -rf .fglpkg
+
+  run install --frozen
+  assert_failure
+  assert_contains "no longer available"
+  assert_contains "fglpkg update"
+  assert_contains "fglpkg remove"
+  assert_contains "fglpkg login"         # a 404 may just mean "no access", not "deleted"
+  assert_not_contains "downloading"      # not the raw HTTP error
+}
+it "install from a lock whose package was deleted fails with an actionable message" _install_gone_locked_dep

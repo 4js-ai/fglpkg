@@ -472,6 +472,95 @@ func reportPruned(pruned []string) {
 	}
 }
 
+// lockError carries an actionable, user-facing message while still unwrapping to
+// the failure that caused it, so errors.Is/As keep working on the download
+// sentinels after translation. fmt.Errorf's %w cannot be used for this: it splices
+// the wrapped error's text into the message, and removing that raw HTTP wording is
+// the whole point of GIS-283 — so the message and the cause are carried separately.
+type lockError struct {
+	msg   string
+	cause error
+}
+
+func (e *lockError) Error() string { return e.msg }
+func (e *lockError) Unwrap() error { return e.cause }
+
+// lockInstallError turns a per-artifact failure during a lock-based install into
+// an actionable message (GIS-283). A pin the registry no longer serves
+// (ErrArtifactGone) names name@version and the ways out; a transient failure says
+// so and suggests a retry; any other error keeps its detail with name@version
+// context. `fglpkg remove <name>` and `fglpkg update` apply equally to BDL and
+// webcomponent packages, so the remedies need no kind distinction — kind is used
+// only to keep the fallback message specific ("" for a package).
+// Every branch preserves err in the chain, so a caller can still classify.
+func lockInstallError(kind, name, version string, err error) error {
+	switch {
+	case errors.Is(err, ErrArtifactGone):
+		// A "not found" is evidence the registry will not serve this pin, NOT
+		// proof the version was deleted: a private registry commonly answers 404
+		// rather than 403 for an artifact the caller may not see (so as not to
+		// leak its existence), and a mistyped FGLPKG_REGISTRY or Artifactory
+		// repoKey 404s everything. Stating deletion as fact would send a merely
+		// unauthenticated user to `fglpkg remove` — dropping a dependency they
+		// still need. So name the observation, list the causes, and offer login
+		// alongside update/remove.
+		return &lockError{msg: goneMessage(name, version), cause: err}
+	case errors.Is(err, ErrDownloadTransient):
+		// The cause already ends in the sentinel's "temporary download failure",
+		// so the advice line adds only the action — restating the transience here
+		// said it twice. ErrDownloadTransient spans a transport error (the user's
+		// connection) AND a 429/5xx (server-side throttling or a busy registry),
+		// so the advice must not blame the connection outright: lead with a retry
+		// and offer the connection only as the fallback cause. (Wording the
+		// sentinel itself for a caller-facing read is tracked separately.)
+		return &lockError{
+			msg: fmt.Sprintf("could not install %s@%s: %v\n"+
+				"  this is usually transient — wait a moment and retry (check your connection if it persists)",
+				name, version, err),
+			cause: err,
+		}
+	default:
+		return fmt.Errorf("failed to install %s%s@%s: %w", kindPrefix(kind), name, version, err)
+	}
+}
+
+// kindPrefix renders an artifact-kind label for a message, e.g. "webcomponent ".
+// Empty for an ordinary BDL package, which needs no qualifier.
+func kindPrefix(kind string) string {
+	if kind == "" {
+		return ""
+	}
+	return kind + " "
+}
+
+// goneMessage renders the ErrArtifactGone advice: what was observed, the causes
+// that produce it, then the remedies. The command column is padded to the widest
+// entry rather than to a fixed width, so the two-column layout survives a package
+// name of any length (a hard-coded gap only lines up for one name length).
+func goneMessage(name, version string) string {
+	remedies := [][2]string{
+		{"fglpkg login", "authenticate, if the package is private"},
+		{"fglpkg update", "re-resolve to a still-available version"},
+		{"fglpkg remove " + name, "drop this dependency from the project"},
+	}
+	width := 0
+	for _, r := range remedies {
+		if n := len(r[0]); n > width {
+			width = n
+		}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s@%s is no longer available on the registry, but %s still pins it.\n",
+		name, version, lockfile.Filename)
+	b.WriteString("  The registry answered \"not found\". Either the version was deleted or\n")
+	b.WriteString("  withdrawn, or you do not have access to it (a private package needs a login).\n")
+	b.WriteString("  Fix it with one of:\n")
+	for _, r := range remedies {
+		fmt.Fprintf(&b, "    %-*s   %s\n", width, r[0], r[1])
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // installFromLock installs every entry in the lock file using its pinned
 // URLs and checksums, bypassing the resolver entirely. When opts.Production
 // is true, dev-scoped entries are skipped.
@@ -511,7 +600,7 @@ func (i *Installer) installFromLock(lf *lockfile.LockFile, root *manifest.Manife
 			Signature:   lockSignature(pkg.SignatureKeyID, pkg.Signature),
 		}
 		if err := i.Install(info); err != nil {
-			return fmt.Errorf("failed to install %s: %w", pkg.Name, err)
+			return lockInstallError("", pkg.Name, pkg.Version, err)
 		}
 		// The signed artifact variant is "genero<major>" (or the record's
 		// own variant when the lock predates that field).
@@ -546,7 +635,7 @@ func (i *Installer) installFromLock(lf *lockfile.LockFile, root *manifest.Manife
 			Signature:   lockSignature(wc.SignatureKeyID, wc.Signature),
 		}
 		if err := i.Install(info); err != nil {
-			return fmt.Errorf("failed to install webcomponent %s: %w", wc.Name, err)
+			return lockInstallError("webcomponent", wc.Name, wc.Version, err)
 		}
 		if err := i.verifySignature(info, "webcomponent"); err != nil {
 			return fmt.Errorf("failed to install webcomponent %s: %w", wc.Name, err)
@@ -1316,6 +1405,19 @@ func (i *Installer) JarsDir() string { return i.jarsDir }
 
 // ─── Download + verify ────────────────────────────────────────────────────────
 
+// Download-failure sentinels let a lock-based install turn an opaque HTTP/network
+// error into an actionable message that names the package and a remedy (GIS-283).
+var (
+	// ErrArtifactGone means the registry no longer has the artifact (HTTP 404 or
+	// 410) — a permanent condition, typically a package deleted or withdrawn
+	// server-side after the lock was written.
+	ErrArtifactGone = errors.New("artifact no longer available on the registry")
+	// ErrDownloadTransient means the download failed for a retryable reason: a
+	// transport error (DNS, connection refused, timeout), a 408/429 throttle, or
+	// a 5xx server response.
+	ErrDownloadTransient = errors.New("temporary download failure")
+)
+
 // downloadAndVerify fetches url, streams the body through a DigestingReader
 // into w, and verifies the SHA256 against expectedChecksum in a single pass.
 // name is used only in error messages.
@@ -1379,7 +1481,8 @@ func downloadAndVerify(url, expectedChecksum, name string, w io.Writer, githubTo
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("download failed for %s: %w", name, err)
+		// A transport-level failure (DNS, connection, timeout) is retryable.
+		return fmt.Errorf("download failed for %s (%v): %w", name, err, ErrDownloadTransient)
 	}
 	defer resp.Body.Close()
 
@@ -1388,9 +1491,21 @@ func downloadAndVerify(url, expectedChecksum, name string, w io.Writer, githubTo
 	}
 	// Artifactory returns 403 (not 401) for a bad or missing credential on a
 	// protected repo; surface it as an auth failure rather than the generic
-	// message so a mis-scoped Maven mirror token is diagnosable (GIS-365).
+	// message so a mis-scoped Maven mirror token is diagnosable (GIS-365). NOTE:
+	// an anonymous 403 is ambiguous — a gone GI R2/CDN object vs an auth-required
+	// mirror — and cannot be told apart here without knowing the download's
+	// source, so it is intentionally NOT classified as "gone" (see PR #71 review).
 	if resp.StatusCode == http.StatusForbidden {
 		return fmt.Errorf("HTTP 403 downloading %s from %s: Forbidden — check your credentials for this repository (run 'fglpkg login')", name, url)
+	}
+	// 404/410 mean the artifact is gone (permanent); 408/429 (timeout/rate-limit)
+	// and 5xx are retryable. Each carries a sentinel so a lock-based install can
+	// classify the failure and print the right remedy (GIS-283).
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		return fmt.Errorf("HTTP %d downloading %s from %s: %w", resp.StatusCode, name, url, ErrArtifactGone)
+	}
+	if resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		return fmt.Errorf("HTTP %d downloading %s from %s: %w", resp.StatusCode, name, url, ErrDownloadTransient)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d downloading %s from %s", resp.StatusCode, name, url)
