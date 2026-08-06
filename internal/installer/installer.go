@@ -507,12 +507,15 @@ func lockInstallError(kind, name, version string, err error) error {
 		return &lockError{msg: goneMessage(name, version), cause: err}
 	case errors.Is(err, ErrDownloadTransient):
 		// The cause already ends in the sentinel's "temporary download failure",
-		// so the advice line adds only the action — restating the transience
-		// here said it twice. (Wording the sentinel itself for a caller-facing
-		// read is tracked separately.)
+		// so the advice line adds only the action — restating the transience here
+		// said it twice. ErrDownloadTransient spans a transport error (the user's
+		// connection) AND a 429/5xx (server-side throttling or a busy registry),
+		// so the advice must not blame the connection outright: lead with a retry
+		// and offer the connection only as the fallback cause. (Wording the
+		// sentinel itself for a caller-facing read is tracked separately.)
 		return &lockError{
 			msg: fmt.Sprintf("could not install %s@%s: %v\n"+
-				"  this is usually transient — check your connection and retry",
+				"  this is usually transient — wait a moment and retry (check your connection if it persists)",
 				name, version, err),
 			cause: err,
 		}
