@@ -477,20 +477,22 @@ func reportPruned(pruned []string) {
 // is true, dev-scoped entries are skipped.
 // lockInstallError turns a per-artifact failure during a lock-based install
 // into an actionable message (GIS-283). A pin the registry no longer serves
-// (ErrArtifactGone) names name@version and the two ways out; a transient failure
+// (ErrArtifactGone) names name@version and the ways out; a transient failure
 // says so and suggests a retry; any other error keeps its detail with
 // name@version context. `fglpkg remove <name>` and `fglpkg update` apply equally
 // to BDL and webcomponent packages, so no kind distinction is needed.
 func lockInstallError(name, version string, err error) error {
 	switch {
 	case errors.Is(err, ErrArtifactGone):
-		return fmt.Errorf(
-			"%s@%s is no longer available on the registry (deleted or withdrawn), "+
-				"but fglpkg.lock still pins it.\n"+
-				"  Fix it with one of:\n"+
-				"    fglpkg update            re-resolve to a still-available version\n"+
-				"    fglpkg remove %s   drop this dependency from the project",
-			name, version, name)
+		// A "not found" is evidence the registry will not serve this pin, NOT
+		// proof the version was deleted: a private registry commonly answers 404
+		// rather than 403 for an artifact the caller may not see (so as not to
+		// leak its existence), and a mistyped FGLPKG_REGISTRY or Artifactory
+		// repoKey 404s everything. Stating deletion as fact would send a merely
+		// unauthenticated user to `fglpkg remove` — dropping a dependency they
+		// still need. So name the observation, list the causes, and offer login
+		// alongside update/remove.
+		return errors.New(goneMessage(name, version))
 	case errors.Is(err, ErrDownloadTransient):
 		return fmt.Errorf(
 			"could not download %s@%s from the registry: %v\n"+
@@ -499,6 +501,34 @@ func lockInstallError(name, version string, err error) error {
 	default:
 		return fmt.Errorf("failed to install %s@%s: %w", name, version, err)
 	}
+}
+
+// goneMessage renders the ErrArtifactGone advice: what was observed, the causes
+// that produce it, then the remedies. The command column is padded to the widest
+// entry rather than to a fixed width, so the two-column layout survives a package
+// name of any length (a hard-coded gap only lines up for one name length).
+func goneMessage(name, version string) string {
+	remedies := [][2]string{
+		{"fglpkg login", "authenticate, if the package is private"},
+		{"fglpkg update", "re-resolve to a still-available version"},
+		{"fglpkg remove " + name, "drop this dependency from the project"},
+	}
+	width := 0
+	for _, r := range remedies {
+		if n := len(r[0]); n > width {
+			width = n
+		}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s@%s is no longer available on the registry, but %s still pins it.\n",
+		name, version, lockfile.Filename)
+	b.WriteString("  The registry answered \"not found\". Either the version was deleted or\n")
+	b.WriteString("  withdrawn, or you do not have access to it (a private package needs a login).\n")
+	b.WriteString("  Fix it with one of:\n")
+	for _, r := range remedies {
+		fmt.Fprintf(&b, "    %-*s   %s\n", width, r[0], r[1])
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func (i *Installer) installFromLock(lf *lockfile.LockFile, root *manifest.Manifest, opts Options, projectDir string) error {

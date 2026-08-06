@@ -58,6 +58,19 @@ func TestInstallFromLockGoneArtifact(t *testing.T) {
 			if strings.Contains(msg, "downloading") { // the raw HTTP wording must not leak
 				t.Errorf("gone message should be actionable, not the raw HTTP error:\n%s", msg)
 			}
+			// A 404 is not proof of deletion — a private registry answers it for
+			// an artifact the caller may not see, so the message must offer the
+			// access/login cause and not assert deletion as fact. Without this a
+			// merely unauthenticated user is steered to `fglpkg remove`, dropping
+			// a dependency they still need.
+			for _, want := range []string{"fglpkg login", "do not have access"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("gone message should offer the access cause (%q), got:\n%s", want, msg)
+				}
+			}
+			if strings.Contains(msg, "(deleted or withdrawn)") {
+				t.Errorf("deletion must not be stated as fact, got:\n%s", msg)
+			}
 		})
 	}
 }

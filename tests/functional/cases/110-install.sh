@@ -61,6 +61,7 @@ PY
   assert_contains "no longer available"
   assert_contains "fglpkg update"
   assert_contains "fglpkg remove"
+  assert_contains "fglpkg login"         # a 404 may just mean "no access", not "deleted"
   assert_not_contains "downloading"      # not the raw HTTP error
 }
 it "install from a lock whose package was deleted fails with an actionable message" _install_gone_locked_dep
