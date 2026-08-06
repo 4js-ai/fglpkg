@@ -81,6 +81,31 @@ EOF
 }
 it "a pure-webcomponent package is not flagged empty" _wc_not_empty
 
+# A package with BDL source in the tree that stages NONE of it (wrong root/files)
+# is blocked, even though a bin script keeps it non-empty — the empty guard alone
+# would miss this, so the dropped-BDL-source check must catch it (GIS-276 review).
+_dropped_bdl_blocked() {
+  mkdir -p src
+  printf 'MAIN\nEND MAIN\n' > src/Main.4gl    # source, uncompiled, and root is never set
+  printf '#!/bin/sh\necho hi\n' > deploy.sh
+  cat > fglpkg.json <<'EOF'
+{
+  "name": "dropped.demo",
+  "version": "1.0.0",
+  "description": "demo package for functional tests",
+  "genero": ">=3.20",
+  "license": "MIT",
+  "repository": "https://github.com/example/demo",
+  "author": "fglpkg functional tests",
+  "bin": { "deploy": "deploy.sh" }
+}
+EOF
+  run pack --list
+  assert_failure
+  assert_contains "BDL source"
+}
+it "a package that drops all its BDL source is blocked" _dropped_bdl_blocked
+
 # A bin-only package (shell script, not BDL source) is NOT empty — the case the
 # old BDL-only "no modules" error got wrong.
 _bin_not_empty() {

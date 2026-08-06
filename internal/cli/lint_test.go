@@ -129,6 +129,84 @@ func TestLintEmptyPackageWarning(t *testing.T) {
 	}
 }
 
+// TestLintFlagsDroppedBDLSource pins the GIS-276-review fix: the kind-agnostic
+// empty guard cannot see a dropped-modules mistake once any OTHER asset exists,
+// so lint must still error when BDL source is present in the tree but none of it
+// was staged. The check is keyed on BDL intent in the tree (not package kind),
+// so a legitimately BDL-free bin/include package and a pure-webcomponent package
+// with a stray example source both stay quiet.
+func TestLintFlagsDroppedBDLSource(t *testing.T) {
+	const meta = `"description":"d","license":"MIT","repository":"https://github.com/x/y","author":"a"`
+
+	t.Run("bin asset masks dropped BDL source -> error", func(t *testing.T) {
+		writeLintProject(t, map[string]string{
+			// No root/files: the default *.42m glob matches nothing, so src/Main.4gl
+			// (uncompiled source) never stages, yet deploy.sh keeps it non-empty.
+			"fglpkg.json":  `{"name":"c.demo","version":"1.0.0",` + meta + `,"bin":{"deploy":"deploy.sh"}}`,
+			"src/Main.4gl": "MAIN\nEND MAIN\n",
+			"deploy.sh":    "#!/bin/sh\necho hi\n",
+		})
+		r := loadLintReport(t)
+		if !r.HasErrors() {
+			t.Fatalf("BDL source present but none staged must error, got %+v", r.Diagnostics)
+		}
+		var msg string
+		for _, d := range r.Errors() {
+			msg += d.Message
+		}
+		if !strings.Contains(msg, "BDL source") {
+			t.Errorf("error should name the dropped BDL source, got: %s", msg)
+		}
+	})
+
+	t.Run("legit bin-only package with no BDL source stays quiet", func(t *testing.T) {
+		writeLintProject(t, map[string]string{
+			"fglpkg.json": `{"name":"b.demo","version":"1.0.0",` + meta + `,"bin":{"deploy":"deploy.sh"}}`,
+			"deploy.sh":   "#!/bin/sh\necho hi\n",
+		})
+		r := loadLintReport(t)
+		if r.HasErrors() {
+			t.Errorf("a bin-only package with no BDL source must not error, got %+v", r.Errors())
+		}
+	})
+
+	t.Run("pure-webcomponent package with a stray example .4gl stays quiet", func(t *testing.T) {
+		writeLintProject(t, map[string]string{
+			"fglpkg.json":                    `{"name":"w.demo","version":"1.0.0",` + meta + `,"webcomponents":["Chart"]}`,
+			"webcomponents/Chart/Chart.html": "<html></html>\n",
+			"examples/demo.4gl":              "MAIN\nEND MAIN\n",
+		})
+		r := loadLintReport(t)
+		if r.HasErrors() {
+			t.Errorf("a pure-webcomponent package must stay exempt, got %+v", r.Errors())
+		}
+	})
+
+	t.Run("staged BDL module -> no error", func(t *testing.T) {
+		writeLintProject(t, map[string]string{
+			"fglpkg.json": `{"name":"ok.demo","version":"1.0.0",` + meta + `,"files":["*.42m"]}`,
+			"Main.42m":    "MAIN\nEND MAIN\n",
+		})
+		r := loadLintReport(t)
+		if r.HasErrors() {
+			t.Errorf("a package that stages a .42m must not error, got %+v", r.Errors())
+		}
+	})
+
+	t.Run("ignored BDL source does not count as dropped", func(t *testing.T) {
+		writeLintProject(t, map[string]string{
+			"fglpkg.json":   `{"name":"i.demo","version":"1.0.0",` + meta + `,"bin":{"deploy":"deploy.sh"}}`,
+			"deploy.sh":     "#!/bin/sh\necho hi\n",
+			".fglpkgignore": "src/\n",
+			"src/Main.4gl":  "MAIN\nEND MAIN\n",
+		})
+		r := loadLintReport(t)
+		if r.HasErrors() {
+			t.Errorf("BDL source excluded by .fglpkgignore must not count as dropped, got %+v", r.Errors())
+		}
+	})
+}
+
 func TestLintUnresolvedProgramWarning(t *testing.T) {
 	writeLintProject(t, map[string]string{
 		"fglpkg.json": `{

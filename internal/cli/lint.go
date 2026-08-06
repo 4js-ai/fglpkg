@@ -111,8 +111,8 @@ func lintProject(m *manifest.Manifest, srcDir string) (*manifest.Report, *builtP
 	}
 
 	// Zero-match globs. Only explicit patterns are checked — the default
-	// *.42m/*.42f/*.sch set is not user-authored, so its not-matching is
-	// covered by the empty-package guard instead.
+	// *.42m/*.42f/*.sch set is not user-authored, so its not-matching is covered
+	// by the empty-package guard and the dropped-BDL-source check below.
 	lintZeroMatchFiles(m, srcDir, root, report)
 	lintZeroMatchDocs(m, srcDir, report)
 
@@ -130,20 +130,40 @@ func lintProject(m *manifest.Manifest, srcDir string) (*manifest.Report, *builtP
 	}
 	built := &builtPackage{zip: zipData, checksum: checksum, entries: entries, empty: empty}
 
-	// Collect the basenames of staged .42m modules for the program check.
+	// Collect the basenames of staged .42m modules for the program check, and
+	// note whether ANY BDL source reached the archive for the completeness check.
 	modules := make(map[string]bool)
+	stagedBDL := false
 	for _, e := range entries {
 		base := filepath.Base(e.name)
 		if strings.HasSuffix(base, ".42m") {
 			modules[base] = true
+		}
+		if isBDLSourceFile(base) {
+			stagedBDL = true
 		}
 	}
 
 	// The empty-package check (a staged archive holding nothing but fglpkg.json
 	// and docs) is kind-agnostic and lives on built.empty. lintManifest turns it
 	// into a warning for `fglpkg lint`; pack flags it; publish refuses it unless
-	// --allow-empty (GIS-276). It replaces the old BDL-only "no modules" error,
-	// which mis-fired on legitimate bin-/include-/webcomponent-only packages.
+	// --allow-empty (GIS-276).
+	//
+	// The empty guard cannot see a dropped-modules mistake once any OTHER asset
+	// exists (a bin script, an include file), so guard against that separately:
+	// if the tree under root shows BDL intent — any staged-eligible .4gl/.per/
+	// .42m/.42f/.sch source — but none of it reached the archive, the packaging
+	// config (root/files) is silently dropping it. This restores the coverage the
+	// old BDL-only error gave without its false positive: the tree scan keeps a
+	// legitimately BDL-free bin/include package quiet (no BDL source present),
+	// while still catching a BDL package that lost its modules. The gate matches
+	// the old one so a pure-webcomponent package stays exempt.
+	if (m.HasBDLContent() || !m.HasWebcomponents()) && !stagedBDL {
+		if ignore, ierr := loadIgnore(srcDir); ierr == nil && treeHasBDLSource(root, ignore) {
+			report.Errorf("root", "BDL source exists under %q but none of it was staged into the package — "+
+				"check `root` and `files` (compiled modules such as *.42m must match); the package would ship no BDL", root)
+		}
+	}
 
 	// Program resolution: each declared program must have a staged <name>.42m.
 	for _, p := range m.Programs {
@@ -248,6 +268,53 @@ func lintZeroMatchDocs(m *manifest.Manifest, srcDir string, report *manifest.Rep
 			report.Warnf("docs", "pattern %q matched no files", p)
 		}
 	}
+}
+
+// bdlSourceExtensions are the file kinds that count as "BDL content": compiled
+// modules/forms/schemas and 4gl/per source. Used to answer "does this tree
+// contain BDL source at all" for the dropped-modules completeness check.
+var bdlSourceExtensions = []string{".42m", ".42f", ".42s", ".sch", ".4gl", ".per"}
+
+func isBDLSourceFile(base string) bool {
+	for _, ext := range bdlSourceExtensions {
+		if strings.HasSuffix(base, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// treeHasBDLSource reports whether the source tree under root holds any BDL
+// source file the packer would consider — respecting .fglpkgignore and the
+// .fglpkg/ artifact-dir skip, exactly as stageBDLFiles/lintZeroMatchFiles walk.
+// It answers "does this tree show BDL intent?" for the completeness check, so an
+// ignored or artifact-dir .4gl never counts as dropped content.
+func treeHasBDLSource(root string, ignore *ignoreSet) bool {
+	found := false
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // a genuine walk failure is surfaced authoritatively by the build
+		}
+		if info.IsDir() {
+			if isPackArtifactDir(path) || dirShouldBeSkipped(ignore, path) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		relPath, relErr := filepath.Rel(".", path)
+		if relErr != nil {
+			relPath = path
+		}
+		if ignore.shouldExclude(relPath, false) {
+			return nil
+		}
+		if isBDLSourceFile(filepath.Base(path)) {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
 // printLintReport writes the human-readable errors + warnings report, using the

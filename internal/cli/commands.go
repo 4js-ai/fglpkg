@@ -443,6 +443,8 @@ Reports (among others):
   - a declared 'program' with no matching staged .42m module
   - a package that would publish with no assets — only fglpkg.json and files
     matched by 'docs' (warning; 'fglpkg publish' refuses it unless --allow-empty)
+  - BDL source under 'root' that no 'files' pattern staged, so the package would
+    ship no BDL at all (error — usually a wrong 'root'/'files')
   - missing publish metadata: description, license, repository, author (warning)
 
 The same validation runs automatically inside 'fglpkg pack' and
