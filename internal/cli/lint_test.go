@@ -102,7 +102,11 @@ func TestLintZeroMatchFilesWarning(t *testing.T) {
 	}
 }
 
-func TestLintNoModulesError(t *testing.T) {
+// TestLintEmptyPackageWarning: a package whose archive would hold nothing but
+// fglpkg.json and docs is a WARNING, not an error — it stays publishable via
+// `fglpkg publish --allow-empty`, so `fglpkg lint` flags it loudly but exits 0
+// (GIS-276). This replaces the old BDL-only "no modules" hard error.
+func TestLintEmptyPackageWarning(t *testing.T) {
 	writeLintProject(t, map[string]string{
 		"fglpkg.json": `{
   "name": "empty",
@@ -113,15 +117,15 @@ func TestLintNoModulesError(t *testing.T) {
 		"README.md": "# empty\n",
 	})
 	r := loadLintReport(t)
-	if !r.HasErrors() {
-		t.Fatalf("a package that stages no modules must be an error, got %+v", r.Diagnostics)
+	if r.HasErrors() {
+		t.Fatalf("an asset-less package is a warning, not an error, got errors: %+v", r.Errors())
 	}
 	var msg string
-	for _, d := range r.Errors() {
+	for _, d := range r.Warnings() {
 		msg += d.Message
 	}
-	if !strings.Contains(msg, "no BDL modules") {
-		t.Errorf("error should mention no BDL modules, got: %s", msg)
+	if !strings.Contains(msg, "no assets") {
+		t.Errorf("warning should mention no assets, got: %s", msg)
 	}
 }
 
@@ -190,10 +194,12 @@ func TestLintFriendlyTypeErrorSurfaced(t *testing.T) {
 	}
 }
 
-// TestPackRefusesEmptyPackage confirms the lint gate wired into pack blocks a
-// manifest that would stage no modules, rather than silently writing an empty
-// zip.
-func TestPackRefusesEmptyPackage(t *testing.T) {
+// TestPackFlagsEmptyPackage confirms `pack --list` no longer REFUSES an
+// asset-less package (that is publish's job, via --allow-empty) but flags it
+// inline with the listing so the user sees the problem while inspecting the zip
+// (GIS-276).
+func TestPackFlagsEmptyPackage(t *testing.T) {
+	t.Setenv("FGLPKG_GENERO_VERSION", "6.00.01")
 	writeLintProject(t, map[string]string{
 		"fglpkg.json": `{
   "name": "empty",
@@ -203,12 +209,12 @@ func TestPackRefusesEmptyPackage(t *testing.T) {
 }`,
 		"README.md": "# empty\n",
 	})
-	_, err := captureStdout(t, func() error { return cmdPack([]string{"--list"}) })
-	if err == nil {
-		t.Fatal("cmdPack should refuse a package that would contain no modules")
+	out, err := captureStdout(t, func() error { return cmdPack([]string{"--list"}) })
+	if err != nil {
+		t.Fatalf("pack --list should succeed and flag (not refuse) an empty package, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "no BDL modules") {
-		t.Errorf("pack error should explain the no-modules problem, got: %v", err)
+	if !strings.Contains(out, "no assets") {
+		t.Errorf("pack --list should flag the empty package on stdout, got:\n%s", out)
 	}
 }
 
