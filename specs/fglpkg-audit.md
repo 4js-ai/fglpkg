@@ -4,6 +4,7 @@
 **Date:** 2026-05-13
 **Author:** Mike Folcher
 **Tracking:** P0 #5 in [docs/market-readiness-gaps.md](../docs/market-readiness-gaps.md)
+**Hardened:** 2026-08-06 (GIS-369) — CVSS-derived severity when no GHSA label, retry-with-backoff on transient HTTP, and an honest "front-end JS not scanned" note. The coverage-extension follow-ups were split out: GIS-431 (web-component / bundled-JS CVEs) and GIS-432 (transitive Maven POM resolution).
 
 ---
 
@@ -34,6 +35,8 @@ Enterprise security review will block adoption of any package manager that canno
 
 The lockfile records BDL packages (`LockedPackage`), but no public CVE feed indexes them. v1 audits only `LockFile.JARs`. The command prints one informational line stating BDL packages were not scanned so users don't assume otherwise. When a BDL advisory store exists (future work), the same command grows to cover it without a flag change.
 
+Web-component (front-end / bundled-JS) dependencies are likewise not scanned — the shipped bundle carries no machine-readable dependency inventory (see GIS-431). When the project installs any web-component package, `audit` prints an additional note to that effect (GIS-369), so a clean result is never mistaken for front-end coverage. Both notes appear in the table output and in the JSON `notes` array.
+
 ## CLI surface
 
 ```
@@ -63,9 +66,9 @@ Add `audit` to the dispatcher in [internal/cli/cli.go](../internal/cli/cli.go) a
   ```
 - Response: `{"vulns": [...]}` where each vuln has `id` (GHSA-...), `summary`, `details`, `aliases` (includes CVE), `severity[]` (CVSS vectors), `references[]`, and `database_specific.severity` (`LOW|MODERATE|HIGH|CRITICAL` for GHSA-sourced entries).
 - Per-JAR query: OSV.dev does not have a batch endpoint that returns full vuln details — `/v1/querybatch` returns vuln IDs only, requiring N+K follow-up calls. v1 issues one `/v1/query` request per deduplicated PURL. For typical projects (≤ ~30 JARs) this completes in under a second.
-- Timeout: 30s per request. On HTTP error (non-2xx, timeout, network), abort with a clear error — never silently report "no vulnerabilities" on a failed query.
+- Timeout: 30s per request. Transient failures (HTTP 429, 5xx, transport errors) are retried with exponential backoff, honoring `Retry-After`, up to 3 attempts per coordinate (GIS-369). A failure that survives retries aborts with a clear error — never silently report "no vulnerabilities" on a failed query.
 
-**Severity is taken from `database_specific.severity`** (GHSA-sourced advisories — the majority — set this field directly). When absent the finding defaults to `medium`, erring conservative so unclassified CVEs surface at the default floor rather than being silently demoted to `low` and skipped.
+**Severity is taken from `database_specific.severity`** (GHSA-sourced advisories — the majority — set this field directly). When that label is absent, severity is derived from the advisory's CVSS v3 vector — parsed to a base score, then bucketed on the standard scale (0.1–3.9 low, 4.0–6.9 medium, 7.0–8.9 high, 9.0–10.0 critical) — and `cvssScore` is populated. Only when neither a GHSA label nor a scorable CVSS vector is present does the finding default to `medium`, erring conservative so unclassified CVEs surface at the default floor rather than being silently demoted to `low` and skipped. (Hardened in GIS-369; v1 defaulted every non-GHSA finding to `medium`, so a critical with only a CVSS vector could slip under a `--severity=high` gate.)
 
 The endpoint URL is a package-level constant and may be overridden via env var to ease testing:
 
@@ -102,7 +105,9 @@ Intentionally undocumented for end users.
      HIGH     → high
      MODERATE → medium    (GHSA uses "MODERATE", not "MEDIUM")
      LOW      → low
-     absent   → medium    (fail-safe default; surfaces unclassified CVEs at the default floor)
+     absent   → derive from the CVSS v3 vector (base score → bucket); if no
+                scorable vector either, default medium (fail-safe; surfaces
+                unclassified CVEs at the default floor)
 
 7. Render output (see below).
 
@@ -127,7 +132,7 @@ type Finding struct {
     CVE           string   // first CVE alias, if any
     Title         string
     Description   string
-    CVSSScore     float64  // unset in v1 (no CVSS parser)
+    CVSSScore     float64  // CVSS v3 base score when a vector parses (GIS-369)
     CVSSVector    string   // raw CVSS_V3 score string from OSV.dev
     Severity      string   // critical|high|medium|low
     Reference     string   // preferred ADVISORY URL
@@ -218,8 +223,8 @@ This matches `npm audit` semantics and the existing `fglpkg outdated` pattern (w
 - **No lockfile:** clear error, exit 2.
 - **Lockfile present but no JARs:** print informational line, exit 0.
 - **OSV.dev returns 4xx:** show the response body in the error and exit 2 — likely a malformed PURL.
-- **OSV.dev returns 5xx or network failure:** exit 2 with the underlying error. Do not retry in v1; CI users can rerun the command. (Retry-with-backoff is a future enhancement.)
-- **Any per-JAR failure** is treated as full failure — never produce a "maybe-clean" report from a partially failed run.
+- **OSV.dev returns 429/5xx or a transport failure:** retried with exponential backoff (honoring `Retry-After`), up to 3 attempts per coordinate (GIS-369). If every attempt fails, exit 2 with the underlying error.
+- **Any per-JAR failure that survives retries** is treated as full failure — never produce a "maybe-clean" report from a partially failed run. A single transient blip no longer aborts the audit, but a persistent failure still fails closed.
 
 ## Configuration
 
@@ -272,6 +277,7 @@ Integration: no live OSV.dev calls in CI. A manual smoke test against the public
 - BDL package coverage (needs an advisory data store — probably a registry endpoint).
 - Multiple advisory sources with dedup (GHSA, NVD).
 - Cached advisory data + `--offline` mode.
-- Retry-with-backoff on transient HTTP failures.
+- ~~Retry-with-backoff on transient HTTP failures.~~ Done — GIS-369.
+- Web-component / bundled-JS CVE coverage (GIS-431) and transitive Maven POM resolution (GIS-432), split out of the original GIS-369 coverage-extension ask.
 - SARIF output for GitHub Code Scanning integration.
 - Suppress / acknowledgement file (`.fglpkg-audit-ignore`) for known-accepted findings.

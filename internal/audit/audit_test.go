@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/lockfile"
 )
@@ -123,7 +124,9 @@ func TestSeverityRank(t *testing.T) {
 }
 
 // TestAuditHTTPError verifies a 5xx response surfaces as an error
-// rather than being silently treated as a clean tree.
+// rather than being silently treated as a clean tree. MaxAttempts:1
+// disables retries so this pins the fail path without backoff delays;
+// the retry behavior is covered separately below.
 func TestAuditHTTPError(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal", http.StatusInternalServerError)
@@ -132,12 +135,170 @@ func TestAuditHTTPError(t *testing.T) {
 
 	_, err := Audit([]lockfile.LockedJAR{
 		{GroupID: "g", ArtifactID: "a", Version: "1.0.0"},
-	}, Options{URL: ts.URL})
+	}, Options{URL: ts.URL, MaxAttempts: 1})
 	if err == nil {
 		t.Fatal("expected error on HTTP 500, got nil")
 	}
 	if !strings.Contains(err.Error(), "500") {
 		t.Errorf("err = %v, want one mentioning status 500", err)
+	}
+}
+
+// TestAuditRetriesTransientThenSucceeds: two 503s followed by a clean
+// response must resolve to success — a blip no longer aborts the audit.
+func TestAuditRetriesTransientThenSucceeds(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n < 3 {
+			http.Error(w, "busy", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = io.WriteString(w, `{"vulns": []}`)
+	}))
+	defer ts.Close()
+
+	_, err := Audit([]lockfile.LockedJAR{{GroupID: "g", ArtifactID: "a", Version: "1.0.0"}},
+		Options{URL: ts.URL, sleep: func(time.Duration) {}})
+	if err != nil {
+		t.Fatalf("expected success after retries, got %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 3 {
+		t.Errorf("calls = %d, want 3 (two 503s then success)", calls)
+	}
+}
+
+// TestAuditRetryExhaustedFailsClosed: when every attempt fails the audit
+// still errors — a partially-checked tree is never reported as clean.
+func TestAuditRetryExhaustedFailsClosed(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	}))
+	defer ts.Close()
+
+	_, err := Audit([]lockfile.LockedJAR{{GroupID: "g", ArtifactID: "a", Version: "1.0.0"}},
+		Options{URL: ts.URL, MaxAttempts: 4, sleep: func(time.Duration) {}})
+	if err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 4 {
+		t.Errorf("calls = %d, want 4 (all attempts made)", calls)
+	}
+	if !strings.Contains(err.Error(), "503") {
+		t.Errorf("err = %v, want one mentioning 503", err)
+	}
+}
+
+// TestAuditDoesNotRetryPermanent4xx: a 400 (e.g. malformed PURL) is not
+// retryable — retrying cannot help, so it fails on the first attempt.
+func TestAuditDoesNotRetryPermanent4xx(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		http.Error(w, "bad purl", http.StatusBadRequest)
+	}))
+	defer ts.Close()
+
+	_, err := Audit([]lockfile.LockedJAR{{GroupID: "g", ArtifactID: "a", Version: "1.0.0"}},
+		Options{URL: ts.URL, sleep: func(time.Duration) {}})
+	if err == nil {
+		t.Fatal("expected error on 400")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1 (400 is permanent, no retry)", calls)
+	}
+}
+
+// TestAuditHonorsRetryAfter: a 429 carrying Retry-After must delay by
+// exactly that interval (overriding exponential backoff) before retrying.
+func TestAuditHonorsRetryAfter(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n == 1 {
+			w.Header().Set("Retry-After", "2")
+			http.Error(w, "slow down", http.StatusTooManyRequests)
+			return
+		}
+		_, _ = io.WriteString(w, `{"vulns": []}`)
+	}))
+	defer ts.Close()
+
+	var slept []time.Duration
+	_, err := Audit([]lockfile.LockedJAR{{GroupID: "g", ArtifactID: "a", Version: "1.0.0"}},
+		Options{URL: ts.URL, sleep: func(d time.Duration) { slept = append(slept, d) }})
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if len(slept) != 1 || slept[0] != 2*time.Second {
+		t.Errorf("sleep durations = %v, want [2s] from Retry-After", slept)
+	}
+}
+
+// TestAuditSeverityFromCVSSWhenGHSAMissing: a vuln with no GHSA label but a
+// critical CVSS vector must be classified from the vector (critical), not
+// silently defaulted to medium — the core GIS-369 severity-fidelity fix.
+func TestAuditSeverityFromCVSSWhenGHSAMissing(t *testing.T) {
+	resp := osvResponse{
+		Vulns: []osvVulnerability{
+			{
+				ID:      "OSV-2024-777",
+				Summary: "No GHSA label, but a critical CVSS vector",
+				Severity: []osvSeverity{
+					{Type: "CVSS_V3", Score: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"},
+				},
+				// DatabaseSpecific.Severity intentionally empty.
+			},
+		},
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer ts.Close()
+
+	findings, err := Audit([]lockfile.LockedJAR{{GroupID: "g", ArtifactID: "a", Version: "1.0.0"}},
+		Options{URL: ts.URL})
+	if err != nil {
+		t.Fatalf("Audit error: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want 1", len(findings))
+	}
+	if findings[0].Severity != SeverityCritical {
+		t.Errorf("Severity = %q, want critical (derived from CVSS 9.8, not the medium default)", findings[0].Severity)
+	}
+	if findings[0].CVSSScore < 9.0 {
+		t.Errorf("CVSSScore = %v, want >= 9.0", findings[0].CVSSScore)
 	}
 }
 
