@@ -8,9 +8,11 @@ This guide covers the day-to-day usage of fglpkg, the package manager for Genero
 - [Installing fglpkg](#installing-fglpkg)
 - [Keeping fglpkg Up to Date](#keeping-fglpkg-up-to-date)
 - [Setting Up Your Environment](#setting-up-your-environment)
+- [Shell Completion](#shell-completion)
 - [Creating a New Project](#creating-a-new-project)
 - [Managing Dependencies](#managing-dependencies)
 - [Publishing a Package](#publishing-a-package)
+- [Validating with `fglpkg lint`](#validating-with-fglpkg-lint)
 - [Deprecating & Relocating Packages](#deprecating--relocating-packages)
 - [Working with Java JARs](#working-with-java-jars)
 - [Webcomponent Packages](#webcomponent-packages)
@@ -22,6 +24,8 @@ This guide covers the day-to-day usage of fglpkg, the package manager for Genero
 - [Workspaces (Monorepos)](#workspaces-monorepos)
 - [Lock Files](#lock-files)
 - [Package Signature Verification](#package-signature-verification)
+- [Auditing dependencies for vulnerabilities](#auditing-dependencies-for-vulnerabilities)
+- [Software Bill of Materials (SBOM)](#software-bill-of-materials-sbom)
 - [Package Ownership](#package-ownership)
 - [Troubleshooting](#troubleshooting)
 
@@ -448,6 +452,36 @@ under `~/.fglpkg`, `fglpkg` prints a note (on stderr) pointing at the old locati
 to silently vanish. The note repeats on each command until the relocation is resolved — either
 reinstall the packages under the new root, or set `FGLPKG_GLOBAL_DIR=~/.fglpkg` to keep the old one.
 
+## Shell Completion
+
+`fglpkg completion <shell>` prints a completion script for your shell. It takes
+exactly one positional argument — the shell name — one of `bash`, `zsh`, `fish`,
+or `powershell` (`pwsh` is accepted as an alias of `powershell`):
+
+```bash
+fglpkg completion bash
+fglpkg completion zsh
+fglpkg completion fish
+fglpkg completion powershell
+```
+
+Source it for the current session, or install it permanently. For example, with
+bash:
+
+```bash
+# current session
+source <(fglpkg completion bash)
+
+# permanent
+fglpkg completion bash > /etc/bash_completion.d/fglpkg
+```
+
+For PowerShell, add it to your `$PROFILE`:
+
+```powershell
+fglpkg completion powershell | Out-String | Invoke-Expression
+```
+
 ## Creating a New Project
 
 To start a new Genero BDL project with fglpkg:
@@ -465,6 +499,28 @@ Pass `--yes` (or run with a non-interactive stdin, e.g. in CI or scaffolding) to
 ```bash
 fglpkg init --yes
 ```
+
+### Scaffolding from a template
+
+Pass `--template` (`-t`) to scaffold a starter layout instead of writing a bare `fglpkg.json`. Three templates are built in:
+
+```bash
+fglpkg init [--template <library|app|webcomponent>] [--yes]
+```
+
+| Template | Scaffolds |
+|---|---|
+| `library` | A publishable BDL package — `README.md`, `.gitignore`, and a sample `Lib.4gl` module |
+| `app` | An application project that consumes packages (not published) — `README.md`, `.gitignore`, and a `Main.4gl` |
+| `webcomponent` | A Genero webcomponent package — a `webcomponents/MyWidget/` bundle (html/css/js), plus `README.md` and `.gitignore` |
+
+```bash
+fglpkg init --template library
+fglpkg init -t webcomponent
+fglpkg init --template app --yes
+```
+
+Templates declare no external dependencies, so `fglpkg install` immediately after `init` never references a package that might not exist. Existing files are never overwritten.
 
 A freshly created manifest looks like this (with `repository` filled in from the git remote):
 
@@ -1036,6 +1092,25 @@ Supported constraint syntax:
 - `>=3.20.0 <5.0.0` — explicit range
 - `^3.20.0 || ^4.0.0` — multiple ranges
 - `*` or omit — compatible with any version
+
+## Validating with `fglpkg lint`
+
+`fglpkg lint` (alias `fglpkg check`) validates `fglpkg.json` and the package it would produce, printing an errors-and-warnings report. It takes **no flags or arguments** — any argument is an error — and exits non-zero when it finds any error, so it can gate CI:
+
+```bash
+fglpkg lint
+fglpkg check     # same command
+```
+
+The same validation runs automatically inside `fglpkg pack` and `fglpkg publish`, so these problems cannot be skipped there — errors block the build, while warnings are printed loudly but do not stop it on their own.
+
+What it reports, among others:
+
+- a `files` or `docs` glob that matches **no files** (warning)
+- a declared `program` with **no matching staged `.42m`** module (warning)
+- a package that would publish with **no assets** — nothing but `fglpkg.json` and files matched only by `docs` (warning; `fglpkg publish` refuses it unless `--allow-empty`)
+- **BDL source under `root` that no `files` pattern staged**, so the package would ship no BDL at all (error — usually a wrong `root` / `files`)
+- **missing publish metadata** — description, license, repository, author (warnings)
 
 ## Deprecating & Relocating Packages
 
@@ -1940,13 +2015,74 @@ Set `signing.enforce` in `~/.fglpkg/config.json` (or the `FGLPKG_SIGNING` enviro
 
 `fglpkg install --no-verify-signature` skips verification for a single run (discouraged; for emergencies).
 
-### Auditing signatures
+## Auditing dependencies for vulnerabilities
+
+`fglpkg audit` cross-checks the Java JARs recorded in `fglpkg.lock` against the public [OSV.dev](https://osv.dev) advisory database and reports any known vulnerabilities. It needs a `fglpkg.lock`, so run `fglpkg install` first.
+
+```bash
+fglpkg audit
+fglpkg audit --json
+fglpkg audit --severity=high
+fglpkg audit --production
+```
+
+Flags:
+
+| Flag | Effect |
+|---|---|
+| `--json` | Emit a schema-versioned JSON report on stdout (each finding carries a `cvssScore` where one could be computed) instead of the human-readable table |
+| `--severity=<low\|medium\|high\|critical>` | Severity floor that fails the build. Default `medium`. **Equals form only** — `--severity high` is not accepted |
+| `--production` (alias `--prod`) | Skip JARs recorded under the `dev` scope; optional-scoped JARs are still audited |
+| `--offline` | Reserved for a future cached-advisory mode; it currently errors |
+
+**Exit codes** make `audit` a CI gate:
+
+| Code | Meaning |
+|---|---|
+| `0` | Clean — no findings at or above the severity floor |
+| `1` | At least one finding at or above the floor |
+| `2` | The command itself failed (missing lockfile, network error, `--offline`, an unknown flag) |
+
+**How severity is decided.** A finding's severity comes from the advisory's GHSA label when present. When that label is absent it is derived from the advisory's CVSS v3 vector (and the computed base score is reported as `cvssScore` in `--json`). Only when neither a GHSA label nor a scorable CVSS v3 vector is available does a finding default to `medium` — erring conservative so an unclassified CVE still surfaces at the default floor rather than slipping below it.
+
+**Transient failures are retried.** OSV.dev is queried once per JAR coordinate. A transient failure (HTTP 429, 5xx, or a transport error) is retried with exponential backoff, honoring a server-supplied `Retry-After`, before the audit gives up. A persistent failure fails closed and reports an error (exit 2) — a partially-checked tree is never reported as clean.
+
+**Coverage caveats.** Two notes are printed with every report:
+
+- **BDL packages are not scanned** — no public advisory feed indexes them yet.
+- **Web-component front-end (JavaScript) dependencies are not scanned** — this note is added when the project installs any webcomponent package.
+
+### The `audit signatures` subcommand
+
+`fglpkg audit signatures` is a distinct subcommand: rather than scanning Java JARs for CVEs, it re-verifies the Layer 1 registry signatures (see [Package Signature Verification](#package-signature-verification)).
 
 ```bash
 fglpkg audit signatures
 ```
 
 Re-verifies every package in `fglpkg.lock` against the current keys manifest, printing one line per package and exiting non-zero if any package is unsigned or fails to verify — suitable as a CI gate.
+
+## Software Bill of Materials (SBOM)
+
+`fglpkg sbom` emits a Software Bill of Materials for the current project, generated entirely from `fglpkg.lock` — it makes **no network calls**, so it works offline and in a sealed CI build. It needs a `fglpkg.lock`, so run `fglpkg install` first.
+
+```bash
+fglpkg sbom                       # CycloneDX JSON to stdout
+fglpkg sbom -o sbom.json          # write to a file
+fglpkg sbom --pretty              # indented JSON (default is compact)
+fglpkg sbom --production          # skip dev-scoped JARs
+```
+
+Flags:
+
+| Flag | Effect |
+|---|---|
+| `-o`, `--output <path>` | Write the document to a file instead of stdout |
+| `--pretty` | Indent the JSON (the default is compact) |
+| `--production` (alias `--prod`) | Skip JARs recorded under the `dev` scope |
+| `--format=<cyclonedx\|spdx>` | Output format. Default (and only supported) `cyclonedx`; `spdx` is reserved for a future release and errors today |
+
+The v1 output is CycloneDX 1.5 JSON. The document's serial number is derived from its content, so it is stable across runs for the same lockfile. Set `SOURCE_DATE_EPOCH` (the reproducible-builds convention) to a Unix timestamp to pin the document's timestamp for a byte-reproducible SBOM; otherwise the timestamp reflects the current time.
 
 ## Package Ownership
 
@@ -2010,6 +2146,22 @@ If dependencies in `fglpkg.json` have changed and `fglpkg install` says the lock
 ```bash
 fglpkg update
 ```
+
+### A locked dependency can no longer be downloaded
+
+When `fglpkg install` restores a pinned dependency from `fglpkg.lock` and the download fails, the message depends on what the server said. This applies to both BDL and webcomponent packages.
+
+- **HTTP 404 / 410 — no longer available.** The registry no longer serves the pinned `name@version`: it was deleted or withdrawn, or you do not have access to it. (A private registry commonly answers 404 rather than 403 for a package you cannot see, so this can simply mean you need to log in.) fglpkg names the package and offers three ways out:
+
+  ```bash
+  fglpkg login             # authenticate, if the package is private
+  fglpkg update            # re-resolve to a still-available version
+  fglpkg remove <name>     # drop this dependency from the project
+  ```
+
+- **Transport error / HTTP 408 / 429 / 5xx — transient.** A connection failure, timeout, rate limit, or server-side error. It is usually temporary — wait a moment and retry (check your connection if it persists).
+
+- **HTTP 403 — authentication failure.** A bad or missing credential for the repository (JFrog Artifactory returns 403, not 401, for this). Run `fglpkg login` (or `fglpkg login --registry <name>` for a secondary repo).
 
 ### `fglpkg list` shows a package I removed
 

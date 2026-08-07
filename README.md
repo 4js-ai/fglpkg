@@ -420,8 +420,12 @@ fglpkg bdl --list                        # List available BDL programs
 # Discovery & inspection
 fglpkg info <pkg>[@ver]                  # Show registry metadata for a package
 fglpkg outdated                          # List FGL deps with newer versions (CI gate)
-fglpkg audit                             # Scan installed Java JARs for CVEs (OSV.dev)
+fglpkg audit                             # Scan installed Java JARs for CVEs (OSV.dev);
+                                         #   --severity, --production, --json; derives severity
+                                         #   from CVSS when no GHSA label; retries transient
+                                         #   failures; web-component front-end deps not yet scanned
 fglpkg sbom                              # Emit a CycloneDX SBOM from fglpkg.lock
+fglpkg lint                              # Validate fglpkg.json before packing or publishing (alias: check)
 fglpkg pack                              # Build the publishable zip without uploading
 fglpkg completion bash                   # Print shell completion script
 
@@ -432,6 +436,7 @@ fglpkg publish --ci                      # Non-interactive publish (CI): needs F
 fglpkg publish --private                 # Publish as private (overrides fglpkg.json visibility)
 fglpkg publish --public                  # Publish as public (overrides fglpkg.json visibility)
 fglpkg publish --changelog "notes..."    # Set this version's changelog inline (overrides CHANGELOG.md)
+fglpkg publish --allow-empty             # Publish even when the archive would stage no assets
 
 # Deprecating & relocating (npm-style; stays installable, warns consumers)
 fglpkg deprecate chart-3d@1.2.3 "reason"       # Deprecate one version with a message
@@ -504,6 +509,8 @@ The publish flow:
 3. `POST /registry/packages/:slug/versions` — creates the version (a `409` means the version already exists; publish proceeds to add a new variant to it). This call also carries the version's **changelog**: by default the section for the version being published is extracted from a `CHANGELOG.md` in the project root ([Keep a Changelog](https://keepachangelog.com) format, e.g. `## [1.2.0]`), or you can supply it inline with `--changelog "<text>"`. If `CHANGELOG.md` exists but has no entry for the version, publish warns and sends an empty changelog.
 4. `PUT /registry/packages/:slug/versions/:version/artifacts/:variant` — streams the zip body; the registry computes size + checksum and stores it in R2.
 5. `POST /registry/packages/:slug/versions/:version/submit` — marks the version pending for admin review.
+
+Before any of these steps, fglpkg **refuses to publish a package with no assets** — one whose archive would contain only `fglpkg.json` and files matched solely by `docs`. The guard runs before Genero detection, auth, or any network call, so the mistake surfaces at the earliest preview: it applies under `--dry-run` too, and identically to GI and Artifactory targets. Pass `--allow-empty` to override it.
 
 Authentication uses the same OAuth/PAT bearer as the other consumer commands
 (`FGLPKG_TOKEN` overrides stored credentials). No GitHub token is involved in

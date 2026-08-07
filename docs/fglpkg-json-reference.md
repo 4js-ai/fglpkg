@@ -181,7 +181,7 @@ confusing errors:
   `"<key>: expected <hint>, got <type>"` (for instance *`docs: expected an array
   of strings, got string`*) rather than a raw decoder error mentioning a Go
   struct field. A per-field hint table covers `docs`, `files`, `programs`,
-  `keywords`, `include`, `webcomponents`, and `bin`.
+  `keywords`, `include`, `profile`, `webcomponents`, and `bin`.
 - **`dependencies` accepts only the keys `fgl` and `java`.** Anything else
   produces a hint: *`Did you mean "dependencies.fgl.<name>"?`* — because the
   most common mistake is nesting package names one level too shallow.
@@ -223,10 +223,21 @@ concise definition, followed by behavior notes.
 ### 6.1 Identity & registry metadata
 
 #### `name` — string · **Required**
-The package's registry identifier. Must be unique within a registry.
-Pattern `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`, 1–128 characters — conventionally
-lowercase, no spaces. This is the string consumers put under
-`dependencies.fgl` and pass to `fglpkg install <name>`.
+The package's registry identifier — the string consumers put under
+`dependencies.fgl` and pass to `fglpkg install <name>`. Must be unique within a
+registry.
+
+The name is **canonicalized before validation**: uppercase is lowercased and
+each run of `-`, `_`, or `.` is collapsed to a single `-` (the PyPI / PEP 503
+rule — see [internal/slug/slug.go](../internal/slug/slug.go), GIS-271), so
+`My_Utils`, `my.utils`, and `my-utils` all name the **same package**. The
+resulting canonical slug must match `^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$` — **2–64
+characters**, lowercase letters, digits, and hyphens only, starting **and**
+ending with an alphanumeric.
+
+The shape is enforced at **publish time** (`ValidateForPublish`); the load-time
+`Validate` only checks that `name` is non-empty, so a malformed name loads
+without complaint but fails `fglpkg publish`.
 
 #### `version` — string · **Required**
 The package version in [semver](https://semver.org) form:
@@ -254,7 +265,8 @@ URL of the source repository (e.g. `https://github.com/org/repo`).
 #### `keywords` — array of string
 Free-form tags intended to aid discovery, e.g. `["database", "utilities"]`.
 Advisory metadata only — fglpkg does not interpret them, and they are **not
-currently matched by `fglpkg search`** (see GIS-268). Entries must be unique.
+currently matched by `fglpkg search`** (see GIS-268). Duplicate entries are not
+rejected; `fglpkg lint` reports them as a warning.
 
 #### `visibility` — string · `"public"` | `"private"`
 Who can read the package on the registry. `"public"` (the default when the key
@@ -295,7 +307,7 @@ the manifest as having BDL content (see [§4](#4-how-fglpkg-decides-what-kind-of
 #### `programs` — array of string
 Module names (**without** the `.42m` extension) that contain a `MAIN` block and
 can therefore be launched with `fglpkg bdl <program>`. Example:
-`["PoiConvert", "PoiMerge"]`. Entries must be unique. Listing a program here is
+`["PoiConvert", "PoiMerge"]`. Listing a program here is
 what makes it discoverable via `fglpkg bdl --list`.
 
 #### `webcomponents` — array of string
@@ -306,6 +318,17 @@ Each name corresponds to a source directory `webcomponents/<NAME>/` containing
 at least `<NAME>.html`. When present, the array must have at least one entry.
 May be combined freely with the BDL fields to ship a wrapper module alongside
 its companion component (a "mixed" package).
+
+#### `generoPackages` — array of string
+The Genero `PACKAGE` namespace(s) this package's library modules provide (e.g.
+`["com.fourjs.db"]`), recorded so a consumer can materialize a PACKAGE-correct
+merged `FGLLDPATH` root without re-reading source. **Normally you do not set
+this** — it is computed automatically at `pack` / `publish` from the shipped
+modules' namespace directory layout (a compiled module's directory mirrors its
+`PACKAGE`); an author may declare it explicitly only as an override. Out-of-namespace
+modules (MAIN programs, tests, and examples listed in `programs`) and flat-root
+modules never contribute a namespace. See
+[specs/package-layout-materialized-root.md](../specs/package-layout-materialized-root.md).
 
 ### 6.4 Packaging layout
 
@@ -326,7 +349,7 @@ walking `root`. A pattern **without** a `/` is matched against each file's
 `*` stays within one path segment and `**` spans any number of segments (e.g.
 `tests/*.4gl`, `com/**/*.42m`); a leading `/` is accepted and anchors at `root`.
 When omitted, the default is `["*.42m", "*.42f", "*.sch"]` (compiled modules,
-compiled forms, and schema files). Entries must be unique. Files can additionally
+compiled forms, and schema files). Files can additionally
 be excluded with a `.fglpkgignore` file — note its patterns are relative to the
 **project root**, whereas `files` path-patterns are relative to `root`.
 
@@ -359,8 +382,7 @@ manifest.
 Glob patterns selecting documentation files to include in the published zip,
 e.g. `["README.md", "docs/**/*.md"]`. Supports `**` to match any number of
 directory levels. **There is no default** — documentation is included only when
-you declare it. Installed docs are browsable with `fglpkg docs`. Entries must be
-unique.
+you declare it. Installed docs are browsable with `fglpkg docs`.
 
 #### `bin` — object (map: command name → script path)
 Executable scripts shipped with the package so consumers can run them after
@@ -390,7 +412,7 @@ paths — **not** glob patterns and **not** directories.
   holds across scopes — see the [user guide](user-guide.md#profile).)
 - On publish, the shipped manifest's `profile` paths are rewritten to their
   archive-relative form so the installed copy resolves.
-- Entries must be unique.
+- Duplicate entries are not rejected; `fglpkg lint` reports them as a warning.
 
 ### 6.5 Dependencies
 
@@ -878,6 +900,7 @@ authority (see [§5](#5-parsing--validation-rules)).
 | `main` | string | No | Primary `.42m` entry point. |
 | `programs` | string[] | No | Modules with `MAIN`, runnable via `fglpkg bdl`. |
 | `webcomponents` | string[] | No | `COMPONENTTYPE` names provided. |
+| `generoPackages` | string[] | No | Genero `PACKAGE` namespaces provided; normally auto-computed at pack/publish. |
 | `root` | string | No | Base dir for package files (default `.`). |
 | `importRoot` | string | No | Dir whose contents become the archive root. |
 | `files` | string[] | No | Globs to package (default `*.42m`,`*.42f`,`*.sch`). |
