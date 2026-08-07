@@ -70,6 +70,7 @@ func TestPublishPackageDryRunNoNetwork(t *testing.T) {
 		true,                 // dryRun
 		"",                   // visibilityOverride — use manifest default
 		"",                   // changelogText
+		false,                // force
 		mustBuildPackage(t, m),
 	)
 	if err != nil {
@@ -132,7 +133,7 @@ func TestPublishPackageDryRunListsMetadata(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
-	runErr := publishPackage(m, "http://127.0.0.1:1", "6", true, "", "", mustBuildPackage(t, m))
+	runErr := publishPackage(m, "http://127.0.0.1:1", "6", true, "", "", false, mustBuildPackage(t, m))
 	_ = w.Close()
 	os.Stdout = old
 	var buf bytes.Buffer
@@ -194,7 +195,7 @@ func TestPublishPackageDryRunChangelog(t *testing.T) {
 	}
 
 	out, runErr := captureDryRun(t, func() error {
-		return publishPackage(m, "http://127.0.0.1:1", "6", true, "", "", mustBuildPackage(t, m))
+		return publishPackage(m, "http://127.0.0.1:1", "6", true, "", "", false, mustBuildPackage(t, m))
 	})
 	if runErr != nil {
 		t.Fatalf("dry-run publishPackage returned error: %v", runErr)
@@ -242,7 +243,7 @@ func TestPublishPackageDryRunChangelogMissingSection(t *testing.T) {
 	}
 
 	out, runErr := captureDryRun(t, func() error {
-		return publishPackage(m, "http://127.0.0.1:1", "6", true, "", "", mustBuildPackage(t, m))
+		return publishPackage(m, "http://127.0.0.1:1", "6", true, "", "", false, mustBuildPackage(t, m))
 	})
 	if runErr != nil {
 		t.Fatalf("dry-run publishPackage returned error: %v", runErr)
@@ -283,7 +284,7 @@ func TestPublishPackageDryRunSyncsMetadata(t *testing.T) {
 	}
 
 	out, runErr := captureDryRun(t, func() error {
-		return publishPackage(m, "http://127.0.0.1:1", "6", true, "", "", mustBuildPackage(t, m))
+		return publishPackage(m, "http://127.0.0.1:1", "6", true, "", "", false, mustBuildPackage(t, m))
 	})
 	if runErr != nil {
 		t.Fatalf("dry-run publishPackage returned error: %v", runErr)

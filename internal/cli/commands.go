@@ -361,8 +361,10 @@ Arguments after the module name are passed to the program unchanged.
   --changelog <text>       Changelog text for this version (overrides CHANGELOG.md)
   --registry <name>        Publish to a configured repository (e.g. a JFrog
                            Artifactory repo) instead of the GI registry
-  --force, -f              When publishing to Artifactory, overwrite an existing
-                           variant instead of refusing
+  --force, -f              Overwrite an existing variant instead of refusing.
+                           On the GI registry this overwrites a pending/rejected
+                           variant in place (an approved/published version stays
+                           immutable — bump the version). Also applies to Artifactory.
   --allow-empty            Publish even when the archive stages no assets (only
                            fglpkg.json and files matched by "docs"). Off by
                            default: such a publish is refused with an actionable

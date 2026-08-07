@@ -565,14 +565,19 @@ func PublishCreateVersion(slug, version, changelog string, tags map[string][]str
 
 // PublishUploadArtifact streams the zip body for (slug, version, variant)
 // to the registry. The server computes size_bytes + sha256 and stores the
-// blob in R2. Allowed only while the version is pending or rejected; on an
-// approved version the server returns 409. filename is what the registry
-// records for download Content-Disposition.
-func PublishUploadArtifact(slug, version, variant, filename string, zip io.Reader) error {
+// blob in R2. A first upload of a variant always works; an existing variant
+// is immutable once submitted UNLESS force is set, which sends ?force=1 and
+// lets the server overwrite a pending/rejected variant in place (an approved
+// version stays immutable and still returns 409 — GIS-274 / GIS-434). filename
+// is what the registry records for download Content-Disposition.
+func PublishUploadArtifact(slug, version, variant, filename string, force bool, zip io.Reader) error {
 	u := fmt.Sprintf("%s/registry/packages/%s/versions/%s/artifacts/%s?filename=%s",
 		registryBase(),
 		url.PathEscape(slug), url.PathEscape(version), url.PathEscape(variant),
 		url.QueryEscape(filename))
+	if force {
+		u += "&force=1"
+	}
 	bearer := Bearer()
 	status, respBody, err := putBytes(u, "application/zip", bearer, zip)
 	if err != nil {
@@ -580,6 +585,19 @@ func PublishUploadArtifact(slug, version, variant, filename string, zip io.Reade
 	}
 	if status >= 200 && status < 300 {
 		return nil
+	}
+	// A 409 is the immutability guard. Without --force it means "already
+	// uploaded — force or bump"; with --force it means the version is approved
+	// (published, immutable) and force cannot help — the only path is a new
+	// version. The server body already carries an actionable message; surface it.
+	if status == http.StatusConflict {
+		detail := strings.TrimSpace(string(respBody))
+		if force {
+			return fmt.Errorf("upload artifact %s@%s/%s: this version is published and immutable — bump the version instead (%s)",
+				slug, version, variant, detail)
+		}
+		return fmt.Errorf("upload artifact %s@%s/%s: this variant is already uploaded — re-run with --force to overwrite it, or bump the version (%s)",
+			slug, version, variant, detail)
 	}
 	return fmt.Errorf("upload artifact %s@%s/%s: HTTP %d: %s",
 		slug, version, variant, status, string(respBody))

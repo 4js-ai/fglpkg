@@ -644,3 +644,52 @@ func TestPublishCreatePackageHandles409(t *testing.T) {
 		})
 	}
 }
+
+// TestPublishUploadArtifactForceSignal covers GIS-274: --force must append
+// ?force=1 to the PUT, and a 409 must produce an actionable message that differs
+// by whether force was used (re-run with --force vs bump the version).
+func TestPublishUploadArtifactForceSignal(t *testing.T) {
+	var gotQuery string
+	var status int // 0 → 200 OK; otherwise the status to return
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		if status != 0 {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"error":"variant already published","code":"variant_immutable"}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"artifact": map[string]any{"variant": "genero6"}})
+	}))
+	defer ts.Close()
+	t.Setenv("FGLPKG_REGISTRY", ts.URL)
+	prev := registry.Bearer
+	t.Cleanup(func() { registry.Bearer = prev })
+	registry.Bearer = func() string { return "t" }
+
+	// force=true → ?force=1 present alongside the existing ?filename=.
+	if err := registry.PublishUploadArtifact("demo", "1.0.0", "genero6", "demo.zip", true, strings.NewReader("zip")); err != nil {
+		t.Fatalf("upload (force): %v", err)
+	}
+	if !strings.Contains(gotQuery, "force=1") {
+		t.Errorf("force=true: query = %q, want it to contain force=1", gotQuery)
+	}
+
+	// force=false → no force param.
+	if err := registry.PublishUploadArtifact("demo", "1.0.0", "genero6", "demo.zip", false, strings.NewReader("zip")); err != nil {
+		t.Fatalf("upload (no force): %v", err)
+	}
+	if strings.Contains(gotQuery, "force=1") {
+		t.Errorf("force=false: query = %q, should not contain force=1", gotQuery)
+	}
+
+	// 409 without --force → message points at --force.
+	status = http.StatusConflict
+	if err := registry.PublishUploadArtifact("demo", "1.0.0", "genero6", "demo.zip", false, strings.NewReader("zip")); err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Errorf("409 no-force error = %v, want it to mention --force", err)
+	}
+
+	// 409 with --force → the version is approved/immutable; point at bumping.
+	if err := registry.PublishUploadArtifact("demo", "1.0.0", "genero6", "demo.zip", true, strings.NewReader("zip")); err == nil || !strings.Contains(err.Error(), "bump the version") {
+		t.Errorf("409 force error = %v, want it to mention bump the version", err)
+	}
+}
