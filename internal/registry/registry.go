@@ -400,8 +400,18 @@ func Search(term string) ([]SearchResult, error) {
 // ─── Publisher API (new /registry/... protocol) ──────────────────────────────
 
 // PublishCreatePackage creates the slug on the registry if it doesn't exist.
-// Returns nil on both 201 (created) and 409 (already exists) — callers don't
-// need to differentiate, they only care that the slug is now claimable.
+//
+// A 201 means it was created. A 409 means the canonical slug already exists,
+// and the server disambiguates via a machine-readable `code` (GIS-278/277):
+//
+//   - "slug_owned_by_other" — a different account owns the canonical slug.
+//     Abort the publish with the server's actionable message rather than
+//     silently pushing versions/artifacts against a slug we do not own
+//     (GIS-435; dependency-confusion-adjacent).
+//   - "slug_owned_by_you" — the benign republish case: the caller already owns
+//     the slug and should proceed to add versions. This is also the fallback
+//     for an older server that returns 409 with no code, so republishing keeps
+//     working against a registry that predates the owner-aware guard.
 func PublishCreatePackage(slug, name, description, visibility string) error {
 	if visibility == "" {
 		visibility = "public"
@@ -416,10 +426,25 @@ func PublishCreatePackage(slug, name, description, visibility string) error {
 	if err != nil {
 		return fmt.Errorf("create package %q: %w", slug, err)
 	}
-	if status == http.StatusCreated || status == http.StatusConflict {
+	switch status {
+	case http.StatusCreated:
 		return nil
+	case http.StatusConflict:
+		var e struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(respBody, &e) // absent/malformed body → zero value → proceed
+		if e.Code == "slug_owned_by_other" {
+			if e.Error != "" {
+				return errors.New(e.Error)
+			}
+			return fmt.Errorf("cannot publish: the package slug %q is already registered to another account", slug)
+		}
+		return nil
+	default:
+		return fmt.Errorf("create package %q: HTTP %d: %s", slug, status, string(respBody))
 	}
-	return fmt.Errorf("create package %q: HTTP %d: %s", slug, status, string(respBody))
 }
 
 // PublishUpdateMetadata pushes the package's current discovery metadata
