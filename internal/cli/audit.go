@@ -42,6 +42,22 @@ type auditCounts struct {
 
 const bdlNotScanned = "BDL packages were not scanned (no advisory database available yet)."
 
+// auditNotes builds the informational coverage caveats printed with every
+// report. The BDL note is always present; the front-end note is added only
+// when the project actually installs web-component packages, so a clean audit
+// of a WC-bearing project is never mistaken for front-end coverage while
+// JavaScript CVE scanning remains unsupported (tracked as GIS-431; the
+// hardening that added this note is GIS-369).
+func auditNotes(webcomponentCount int) []string {
+	notes := []string{bdlNotScanned}
+	if webcomponentCount > 0 {
+		notes = append(notes, fmt.Sprintf(
+			"%d web-component package%s installed; their front-end (JavaScript) dependencies were not scanned (not yet supported).",
+			webcomponentCount, pluralS(webcomponentCount)))
+	}
+	return notes
+}
+
 // cmdAudit cross-checks installed Java JAR dependencies against the
 // OSV.dev advisory database and reports any known vulnerabilities.
 //
@@ -83,10 +99,13 @@ func cmdAudit(args []string) error {
 	}
 
 	jars := filterAuditJARs(lf.JARs, flags.production)
+	notes := auditNotes(len(lf.Webcomponents))
 
 	if !flags.jsonOut && len(jars) == 0 {
 		fmt.Println("No Java JARs to audit.")
-		fmt.Println(bdlNotScanned)
+		for _, n := range notes {
+			fmt.Println(n)
+		}
 		return nil
 	}
 
@@ -99,11 +118,11 @@ func cmdAudit(args []string) error {
 	sortFindings(findings)
 
 	if flags.jsonOut {
-		if err := writeAuditJSON(os.Stdout, findings, len(jars)); err != nil {
+		if err := writeAuditJSON(os.Stdout, findings, len(jars), notes); err != nil {
 			return &ExitError{Code: 2, Err: err}
 		}
 	} else {
-		writeAuditTable(os.Stdout, findings, len(jars))
+		writeAuditTable(os.Stdout, findings, len(jars), notes)
 	}
 
 	threshold := audit.SeverityRank(flags.severity)
@@ -178,12 +197,14 @@ func sortFindings(fs []audit.Finding) {
 	})
 }
 
-func writeAuditTable(w io.Writer, findings []audit.Finding, jarsAudited int) {
+func writeAuditTable(w io.Writer, findings []audit.Finding, jarsAudited int, notes []string) {
 	if len(findings) == 0 {
 		fmt.Fprintf(w, "Audited %d Java JAR%s against OSV.dev.\n",
 			jarsAudited, pluralS(jarsAudited))
 		fmt.Fprintln(w, "No known vulnerabilities found.")
-		fmt.Fprintln(w, bdlNotScanned)
+		for _, n := range notes {
+			fmt.Fprintln(w, n)
+		}
 		return
 	}
 
@@ -218,10 +239,12 @@ func writeAuditTable(w io.Writer, findings []audit.Finding, jarsAudited int) {
 	c := tallyCounts(findings)
 	fmt.Fprintf(w, "\nSummary: %d critical, %d high, %d medium, %d low\n",
 		c.Critical, c.High, c.Medium, c.Low)
-	fmt.Fprintln(w, bdlNotScanned)
+	for _, n := range notes {
+		fmt.Fprintln(w, n)
+	}
 }
 
-func writeAuditJSON(w io.Writer, findings []audit.Finding, jarsAudited int) error {
+func writeAuditJSON(w io.Writer, findings []audit.Finding, jarsAudited int, notes []string) error {
 	rep := auditReport{
 		SchemaVersion: 1,
 		AuditedAt:     time.Now().UTC().Format(time.RFC3339),
@@ -229,7 +252,7 @@ func writeAuditJSON(w io.Writer, findings []audit.Finding, jarsAudited int) erro
 		JARsAudited:   jarsAudited,
 		Findings:      findings,
 		Summary:       tallyCounts(findings),
-		Notes:         []string{bdlNotScanned},
+		Notes:         notes,
 	}
 	if rep.Findings == nil {
 		rep.Findings = []audit.Finding{}

@@ -5,7 +5,8 @@ fglpkg is pointed here via FGLPKG_AUDIT_URL=http://127.0.0.1:PORT/v1/query.
 It POSTs {"package":{"purl":"pkg:maven/<group>/<artifact>@<version>"}} once per
 JAR and expects {"vulns":[...]}. To exercise both outcomes deterministically,
 this mock returns a canned HIGH advisory when the requested PURL contains the
-substring "vuln", and an empty result otherwise.
+substring "vuln", a no-GHSA-label advisory (severity must be derived from its
+CVSS vector) when it contains "cvssonly", and an empty result otherwise.
 
   python3 osv_server.py --port-file <file>
 """
@@ -25,6 +26,20 @@ def advisory():
         "database_specific": {"severity": "HIGH"},
     }
 
+def cvss_only_advisory():
+    # No database_specific.severity: fglpkg must derive severity from the CVSS
+    # vector below (a 9.8 => critical), not fall back to the medium default.
+    return {
+        "id": "OSV-mock-0000-0002",
+        "summary": "Mock advisory with a CVSS vector but no GHSA severity label",
+        "details": "Synthetic advisory: severity must be derived from the CVSS vector.",
+        "aliases": ["CVE-2026-0002"],
+        "severity": [{"type": "CVSS_V3",
+                      "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}],
+        "references": [{"type": "ADVISORY",
+                        "url": "https://example.test/advisories/OSV-mock-0000-0002"}],
+    }
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stderr.write("%s %s\n" % (self.command, self.path))
@@ -36,7 +51,13 @@ class Handler(BaseHTTPRequestHandler):
             purl = json.loads(raw).get("package", {}).get("purl", "")
         except Exception:
             purl = ""
-        vulns = [advisory()] if "vuln" in purl.lower() else []
+        low = purl.lower()
+        if "cvssonly" in low:
+            vulns = [cvss_only_advisory()]
+        elif "vuln" in low:
+            vulns = [advisory()]
+        else:
+            vulns = []
         body = json.dumps({"vulns": vulns}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

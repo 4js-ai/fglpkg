@@ -268,7 +268,7 @@ func TestWriteAuditJSONShape(t *testing.T) {
 			Severity:   audit.SeverityCritical,
 		},
 	}
-	if err := writeAuditJSON(&buf, findings, 1); err != nil {
+	if err := writeAuditJSON(&buf, findings, 1, auditNotes(0)); err != nil {
 		t.Fatalf("writeAuditJSON error: %v", err)
 	}
 	var out auditReport
@@ -292,6 +292,42 @@ func TestWriteAuditJSONShape(t *testing.T) {
 	}
 	if len(out.Notes) == 0 {
 		t.Error("notes should mention BDL coverage gap")
+	}
+}
+
+// TestCmdAuditFrontendNoteWhenWebcomponentsPresent: a project that installs
+// web-component packages must be told, in the report, that their front-end
+// (JavaScript) dependencies were NOT scanned — so a clean audit is never
+// mistaken for front-end coverage (GIS-369 honest-coverage fix).
+func TestCmdAuditFrontendNoteWhenWebcomponentsPresent(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+	lf := &lockfile.LockFile{
+		Version:       1,
+		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		GeneroVersion: "4.0.0",
+		RootManifest:  lockfile.RootEntry{Name: "demo", Version: "0.1.0"},
+		Packages:      []lockfile.LockedPackage{},
+		Webcomponents: []lockfile.LockedWebcomponent{{Name: "chart", Version: "1.0.0"}},
+	}
+	if err := lf.Save(dir); err != nil {
+		t.Fatalf("write lockfile: %v", err)
+	}
+
+	out, err := captureStdout(t, func() error { return cmdAudit([]string{"--json"}) })
+	if err != nil {
+		t.Fatalf("cmdAudit --json error: %v", err)
+	}
+	var rep auditReport
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	var joined string
+	for _, n := range rep.Notes {
+		joined += n + "\n"
+	}
+	if !strings.Contains(joined, "front-end") || !strings.Contains(joined, "JavaScript") {
+		t.Errorf("expected a front-end/JavaScript not-scanned note, got notes: %v", rep.Notes)
 	}
 }
 

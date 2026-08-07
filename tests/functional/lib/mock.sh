@@ -167,3 +167,23 @@ mock_lock_with_jar() {
 }
 EOF
 }
+
+# mock_lock_with_webcomponent <name> <version>
+# Writes a lock whose only dependency is one web-component package (no JARs), so
+# `audit` has nothing Java to scan and must emit its "front-end JS not scanned"
+# coverage note.
+mock_lock_with_webcomponent() {
+  local n="$1" v="$2"
+  cat > fglpkg.lock <<EOF
+{
+  "lockfileVersion": 1,
+  "generatedAt": "2026-01-01T00:00:00Z",
+  "generoVersion": "6.00.01",
+  "root": { "name": "demo", "version": "1.0.0" },
+  "packages": [],
+  "webcomponents": [
+    { "name": "$n", "version": "$v", "downloadUrl": "https://example.test/$n-$v.zip", "requiredBy": ["<root>"] }
+  ]
+}
+EOF
+}

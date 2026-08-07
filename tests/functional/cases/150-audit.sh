@@ -60,4 +60,29 @@ _audit_no_lock() {
 }
 it "audit without a lockfile exits 2" _audit_no_lock
 
+# An advisory with a CVSS vector but no GHSA severity label must be classified
+# from the vector (9.8 => critical) — not the old blind medium default. The
+# --severity=critical run is the discriminator: it fails only if the finding is
+# actually critical (a medium default would pass). (GIS-369 severity fidelity.)
+_audit_cvss_severity() {
+  mock_osv_start
+  mock_lock_with_jar com.example cvssonly 1.0.0
+  run audit --severity=critical
+  assert_failure
+  assert_contains "critical"
+}
+it "audit derives severity from the CVSS vector when no GHSA label" _audit_cvss_severity
+
+# A project that installs a web-component package must be told its front-end
+# (JavaScript) dependencies were not scanned, so a clean audit is never mistaken
+# for front-end coverage (GIS-369 honest coverage; JS scanning is GIS-431).
+_audit_frontend_note() {
+  mock_lock_with_webcomponent chart 1.0.0
+  run audit
+  assert_success                        # no JARs to scan → nothing to fail on
+  assert_contains "No Java JARs to audit"
+  assert_contains "front-end"
+}
+it "audit notes that web-component JS deps are not scanned" _audit_frontend_note
+
 skip "audit signatures re-verifies Ed25519 registry signatures" "needs signed fixtures + a keys manifest — deferred (like login)"
