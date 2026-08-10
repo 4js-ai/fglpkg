@@ -1984,7 +1984,7 @@ This ensures reproducible installs across machines and CI environments. Commit `
 
 **Keep formatters off it.** `fglpkg-lock.json` is machine-generated and written for byte-stable, minimal diffs. Because it now ends in `.json`, generic JSON tooling — editor "format on save", Prettier, pre-commit JSON hooks — may reformat it and produce noisy, spurious diffs. Add it to your formatter's ignore list (e.g. a `.prettierignore` entry `fglpkg-lock.json`), the same way `package-lock.json` is universally ignore-listed.
 
-**Migrating from the old name.** Earlier fglpkg versions named this file `fglpkg.lock`. The first `fglpkg install` or `fglpkg update` you run in a project that still has a `fglpkg.lock` renames it to `fglpkg-lock.json` in place (preserving the resolved contents — no re-resolution) and prints a one-line notice; commit the rename. Once `fglpkg-lock.json` exists it is authoritative, and any leftover `fglpkg.lock` beside it is ignored.
+**Migrating from the old name.** Earlier fglpkg versions named this file `fglpkg.lock`. The first `fglpkg install` or `fglpkg update` you run in a project that still has a `fglpkg.lock` renames it to `fglpkg-lock.json` and prints a one-line notice; commit the rename. (An older lock — one written before dependency-set tracking — also re-resolves once on that first install, which can move versions within your constraints, so review the resulting diff.) Once `fglpkg-lock.json` exists it is authoritative, and any leftover `fglpkg.lock` beside it is ignored.
 
 To bypass the lock and re-resolve everything:
 

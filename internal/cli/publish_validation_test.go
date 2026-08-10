@@ -169,9 +169,10 @@ func TestFetchVersionListWrapsErrNotFound(t *testing.T) {
 
 // TestCheckFrozenNamesLegacyLock: --frozen runs before the install-time
 // migration, so a pre-GIS-289 project hits it first after an upgrade. The error
-// must say the lock exists under the old name and that migrating preserves the
-// resolved contents — not "create one", which describes regenerating from
-// scratch and would read as "your pins are gone".
+// must name the lock under its old name and point at the migration — not "create
+// one", which reads as "your pins are gone" — and must NOT promise re-resolution
+// won't happen, since a lock predating the dependency-set snapshot re-resolves
+// once on that first install (GIS-289 review follow-up).
 func TestCheckFrozenNamesLegacyLock(t *testing.T) {
 	m := manifest.New("demo", "1.0.0", "", "")
 
@@ -185,13 +186,22 @@ func TestCheckFrozenNamesLegacyLock(t *testing.T) {
 			t.Fatal("--frozen must still fail: the new-name lock is absent")
 		}
 		msg := err.Error()
-		for _, want := range []string{lockfile.LegacyFilename, lockfile.Filename, "no re-resolution"} {
+		for _, want := range []string{lockfile.LegacyFilename, lockfile.Filename} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("message should mention %q, got:\n%s", want, msg)
 			}
 		}
 		if strings.Contains(msg, "to create one") {
 			t.Errorf("must not imply the lock has to be regenerated, got:\n%s", msg)
+		}
+		// Must not promise re-resolution is skipped: a lock written before the
+		// dependency-set snapshot re-resolves once after the rename, so the
+		// message warns about that instead of denying it (GIS-289 review).
+		if strings.Contains(msg, "no re-resolution") {
+			t.Errorf("message must not promise 'no re-resolution', got:\n%s", msg)
+		}
+		if !strings.Contains(msg, "re-resolve") {
+			t.Errorf("message should warn an older lock may re-resolve, got:\n%s", msg)
 		}
 	})
 
