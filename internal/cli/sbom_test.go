@@ -13,7 +13,7 @@ import (
 	"github.com/4js-mikefolcher/fglpkg/internal/sbom"
 )
 
-// writeLockfileForSbom writes a small fglpkg.lock at dir containing
+// writeLockfileForSbom writes a small fglpkg-lock.json at dir containing
 // the supplied packages + jars so the cmdSbom call has something to
 // read.
 func writeLockfileForSbom(t *testing.T, dir string, pkgs []lockfile.LockedPackage, jars []lockfile.LockedJAR) {
@@ -89,8 +89,8 @@ func TestCmdSbomMissingLockfile(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when no lockfile present")
 	}
-	if !strings.Contains(err.Error(), "fglpkg.lock") {
-		t.Errorf("err = %v, want one mentioning fglpkg.lock", err)
+	if !strings.Contains(err.Error(), "fglpkg-lock.json") {
+		t.Errorf("err = %v, want one mentioning fglpkg-lock.json", err)
 	}
 }
 

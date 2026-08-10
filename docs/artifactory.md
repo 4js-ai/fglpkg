@@ -238,7 +238,7 @@ you can also write it by hand as the object form of a dependency:
 }
 ```
 
-The resolved source is recorded in `fglpkg.lock` (a package's `registry` field),
+The resolved source is recorded in `fglpkg-lock.json` (a package's `registry` field),
 so a locked install re-fetches each package from exactly that repository and can
 never be silently re-routed. An empty value means the default GI registry, so
 older locks keep working unchanged.

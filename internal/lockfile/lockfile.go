@@ -1,4 +1,4 @@
-// Package lockfile manages fglpkg.lock — the reproducible install record.
+// Package lockfile manages fglpkg-lock.json — the reproducible install record.
 //
 // The lock file captures the exact resolved state of every dependency in the
 // graph: BDL packages (name, version, download URL, SHA256 checksum, which
@@ -34,7 +34,14 @@ import (
 
 const (
 	// Filename is the lock file name, always written next to fglpkg.json.
-	Filename = "fglpkg.lock"
+	Filename = "fglpkg-lock.json"
+
+	// LegacyFilename is the pre-GIS-289 lock file name. fglpkg renamed the lock
+	// from fglpkg.lock to fglpkg-lock.json (npm-consistent with fglpkg.json)
+	// while it was still internal-only, so rather than carry a permanent
+	// dual-read the one-shot Migrate helper renames it in place. Nothing else
+	// reads this name.
+	LegacyFilename = "fglpkg.lock"
 
 	// lockVersion is bumped when the lock file schema changes incompatibly.
 	lockVersion = 1
@@ -375,7 +382,7 @@ func FromPlan(plan *resolver.Plan, root *manifest.Manifest, mavenBase string) *L
 // "empty registry means GI" convention holds regardless of whether GI packages
 // were resolved via the single-registry path (Source left "") or through
 // GeneroProvider in multi-registry mode (Source stamped "gi"). This keeps
-// fglpkg.lock byte-identical — and diffs clean — when a second registry is
+// fglpkg-lock.json byte-identical — and diffs clean — when a second registry is
 // added or removed. (GIS-249 C2)
 func normalizeSource(source string) string {
 	if source == config.GIName {
@@ -421,7 +428,7 @@ func (lf *LockFile) AddManifestJARs(deps []manifest.JavaDependency, mavenBase st
 
 // ─── Persistence ──────────────────────────────────────────────────────────────
 
-// Save writes the lock file as formatted JSON to dir/fglpkg.lock.
+// Save writes the lock file as formatted JSON to dir/fglpkg-lock.json.
 func (lf *LockFile) Save(dir string) error {
 	// jsonutil (no HTML escaping) so a requiredBy entry like "<root>" keeps its
 	// literal angle brackets instead of Unicode escapes (GIS-280).
@@ -436,7 +443,7 @@ func (lf *LockFile) Save(dir string) error {
 	return nil
 }
 
-// Load reads and parses the lock file from dir/fglpkg.lock.
+// Load reads and parses the lock file from dir/fglpkg-lock.json.
 func Load(dir string) (*LockFile, error) {
 	path := filepath.Join(dir, Filename)
 	data, err := os.ReadFile(path)
@@ -456,13 +463,52 @@ func Exists(dir string) bool {
 	return err == nil
 }
 
-// Remove deletes dir/fglpkg.lock. A missing file is not an error, so callers
+// LegacyPresent reports whether dir still carries a pre-GIS-289 LegacyFilename
+// (fglpkg.lock). It exists so a command that finds no Filename can say the lock
+// is there under the old name — and that migrating it preserves the resolved
+// contents — instead of implying it must be regenerated from scratch. The test
+// deliberately matches Migrate's, so the two never disagree about whether there
+// is something to migrate.
+func LegacyPresent(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, LegacyFilename))
+	return err == nil
+}
+
+// Remove deletes dir/fglpkg-lock.json. A missing file is not an error, so callers
 // may remove unconditionally without racing Exists.
 func Remove(dir string) error {
 	if err := os.Remove(filepath.Join(dir, Filename)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
+}
+
+// Migrate renames a pre-GIS-289 LegacyFilename (fglpkg.lock) to Filename
+// (fglpkg-lock.json) when a project still carries the old name and not the new
+// one, returning true when it renamed something so the caller can tell the user
+// their working tree changed and should be committed.
+//
+// It is a one-shot convenience for projects created before the rename, run at
+// the start of an install/update, not a permanent fallback: once
+// fglpkg-lock.json exists it is authoritative, and a stale fglpkg.lock left
+// beside it is ignored — never read here, and never deleted (removing a file the
+// user may still be tracking is the caller's call, not a silent side effect).
+// The rename preserves the resolved lock verbatim, so no re-resolution is
+// needed.
+func Migrate(dir string) (migrated bool, err error) {
+	// New name already present ⇒ nothing to migrate. A legacy file beside it is
+	// stale and deliberately left untouched.
+	if _, statErr := os.Stat(filepath.Join(dir, Filename)); statErr == nil {
+		return false, nil
+	}
+	oldPath := filepath.Join(dir, LegacyFilename)
+	if _, statErr := os.Stat(oldPath); statErr != nil {
+		return false, nil // no legacy file (or unreadable) — nothing to do
+	}
+	if err := os.Rename(oldPath, filepath.Join(dir, Filename)); err != nil {
+		return false, fmt.Errorf("cannot rename %s to %s: %w", LegacyFilename, Filename, err)
+	}
+	return true, nil
 }
 
 // ─── Validation ───────────────────────────────────────────────────────────────

@@ -20,7 +20,7 @@ type sbomFlags struct {
 }
 
 // cmdSbom emits a Software Bill of Materials (CycloneDX 1.5 JSON) for
-// the current project's fglpkg.lock.
+// the current project's fglpkg-lock.json.
 //
 //	fglpkg sbom                                 Emit to stdout
 //	fglpkg sbom -o sbom.json                    Write to file

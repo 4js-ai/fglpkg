@@ -148,13 +148,13 @@ EOF
 EOF
 }
 
-# Write a fglpkg.lock in cwd containing one JAR, for audit tests.
+# Write a fglpkg-lock.json in cwd containing one JAR, for audit tests.
 # mock_lock_with_jar <groupId> <artifactId> <version> [scope]
 mock_lock_with_jar() {
   local g="$1" a="$2" v="$3" scope="${4:-}"
   local scopeline=""
   [[ -n "$scope" ]] && scopeline=", \"scope\": \"$scope\""
-  cat > fglpkg.lock <<EOF
+  cat > fglpkg-lock.json <<EOF
 {
   "lockfileVersion": 1,
   "generatedAt": "2026-01-01T00:00:00Z",
@@ -174,7 +174,7 @@ EOF
 # coverage note.
 mock_lock_with_webcomponent() {
   local n="$1" v="$2"
-  cat > fglpkg.lock <<EOF
+  cat > fglpkg-lock.json <<EOF
 {
   "lockfileVersion": 1,
   "generatedAt": "2026-01-01T00:00:00Z",

@@ -37,9 +37,9 @@ _im_install() {
   # Materialized by namespace path — this is the GIS-358 fix (name != PACKAGE).
   assert_file ".fglpkg/merged/com/fourjs/db/DbConnection.42m"
   # Ownership recorded in the lock (Phase 2/4).
-  assert_file_contains "fglpkg.lock" "generoPackages"
-  assert_file_contains "fglpkg.lock" "com.fourjs.db"
-  assert_file_contains "fglpkg.lock" "materialized"
+  assert_file_contains "fglpkg-lock.json" "generoPackages"
+  assert_file_contains "fglpkg-lock.json" "com.fourjs.db"
+  assert_file_contains "fglpkg-lock.json" "materialized"
 }
 it "install materializes namespaced modules and records ownership in the lock" _im_install
 

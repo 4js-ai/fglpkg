@@ -5,9 +5,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/4js-mikefolcher/fglpkg/internal/lockfile"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 	"github.com/4js-mikefolcher/fglpkg/internal/registry"
 )
@@ -162,4 +165,53 @@ func TestFetchVersionListWrapsErrNotFound(t *testing.T) {
 	if !errors.Is(err, registry.ErrNotFound) {
 		t.Errorf("errors.Is(err, ErrNotFound) = false; err = %v", err)
 	}
+}
+
+// TestCheckFrozenNamesLegacyLock: --frozen runs before the install-time
+// migration, so a pre-GIS-289 project hits it first after an upgrade. The error
+// must name the lock under its old name and point at the migration — not "create
+// one", which reads as "your pins are gone" — and must NOT promise re-resolution
+// won't happen, since a lock predating the dependency-set snapshot re-resolves
+// once on that first install (GIS-289 review follow-up).
+func TestCheckFrozenNamesLegacyLock(t *testing.T) {
+	m := manifest.New("demo", "1.0.0", "", "")
+
+	t.Run("legacy lock present", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, lockfile.LegacyFilename), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		err := checkFrozen(m, dir)
+		if err == nil {
+			t.Fatal("--frozen must still fail: the new-name lock is absent")
+		}
+		msg := err.Error()
+		for _, want := range []string{lockfile.LegacyFilename, lockfile.Filename} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("message should mention %q, got:\n%s", want, msg)
+			}
+		}
+		if strings.Contains(msg, "to create one") {
+			t.Errorf("must not imply the lock has to be regenerated, got:\n%s", msg)
+		}
+		// Must not promise re-resolution is skipped: a lock written before the
+		// dependency-set snapshot re-resolves once after the rename, so the
+		// message warns about that instead of denying it (GIS-289 review).
+		if strings.Contains(msg, "no re-resolution") {
+			t.Errorf("message must not promise 'no re-resolution', got:\n%s", msg)
+		}
+		if !strings.Contains(msg, "re-resolve") {
+			t.Errorf("message should warn an older lock may re-resolve, got:\n%s", msg)
+		}
+	})
+
+	t.Run("no lock at all keeps the original wording", func(t *testing.T) {
+		err := checkFrozen(m, t.TempDir())
+		if err == nil {
+			t.Fatal("--frozen must fail with no lock")
+		}
+		if !strings.Contains(err.Error(), "none was found") {
+			t.Errorf("a genuinely missing lock should keep its own message, got:\n%v", err)
+		}
+	})
 }

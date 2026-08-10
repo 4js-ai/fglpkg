@@ -341,6 +341,18 @@ func (i *Installer) InstallAllWithOptions(m *manifest.Manifest, projectDir strin
 		return err
 	}
 
+	// GIS-289: one-shot rename of a pre-rename fglpkg.lock to fglpkg-lock.json.
+	// fglpkg was internal-only when the lock file was renamed, so instead of a
+	// permanent dual-read we migrate it in place the first time install/update
+	// runs in a project that still carries the old name. projectDir is the same
+	// directory every lock read/write below uses (the workspace root under a
+	// workspace), so the rename always lands where the lock is expected.
+	if migrated, err := lockfile.Migrate(projectDir); err != nil {
+		return err
+	} else if migrated {
+		fmt.Printf("Renamed %s to %s — commit the rename.\n", lockfile.LegacyFilename, lockfile.Filename)
+	}
+
 	// Detect Genero version once — used for both lock validation and resolution.
 	gv, err := genero.Detect()
 	if err != nil {
@@ -1098,7 +1110,7 @@ func (i *Installer) ReconcileAfterRemove(m *manifest.Manifest, projectDir string
 // When the removal empties the graph — exactly the case where the lock would
 // otherwise be rewritten with empty package and JAR lists — the lock is deleted
 // instead: a project with no dependencies has nothing to pin, and a leftover
-// empty fglpkg.lock is confusing (GIS-273). Otherwise the lock is rewritten
+// empty fglpkg-lock.json is confusing (GIS-273). Otherwise the lock is rewritten
 // from the plan. Returns a human-readable note when the lock was deleted (for
 // the caller's summary), or "" when it was rewritten or absent.
 func reconcileLock(plan *resolver.Plan, m *manifest.Manifest, projectDir, mavenBase string) (string, error) {

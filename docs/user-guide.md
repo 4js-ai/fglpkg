@@ -562,7 +562,7 @@ If your project already has a `fglpkg.json` with dependencies listed, install th
 fglpkg install
 ```
 
-This resolves the dependency graph, writes a lock file (`fglpkg.lock`), downloads BDL packages from the registry, and downloads Java JARs from Maven Central. Because `fglpkg.json` exists, packages are installed locally to `.fglpkg/` by default.
+This resolves the dependency graph, writes a lock file (`fglpkg-lock.json`), downloads BDL packages from the registry, and downloads Java JARs from Maven Central. Because `fglpkg.json` exists, packages are installed locally to `.fglpkg/` by default.
 
 ### Adding a Package
 
@@ -595,7 +595,7 @@ fglpkg install core-lib -P         # explicit prod (same as no flag)
 fglpkg install --production        # install everything EXCEPT devDependencies
 ```
 
-`--production` is intended for CI / deployment builds: it skips the dev scope entirely and still attempts optional packages, warning on failure. It does NOT overwrite `fglpkg.lock`, so a production install cannot accidentally strip dev entries from the lock recorded by the developer.
+`--production` is intended for CI / deployment builds: it skips the dev scope entirely and still attempts optional packages, warning on failure. It does NOT overwrite `fglpkg-lock.json`, so a production install cannot accidentally strip dev entries from the lock recorded by the developer.
 
 Peer dependencies are intentionally not supported — they solve a JS/TS singleton problem (React, TypeScript) that has no clean analog in BDL's module layout. Use a version constraint on a prod dep if you need callers to align on a version.
 
@@ -605,14 +605,14 @@ Peer dependencies are intentionally not supported — they solve a JS/TS singlet
 fglpkg remove myutils
 ```
 
-`remove` drops the package from whichever scope it lives in (`dependencies`, `devDependencies`, or `optionalDependencies`) — telling you which one — then re-resolves the remaining graph and rewrites `fglpkg.lock`, so the removed package and any now-orphaned transitive dependencies do not reappear on the next install.
+`remove` drops the package from whichever scope it lives in (`dependencies`, `devDependencies`, or `optionalDependencies`) — telling you which one — then re-resolves the remaining graph and rewrites `fglpkg-lock.json`, so the removed package and any now-orphaned transitive dependencies do not reappear on the next install.
 
 What happens on disk depends on the install context (see [Local vs Global](#local-vs-global-context-aware)):
 
 - **Local project (`.fglpkg/`)** — the removed package, plus any transitive dependencies the graph no longer needs, are pruned from `.fglpkg/`.
-- **Global (`~/.fglpkg/`)** — packages and JARs there are shared across projects, so they are left on disk; only `fglpkg.json` and `fglpkg.lock` are updated.
+- **Global (`~/.fglpkg/`)** — packages and JARs there are shared across projects, so they are left on disk; only `fglpkg.json` and `fglpkg-lock.json` are updated.
 
-Removing the **last** dependency empties the graph, so `fglpkg.lock` is deleted rather than left behind as an empty file.
+Removing the **last** dependency empties the graph, so `fglpkg-lock.json` is deleted rather than left behind as an empty file.
 
 If the registry can't be reached to re-resolve, `remove` still updates the manifest, prints a warning, and leaves the lock untouched — run `fglpkg install` once you're back online to reconcile.
 
@@ -627,9 +627,9 @@ $ fglpkg install
 Lock file is stale (dependency "poiapi" was removed from dependencies) — re-resolving...
 ```
 
-This works in both directions: a dependency you **add** by hand is installed, and one you **delete** is removed from `fglpkg.lock` *and* deleted from `.fglpkg/` (see [Pruning](#pruning-converging-on-the-manifest) below). Constraint changes, scope moves (prod ↔ dev), Java coordinate changes, and `registry` pin changes all count as edits.
+This works in both directions: a dependency you **add** by hand is installed, and one you **delete** is removed from `fglpkg-lock.json` *and* deleted from `.fglpkg/` (see [Pruning](#pruning-converging-on-the-manifest) below). Constraint changes, scope moves (prod ↔ dev), Java coordinate changes, and `registry` pin changes all count as edits.
 
-> A lock written by fglpkg 4.0.5 or earlier carries no record of the dependencies it was resolved from, so the first `install` after upgrading re-resolves once to record them. That re-resolve can move versions within your existing constraints; run it somewhere you can review the resulting `fglpkg.lock` diff.
+> A lock written by fglpkg 4.0.5 or earlier carries no record of the dependencies it was resolved from, so the first `install` after upgrading re-resolves once to record them. That re-resolve can move versions within your existing constraints; run it somewhere you can review the resulting `fglpkg-lock.json` diff.
 
 ### Pruning: Converging on the Manifest
 
@@ -646,7 +646,7 @@ This matters because `.fglpkg/packages/` is not an inert cache: `fglpkg env` put
 
 Two deliberate limits:
 
-- **Global (`~/.fglpkg/`) installs are never pruned.** Those packages and JARs are shared across every project, so pruning them against one project's graph would delete another project's dependencies. Only `fglpkg.lock` is updated.
+- **Global (`~/.fglpkg/`) installs are never pruned.** Those packages and JARs are shared across every project, so pruning them against one project's graph would delete another project's dependencies. Only `fglpkg-lock.json` is updated.
 - **`--production` never prunes.** It resolves a deliberately narrowed graph (no dev scope), so pruning against it would delete a developer's dev packages.
 
 Use `--no-prune` to keep orphans on disk for a single run:
@@ -660,7 +660,7 @@ Note that pruning deletes anything under `.fglpkg/packages/`, `.fglpkg/jars/`, a
 
 ### Updating Dependencies
 
-Once a `fglpkg.lock` exists, `fglpkg install` will **not** fetch a newer version of a dependency just because one was published — even if your version constraint (e.g. `^1.0.0`) would allow it. `install` re-resolves when `fglpkg.json` has changed (including by hand); otherwise it validates the existing lock against disk and stops there (`Lock file is up to date... Nothing to install`).
+Once a `fglpkg-lock.json` exists, `fglpkg install` will **not** fetch a newer version of a dependency just because one was published — even if your version constraint (e.g. `^1.0.0`) would allow it. `install` re-resolves when `fglpkg.json` has changed (including by hand); otherwise it validates the existing lock against disk and stops there (`Lock file is up to date... Nothing to install`).
 
 To re-resolve all dependencies to their latest compatible versions (ignoring the lock file):
 
@@ -668,11 +668,11 @@ To re-resolve all dependencies to their latest compatible versions (ignoring the
 fglpkg update
 ```
 
-This rewrites `fglpkg.lock` with whatever versions the registry now resolves to, and re-installs anything that changed — BDL packages, Java JARs, and webcomponent packages alike. Webcomponent bundles are always re-extracted on install (there's no "already installed, skip" fast path for them like there is for BDL packages), so an `update` that picks up a new webcomponent version reliably overwrites the old files in `.fglpkg/webcomponents/<COMPONENTTYPE>/`. See [Publishing an Update](#publishing-an-update) for the publisher side of this flow.
+This rewrites `fglpkg-lock.json` with whatever versions the registry now resolves to, and re-installs anything that changed — BDL packages, Java JARs, and webcomponent packages alike. Webcomponent bundles are always re-extracted on install (there's no "already installed, skip" fast path for them like there is for BDL packages), so an `update` that picks up a new webcomponent version reliably overwrites the old files in `.fglpkg/webcomponents/<COMPONENTTYPE>/`. See [Publishing an Update](#publishing-an-update) for the publisher side of this flow.
 
 ### Reproducible Installs for CI (`--frozen`)
 
-`fglpkg install --frozen` refuses to re-resolve: if `fglpkg.lock` is missing, or disagrees with `fglpkg.json`, it fails instead of quietly resolving to versions nobody reviewed.
+`fglpkg install --frozen` refuses to re-resolve: if `fglpkg-lock.json` is missing, or disagrees with `fglpkg.json`, it fails instead of quietly resolving to versions nobody reviewed.
 
 ```bash
 fglpkg install --frozen --production
@@ -680,7 +680,7 @@ fglpkg install --frozen --production
 
 ```
 $ fglpkg install --frozen
---frozen: fglpkg.lock is out of date with fglpkg.json — dependency "poiapi" was removed from dependencies.
+--frozen: fglpkg-lock.json is out of date with fglpkg.json — dependency "poiapi" was removed from dependencies.
   Run 'fglpkg install' (or 'fglpkg update') and commit the updated lock.
 ```
 
@@ -712,7 +712,7 @@ The top level is what your `fglpkg.json` declares; everything nested below it ca
 
 Where the tree comes from matters when the output surprises you:
 
-- **Package parentage is exact.** It is read from the `requiredBy` fields in `fglpkg.lock`, recorded during resolution.
+- **Package parentage is exact.** It is read from the `requiredBy` fields in `fglpkg-lock.json`, recorded during resolution.
 - **JAR parentage is reconstructed.** The lock does not record which package asked for a JAR, so `list` reads the bundled `fglpkg.json` of each installed package to find out (see [Working with Java JARs](#working-with-java-jars)). A JAR that no installed manifest declares is shown at the top level — including a JAR whose declaring package has no manifest on disk.
 - **JARs never have children.** fglpkg does no transitive POM resolution, so a JAR is always a leaf. A package that needs ten JARs lists all ten itself.
 
@@ -724,7 +724,7 @@ Flags:
 | `--depth <n>` | Show only the first `n` levels (`0`, the default, means unlimited). The counts still reflect everything rendered |
 | `--local`, `--global` | Force the project store (`.fglpkg/`) or the global one (default `~/.fglpkg/`; relocatable via `FGLPKG_GLOBAL_DIR`) |
 
-**In a project**, the tree's package parentage comes from `fglpkg.lock`. Without a lock in the current directory, `list` falls back to `--flat` and says why:
+**In a project**, the tree's package parentage comes from `fglpkg-lock.json`. Without a lock in the current directory, `list` falls back to `--flat` and says why:
 
 ```bash
 $ fglpkg list
@@ -734,7 +734,7 @@ Installed packages:
 Installed JARs:
   poi-5.5.1.jar
 
-(no fglpkg.lock — run 'fglpkg install' to see the dependency tree)
+(no fglpkg-lock.json — run 'fglpkg install' to see the dependency tree)
 ```
 
 **In the global store** (`--global`) there is no lock — a lock lives beside a project's `fglpkg.json`, and the shared store has none. `list --global` instead reconstructs the tree from the bundled `fglpkg.json` of every installed package, printing a **forest**: each package that nothing else depends on is the root of its own subtree.
@@ -1003,7 +1003,7 @@ fglpkg publish
 
 `fglpkg bump` bumps the `version` field in `fglpkg.json` (`patch` takes `1.2.3` → `1.2.4`, etc.) and prints a suggested `git tag` command; pass `--git` to have it create the tag for you automatically. (`fglpkg version` is separate — it only prints the fglpkg tool version.) Publishing then works exactly like a first release — the CLI picks up the new version from the manifest. This is the same two-command flow regardless of package kind (BDL, JAR-bearing, or pure webcomponent).
 
-**Consumers do not pick up the new version automatically.** Once a project has a `fglpkg.lock`, plain `fglpkg install` is a no-op if `fglpkg.json` hasn't changed — it validates the lock against what's on disk and prints `Lock file is up to date... Nothing to install`, even when a newer version satisfying the existing constraint (e.g. `^1.0.0`) now exists on the registry. To fetch it, run:
+**Consumers do not pick up the new version automatically.** Once a project has a `fglpkg-lock.json`, plain `fglpkg install` is a no-op if `fglpkg.json` hasn't changed — it validates the lock against what's on disk and prints `Lock file is up to date... Nothing to install`, even when a newer version satisfying the existing constraint (e.g. `^1.0.0`) now exists on the registry. To fetch it, run:
 
 ```bash
 fglpkg update
@@ -1282,7 +1282,7 @@ fetched from
   override → the `FGLPKG_MAVEN_URL` environment variable (URL only) → the
   committed project `fglpkg.json` (team-shared) → the per-user
   `~/.fglpkg/config.json` → Maven Central when none is set. The resolved URL is
-  pinned in `fglpkg.lock`, so a change takes effect on the next `fglpkg update`
+  pinned in `fglpkg-lock.json`, so a change takes effect on the next `fglpkg update`
   (or an `install` that alters the dependency set), not on a locked `install`.
 - Committing `mavenMirror` plus its `registries` entry to `fglpkg.json` gives
   teammates a "clone → `login --registry` → install just works" flow without
@@ -1465,7 +1465,7 @@ Only modules are relocated at install time (into the merged root). Everything el
 in place, in the package's own store directory — which is why that directory stays on the resource
 paths even when the merged root has taken it off `FGLLDPATH`.
 
-The lockfile records webcomponent packages under a separate `webcomponents` array, so a fresh `fglpkg install --frozen` from a committed `fglpkg.lock` reproduces the install byte-for-byte.
+The lockfile records webcomponent packages under a separate `webcomponents` array, so a fresh `fglpkg install --frozen` from a committed `fglpkg-lock.json` reproduces the install byte-for-byte.
 
 ## Distributable Scripts
 
@@ -1842,7 +1842,7 @@ repos.
 ### 3. Consume packages
 
 `fglpkg install` resolves each dependency to the repository that owns its name and
-records the source in `fglpkg.lock` (`"registry": "acme"`), so installs are
+records the source in `fglpkg-lock.json` (`"registry": "acme"`), so installs are
 reproducible. If a name exists in **more than one** repository, fglpkg stops with
 a collision error rather than guessing — this is the dependency-confusion
 safeguard. Resolve it by pinning the source:
@@ -1973,14 +1973,18 @@ When `fglpkg env` detects that you are inside a workspace, it adds each member's
 
 ## Lock Files
 
-When you run `fglpkg install`, a `fglpkg.lock` file is created alongside your `fglpkg.json`. The lock file pins:
+When you run `fglpkg install`, a `fglpkg-lock.json` file is created alongside your `fglpkg.json`. The lock file pins:
 
 - Exact resolved versions of every BDL package
 - Download URLs and SHA256 checksums
 - The Genero version used at resolution time
 - Under `root.declared`, the dependency constraints it was resolved *from* — this is what lets `install` tell that `fglpkg.json` has been edited (see [Editing fglpkg.json by Hand](#editing-fglpkgjson-by-hand))
 
-This ensures reproducible installs across machines and CI environments. Commit `fglpkg.lock` to version control.
+This ensures reproducible installs across machines and CI environments. Commit `fglpkg-lock.json` to version control.
+
+**Keep formatters off it.** `fglpkg-lock.json` is machine-generated and written for byte-stable, minimal diffs. Because it now ends in `.json`, generic JSON tooling — editor "format on save", Prettier, pre-commit JSON hooks — may reformat it and produce noisy, spurious diffs. Add it to your formatter's ignore list (e.g. a `.prettierignore` entry `fglpkg-lock.json`), the same way `package-lock.json` is universally ignore-listed.
+
+**Migrating from the old name.** Earlier fglpkg versions named this file `fglpkg.lock`. The first `fglpkg install` or `fglpkg update` you run in a project that still has a `fglpkg.lock` renames it to `fglpkg-lock.json` and prints a one-line notice; commit the rename. (An older lock — one written before dependency-set tracking — also re-resolves once on that first install, which can move versions within your constraints, so review the resulting diff.) Once `fglpkg-lock.json` exists it is authoritative, and any leftover `fglpkg.lock` beside it is ignored.
 
 To bypass the lock and re-resolve everything:
 
@@ -2020,7 +2024,7 @@ Set `signing.enforce` in `~/.fglpkg/config.json` (or the `FGLPKG_SIGNING` enviro
 
 ## Auditing dependencies for vulnerabilities
 
-`fglpkg audit` cross-checks the Java JARs recorded in `fglpkg.lock` against the public [OSV.dev](https://osv.dev) advisory database and reports any known vulnerabilities. It needs a `fglpkg.lock`, so run `fglpkg install` first.
+`fglpkg audit` cross-checks the Java JARs recorded in `fglpkg-lock.json` against the public [OSV.dev](https://osv.dev) advisory database and reports any known vulnerabilities. It needs a `fglpkg-lock.json`, so run `fglpkg install` first.
 
 ```bash
 fglpkg audit
@@ -2063,11 +2067,11 @@ Flags:
 fglpkg audit signatures
 ```
 
-Re-verifies every package in `fglpkg.lock` against the current keys manifest, printing one line per package and exiting non-zero if any package is unsigned or fails to verify — suitable as a CI gate.
+Re-verifies every package in `fglpkg-lock.json` against the current keys manifest, printing one line per package and exiting non-zero if any package is unsigned or fails to verify — suitable as a CI gate.
 
 ## Software Bill of Materials (SBOM)
 
-`fglpkg sbom` emits a Software Bill of Materials for the current project, generated entirely from `fglpkg.lock` — it makes **no network calls**, so it works offline and in a sealed CI build. It needs a `fglpkg.lock`, so run `fglpkg install` first.
+`fglpkg sbom` emits a Software Bill of Materials for the current project, generated entirely from `fglpkg-lock.json` — it makes **no network calls**, so it works offline and in a sealed CI build. It needs a `fglpkg-lock.json`, so run `fglpkg install` first.
 
 ```bash
 fglpkg sbom                       # CycloneDX JSON to stdout
@@ -2152,7 +2156,7 @@ fglpkg update
 
 ### A locked dependency can no longer be downloaded
 
-When `fglpkg install` restores a pinned dependency from `fglpkg.lock` and the download fails, the message depends on what the server said. This applies to both BDL and webcomponent packages.
+When `fglpkg install` restores a pinned dependency from `fglpkg-lock.json` and the download fails, the message depends on what the server said. This applies to both BDL and webcomponent packages.
 
 - **HTTP 404 / 410 — no longer available.** The registry no longer serves the pinned `name@version`: it was deleted or withdrawn, or you do not have access to it. (A private registry commonly answers 404 rather than 403 for a package you cannot see, so this can simply mean you need to log in.) fglpkg names the package and offers three ways out:
 
@@ -2168,7 +2172,7 @@ When `fglpkg install` restores a pinned dependency from `fglpkg.lock` and the do
 
 ### `fglpkg list` shows a package I removed
 
-`list` reports what `fglpkg.lock` records as installed (and, under `--flat`, what is actually on disk under `.fglpkg/packages/`), so a package that is gone from `fglpkg.json` but still listed means the store hasn't been reconciled yet. Run `fglpkg install` — it re-resolves and prunes the orphan (see [Pruning](#pruning-converging-on-the-manifest)). If it persists, you are most likely on a **global** install (`~/.fglpkg/`), which is shared across projects and deliberately never pruned; check with `fglpkg list --local` vs `fglpkg list --global`.
+`list` reports what `fglpkg-lock.json` records as installed (and, under `--flat`, what is actually on disk under `.fglpkg/packages/`), so a package that is gone from `fglpkg.json` but still listed means the store hasn't been reconciled yet. Run `fglpkg install` — it re-resolves and prunes the orphan (see [Pruning](#pruning-converging-on-the-manifest)). If it persists, you are most likely on a **global** install (`~/.fglpkg/`), which is shared across projects and deliberately never pruned; check with `fglpkg list --local` vs `fglpkg list --global`.
 
 ### Wrong Genero version detected
 

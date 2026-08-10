@@ -159,7 +159,7 @@ func TestCmdOutdatedEndToEnd(t *testing.T) {
   "version": "0.1.0",
   "dependencies": { "fgl": { "demo": "^1.0.0" } }
 }`)
-	write("fglpkg.lock", `{
+	write("fglpkg-lock.json", `{
   "lockfileVersion": 1,
   "generatedAt": "2026-04-23T00:00:00Z",
   "generoVersion": "6.00.01",

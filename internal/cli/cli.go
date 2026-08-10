@@ -785,6 +785,20 @@ func cmdInstall(args []string) error {
 // runtime mismatch is a warning elsewhere, not lock staleness.
 func checkFrozen(m *manifest.Manifest, projectDir string) error {
 	if !lockfile.Exists(projectDir) {
+		// A pre-GIS-289 project has a lock, just under the old name — and
+		// --frozen runs before the install-time migration, so it is the first
+		// thing a CI build hits after an fglpkg upgrade. Saying "create one"
+		// there would wrongly imply the lock must be regenerated from scratch;
+		// point at the migration instead. Don't promise "no re-resolution",
+		// though: a lock written before the dependency-set snapshot re-resolves
+		// once on that first install (Validate treats a nil Declared as stale),
+		// so the message warns about that rather than denying it.
+		if lockfile.LegacyPresent(projectDir) {
+			return fmt.Errorf("--frozen requires a committed %s, but this project still has the legacy %s.\n"+
+				"  Run 'fglpkg install' once without --frozen to migrate it to %s, then commit the result.\n"+
+				"  (An older lock may re-resolve once on that first install — review the resulting diff.)",
+				lockfile.Filename, lockfile.LegacyFilename, lockfile.Filename)
+		}
 		return fmt.Errorf("--frozen requires a committed %s, but none was found.\n"+
 			"  Run 'fglpkg install' without --frozen to create one, then commit it.",
 			lockfile.Filename)
@@ -873,7 +887,7 @@ func isProjectDir() bool {
 	return false
 }
 
-// resetLocalInstall deletes fglpkg.lock and the local package and JAR
+// resetLocalInstall deletes fglpkg-lock.json and the local package and JAR
 // directories so the next install re-downloads everything from the
 // registry. Safe to call when nothing exists yet (missing files are
 // simply ignored).
@@ -887,7 +901,7 @@ func resetLocalInstall(projectDir string, inst *installer.Installer) error {
 			return fmt.Errorf("cannot remove %s: %w", dir, err)
 		}
 	}
-	fmt.Println("Cleared fglpkg.lock and .fglpkg/ — reloading from registry...")
+	fmt.Println("Cleared fglpkg-lock.json and .fglpkg/ — reloading from registry...")
 	return nil
 }
 

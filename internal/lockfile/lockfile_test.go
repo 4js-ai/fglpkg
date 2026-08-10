@@ -212,6 +212,84 @@ func TestExists(t *testing.T) {
 	}
 }
 
+// ─── Migrate (GIS-289 legacy-name rename) ────────────────────────────────────
+
+// TestMigrateRenamesLegacyLock covers the common case: a project created before
+// the rename carries fglpkg.lock and no fglpkg-lock.json. Migrate renames it in
+// place, reports that it did, and the resolved contents survive verbatim (no
+// re-resolution).
+func TestMigrateRenamesLegacyLock(t *testing.T) {
+	dir := t.TempDir()
+	body := []byte(`{"lockfileVersion":1}` + "\n")
+	if err := os.WriteFile(filepath.Join(dir, lockfile.LegacyFilename), body, 0o644); err != nil {
+		t.Fatalf("seed legacy lock: %v", err)
+	}
+
+	migrated, err := lockfile.Migrate(dir)
+	if err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if !migrated {
+		t.Fatal("Migrate should report a rename when only the legacy file is present")
+	}
+	if _, err := os.Stat(filepath.Join(dir, lockfile.LegacyFilename)); !os.IsNotExist(err) {
+		t.Errorf("legacy %s should be gone after migration, stat err = %v", lockfile.LegacyFilename, err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, lockfile.Filename))
+	if err != nil {
+		t.Fatalf("read migrated lock: %v", err)
+	}
+	if string(got) != string(body) {
+		t.Errorf("migrated content = %q, want verbatim %q", got, body)
+	}
+}
+
+// TestMigrateNoLegacyFile: nothing to do when there is no legacy lock.
+func TestMigrateNoLegacyFile(t *testing.T) {
+	migrated, err := lockfile.Migrate(t.TempDir())
+	if err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if migrated {
+		t.Error("Migrate should report nothing when no legacy lock exists")
+	}
+}
+
+// TestMigrateNewNameWins: once fglpkg-lock.json exists it is authoritative — a
+// stale fglpkg.lock beside it is neither read nor removed, and Migrate is a
+// no-op that never clobbers the current lock.
+func TestMigrateNewNameWins(t *testing.T) {
+	dir := t.TempDir()
+	current := []byte(`{"lockfileVersion":1,"generoVersion":"current"}` + "\n")
+	stale := []byte(`{"lockfileVersion":1,"generoVersion":"stale"}` + "\n")
+	if err := os.WriteFile(filepath.Join(dir, lockfile.Filename), current, 0o644); err != nil {
+		t.Fatalf("seed current lock: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, lockfile.LegacyFilename), stale, 0o644); err != nil {
+		t.Fatalf("seed stale legacy lock: %v", err)
+	}
+
+	migrated, err := lockfile.Migrate(dir)
+	if err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if migrated {
+		t.Error("Migrate must not touch anything when the new name already exists")
+	}
+	got, err := os.ReadFile(filepath.Join(dir, lockfile.Filename))
+	if err != nil {
+		t.Fatalf("read current lock: %v", err)
+	}
+	if string(got) != string(current) {
+		t.Errorf("current lock was clobbered: got %q, want %q", got, current)
+	}
+	// The stale legacy file is deliberately left in place (the caller decides
+	// whether to remove it), so it must still be present.
+	if _, err := os.Stat(filepath.Join(dir, lockfile.LegacyFilename)); err != nil {
+		t.Errorf("stale legacy file should be left untouched, stat err = %v", err)
+	}
+}
+
 // ─── Validate ────────────────────────────────────────────────────────────────
 
 func TestValidateClean(t *testing.T) {
@@ -500,7 +578,7 @@ func TestAddManifestJARs(t *testing.T) {
 	}
 }
 
-// TestSaveDoesNotHTMLEscape: fglpkg.lock must keep the literal angle brackets
+// TestSaveDoesNotHTMLEscape: fglpkg-lock.json must keep the literal angle brackets
 // in a requiredBy entry like "<root>". Under Go's default HTML escaping the
 // brackets would be written as numeric Unicode escapes, so the literal
 // "<root>" would NOT appear — the positive check alone distinguishes it (GIS-280).
@@ -523,7 +601,7 @@ func TestSaveDoesNotHTMLEscape(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 	if got := string(data); !strings.Contains(got, "<root>") {
-		t.Errorf("fglpkg.lock is HTML-escaping requiredBy; want literal <root>:\n%s", got)
+		t.Errorf("fglpkg-lock.json is HTML-escaping requiredBy; want literal <root>:\n%s", got)
 	}
 }
 
@@ -830,4 +908,38 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestLegacyPresent: the helper that lets a "no lock" message tell the user
+// their lock is there under the pre-GIS-289 name. It must agree with Migrate
+// about whether there is something to migrate.
+func TestLegacyPresent(t *testing.T) {
+	t.Run("legacy only", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, lockfile.LegacyFilename), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if !lockfile.LegacyPresent(dir) {
+			t.Error("LegacyPresent = false, want true")
+		}
+		// Agreement with Migrate: it has something to do.
+		migrated, err := lockfile.Migrate(dir)
+		if err != nil || !migrated {
+			t.Errorf("Migrate = (%v, %v), want (true, nil) — helper and Migrate disagree", migrated, err)
+		}
+	})
+	t.Run("no legacy", func(t *testing.T) {
+		if lockfile.LegacyPresent(t.TempDir()) {
+			t.Error("LegacyPresent = true on an empty dir, want false")
+		}
+	})
+	t.Run("new name only", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, lockfile.Filename), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if lockfile.LegacyPresent(dir) {
+			t.Error("LegacyPresent = true with only the new name present, want false")
+		}
+	})
 }

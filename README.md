@@ -16,7 +16,7 @@ fglpkg/
 │   ├── genero/genero.go            # Genero BDL version detection
 │   ├── resolver/resolver.go        # Transitive dependency resolution
 │   ├── installer/installer.go      # Zip download, extraction, JAR management
-│   ├── lockfile/lockfile.go        # fglpkg.lock read/write/validate
+│   ├── lockfile/lockfile.go        # fglpkg-lock.json read/write/validate
 │   ├── checksum/checksum.go        # SHA256 streaming verification
 │   ├── credentials/                # Registry credential storage
 │   ├── workspace/workspace.go      # Monorepo workspace support
@@ -424,7 +424,7 @@ fglpkg audit                             # Scan installed Java JARs for CVEs (OS
                                          #   --severity, --production, --json; derives severity
                                          #   from CVSS when no GHSA label; retries transient
                                          #   failures; web-component front-end deps not yet scanned
-fglpkg sbom                              # Emit a CycloneDX SBOM from fglpkg.lock
+fglpkg sbom                              # Emit a CycloneDX SBOM from fglpkg-lock.json
 fglpkg lint                              # Validate fglpkg.json before packing or publishing (alias: check)
 fglpkg pack                              # Build the publishable zip without uploading
 fglpkg completion bash                   # Print shell completion script

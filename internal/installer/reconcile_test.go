@@ -382,7 +382,7 @@ func writeStubLock(t *testing.T, dir string) {
 }
 
 // Removing the last dependency empties the graph, so reconcileLock must delete
-// fglpkg.lock rather than leave an empty one behind (GIS-273).
+// fglpkg-lock.json rather than leave an empty one behind (GIS-273).
 func TestReconcileLockDeletesLockWhenGraphEmpty(t *testing.T) {
 	dir := t.TempDir()
 	writeStubLock(t, dir)
@@ -393,7 +393,7 @@ func TestReconcileLockDeletesLockWhenGraphEmpty(t *testing.T) {
 		t.Fatalf("reconcileLock: %v", err)
 	}
 	if lockfile.Exists(dir) {
-		t.Error("an empty graph must delete fglpkg.lock, but it still exists")
+		t.Error("an empty graph must delete fglpkg-lock.json, but it still exists")
 	}
 	if note == "" {
 		t.Error("expected a deletion note for the caller's summary")
@@ -421,7 +421,7 @@ func TestReconcileLockKeepsLockWhenGraphNonEmpty(t *testing.T) {
 		t.Errorf("no deletion note expected when the lock is kept, got %q", note)
 	}
 	if !lockfile.Exists(dir) {
-		t.Fatal("a non-empty graph must keep fglpkg.lock")
+		t.Fatal("a non-empty graph must keep fglpkg-lock.json")
 	}
 	lf, err := lockfile.Load(dir)
 	if err != nil {

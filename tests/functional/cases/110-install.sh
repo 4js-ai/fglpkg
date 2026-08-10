@@ -6,9 +6,9 @@ _install_pinned() {
   assert_success
   assert_dir ".fglpkg/packages/demo-pkg"          # installed under the canonical slug
   assert_file ".fglpkg/packages/demo-pkg/fglpkg.json"
-  assert_file "fglpkg.lock"
-  assert_file_contains "fglpkg.lock" "demo-pkg"
-  assert_file_contains "fglpkg.lock" "1.0.0"
+  assert_file "fglpkg-lock.json"
+  assert_file_contains "fglpkg-lock.json" "demo-pkg"
+  assert_file_contains "fglpkg-lock.json" "1.0.0"
 }
 it "install <pkg>@<version> downloads, verifies, extracts, and locks" _install_pinned
 
@@ -17,7 +17,7 @@ _install_latest() {
   run install demo.pkg
   assert_success
   assert_dir ".fglpkg/packages/demo-pkg"
-  assert_file_contains "fglpkg.lock" "1.1.0"       # resolves the latest version
+  assert_file_contains "fglpkg-lock.json" "1.1.0"       # resolves the latest version
 }
 it "install <pkg> resolves and installs the latest version" _install_latest
 
@@ -43,15 +43,15 @@ _install_gone_locked_dep() {
   mock_registry_start
   run install demo.pkg@1.0.0
   assert_success
-  assert_file "fglpkg.lock"
+  assert_file "fglpkg-lock.json"
 
   python3 - "$FGLPKG_REGISTRY" <<'PY'
 import json, sys
 reg = sys.argv[1]
-with open("fglpkg.lock") as f:
+with open("fglpkg-lock.json") as f:
     lock = json.load(f)
 lock["packages"][0]["downloadUrl"] = reg + "/artifacts/deleted/does-not-exist.zip"
-with open("fglpkg.lock", "w") as f:
+with open("fglpkg-lock.json", "w") as f:
     json.dump(lock, f, indent=2)
 PY
   rm -rf .fglpkg

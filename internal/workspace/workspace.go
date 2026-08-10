@@ -11,7 +11,7 @@
 //     dependencies from disk rather than the registry, and they are never
 //     written to the lock file as remote downloads.
 //
-//   - A single shared fglpkg.lock lives at the workspace root, covering all
+//   - A single shared fglpkg-lock.json lives at the workspace root, covering all
 //     external (registry) dependencies across all members. This ensures every
 //     member uses the same resolved versions.
 //
@@ -22,7 +22,7 @@
 //
 //	myrepo/
 //	├── fglpkg.workspace.json
-//	├── fglpkg.lock               ← shared lock file
+//	├── fglpkg-lock.json               ← shared lock file
 //	├── core/
 //	│   └── fglpkg.json           { "name": "core", ... }
 //	├── utils/
