@@ -718,4 +718,18 @@ func TestPublishUploadArtifactForceSignal(t *testing.T) {
 	if err != nil && strings.Contains(err.Error(), "--force") {
 		t.Errorf("unknown-code error must not guess --force: %v", err)
 	}
+
+	// Unrecognised code with NO message → synthesized sentence names the code
+	// and hints at an upgrade (GIS-435 style), never a raw JSON dump.
+	body = `{"code":"variant_quarantined"}`
+	err = up(false)
+	if err == nil {
+		t.Fatal("expected an error for an unrecognised no-message 409")
+	}
+	if !strings.Contains(err.Error(), "variant_quarantined") || !strings.Contains(err.Error(), "upgrade") {
+		t.Errorf("no-message unknown-code error should name the code and hint at an upgrade, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "{") || strings.Contains(err.Error(), "--force") {
+		t.Errorf("no-message unknown-code error must not dump raw JSON or guess --force: %v", err)
+	}
 }

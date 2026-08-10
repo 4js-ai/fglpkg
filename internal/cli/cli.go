@@ -2145,15 +2145,24 @@ func cmdPublish(args []string) error {
 		return runHook(m, manifest.HookPostPublish, projectDir)
 	}
 
-	// --force skips the local "already published" pre-check and asks the server
-	// to overwrite an existing pending/rejected variant in place (?force=1). An
-	// approved version stays immutable — the server still 409s, and the upload
-	// step turns that into a "bump the version" message. Safe to run unattended
-	// in --ci for the same reason (it can never clobber published, approved bytes).
-	if pf.force {
-		fmt.Printf("  --force: an existing pending/rejected variant will be OVERWRITTEN (an approved version stays immutable).\n")
-	} else if err := checkVariantNotPublished(m, generoMajor); err != nil {
-		return err
+	// --force RELAXES the local pre-check, it does not skip it. The lookup is
+	// still the only way to know whether a variant is actually there (so the
+	// notice is truthful, not fired on a first publish) and still the guard
+	// against publishing blind when the registry cannot be consulted. Only the
+	// "already exists" verdict is downgraded from fatal to a warning under
+	// --force; an inconclusive check (network/server error) still aborts. The
+	// server has the final say at upload: an approved version stays immutable
+	// (?force=1 still 409s → "bump the version"), a pending/rejected one is
+	// overwritten in place. Safe unattended in --ci — it can never clobber
+	// published, approved bytes.
+	switch err := checkVariantNotPublished(m, generoMajor); {
+	case err == nil:
+		// Nothing to overwrite — no notice.
+	case pf.force && errors.Is(err, ErrVariantPublished):
+		fmt.Printf("  --force: %s@%s (Genero %s) already exists — it will be OVERWRITTEN if it is still pending/rejected; an approved version stays immutable.\n",
+			m.Name, m.Version, generoMajor)
+	default:
+		return err // already published without --force, or an inconclusive check
 	}
 	registryURL := defaultPublishRegistry()
 

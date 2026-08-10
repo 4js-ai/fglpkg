@@ -87,6 +87,11 @@ func TestCheckVariantNotPublishedSameVariantBlocks(t *testing.T) {
 	if !strings.Contains(err.Error(), "fglpkg bump") {
 		t.Errorf("err = %v, want guidance pointing at `fglpkg bump`", err)
 	}
+	// The already-published verdict must wrap the sentinel so --force can
+	// downgrade it from fatal to a warning (GIS-274 review).
+	if !errors.Is(err, ErrVariantPublished) {
+		t.Errorf("err must wrap ErrVariantPublished, got: %v", err)
+	}
 }
 
 // The regression Laurent hit in SUPNA-10506: publishing a Genero 5 variant
@@ -132,6 +137,11 @@ func TestCheckVariantNotPublishedRegistryDown(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cannot check") {
 		t.Errorf("err = %v, want one starting with 'cannot check'", err)
+	}
+	// An inconclusive check must NOT look like the already-published verdict,
+	// so --force still aborts rather than publishing blind (GIS-274 review).
+	if errors.Is(err, ErrVariantPublished) {
+		t.Errorf("an inconclusive check must not be ErrVariantPublished, got: %v", err)
 	}
 }
 

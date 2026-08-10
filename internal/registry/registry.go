@@ -611,10 +611,19 @@ func PublishUploadArtifact(slug, version, variant, filename string, force bool, 
 		case "variant_exists":
 			return fmt.Errorf("%s: this variant is already uploaded — re-run with --force to overwrite it, or bump the version", op)
 		default:
-			if e.Error != "" {
+			// Unrecognised (or absent) code: prefer the server's own message;
+			// otherwise synthesize one that names the code and hints at a client
+			// upgrade — matching the GIS-435 sibling handler rather than dumping
+			// the raw JSON body (or a bare "HTTP 409:") into the error.
+			switch {
+			case e.Error != "":
 				return fmt.Errorf("%s: %s", op, e.Error)
+			case strings.TrimSpace(e.Code) != "":
+				return fmt.Errorf("%s: the registry reported an unrecognised conflict code %q (upgrade fglpkg if this is unexpected)",
+					op, strings.TrimSpace(e.Code))
+			default:
+				return fmt.Errorf("%s: the registry rejected the upload (HTTP 409) with no detail", op)
 			}
-			return fmt.Errorf("%s: HTTP 409: %s", op, strings.TrimSpace(string(respBody)))
 		}
 	}
 	return fmt.Errorf("upload artifact %s@%s/%s: HTTP %d: %s",
