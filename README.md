@@ -437,6 +437,7 @@ fglpkg publish --private                 # Publish as private (overrides fglpkg.
 fglpkg publish --public                  # Publish as public (overrides fglpkg.json visibility)
 fglpkg publish --changelog "notes..."    # Set this version's changelog inline (overrides CHANGELOG.md)
 fglpkg publish --allow-empty             # Publish even when the archive would stage no assets
+fglpkg publish --force                   # Re-upload a still-pending/rejected variant (approved is immutable — bump)
 
 # Deprecating & relocating (npm-style; stays installable, warns consumers)
 fglpkg deprecate chart-3d@1.2.3 "reason"       # Deprecate one version with a message
@@ -505,10 +506,12 @@ Publishing is **additive and reviewed**: a freshly published version is marked
 
 The publish flow:
 1. Builds a zip from the directory specified by `root` (or `.`), collecting files matching `files` patterns (default: `*.42m`, `*.42f`, `*.sch`) plus any declared `bin` scripts and `docs`, and SHA256s it.
-2. `POST /registry/packages` — creates the package slug on first publish (a `409` means it already exists, which is fine). New packages carry the manifest's `visibility` field. If `visibility` is omitted from `fglpkg.json`, fglpkg defaults to `"public"` — this is intentional (npm-style: public unless you opt out). To publish a private package, set `"visibility": "private"` explicitly. Visibility is set once on first publish and ignored on subsequent publishes.
+2. `POST /registry/packages` — creates the package slug on first publish. A `409` here is fine **when the slug is already yours** (an ordinary republish); if it is owned by another account, publish stops with a clear error rather than pushing a version onto a slug you may not own. New packages carry the manifest's `visibility` field. If `visibility` is omitted from `fglpkg.json`, fglpkg defaults to `"public"` — this is intentional (npm-style: public unless you opt out). To publish a private package, set `"visibility": "private"` explicitly. Visibility is set once on first publish and ignored on subsequent publishes.
 3. `POST /registry/packages/:slug/versions` — creates the version (a `409` means the version already exists; publish proceeds to add a new variant to it). This call also carries the version's **changelog**: by default the section for the version being published is extracted from a `CHANGELOG.md` in the project root ([Keep a Changelog](https://keepachangelog.com) format, e.g. `## [1.2.0]`), or you can supply it inline with `--changelog "<text>"`. If `CHANGELOG.md` exists but has no entry for the version, publish warns and sends an empty changelog.
 4. `PUT /registry/packages/:slug/versions/:version/artifacts/:variant` — streams the zip body; the registry computes size + checksum and stores it in R2.
 5. `POST /registry/packages/:slug/versions/:version/submit` — marks the version pending for admin review.
+
+**Re-publishing a variant.** By default `publish` refuses to overwrite a variant (a version + Genero major) that already exists. If that version is still *pending* or was *rejected*, `--force` re-uploads it in place — the artifact PUT carries `?force=1`. An **approved** variant is immutable: `--force` cannot overwrite it and publish tells you to bump the version instead. (For a secondary Artifactory repo, `--force` simply overwrites the deployed artifact — there is no pending/approved lifecycle there.)
 
 Before any of these steps, fglpkg **refuses to publish a package with no assets** — one whose archive would contain only `fglpkg.json` and files matched solely by `docs`. The guard runs before Genero detection, auth, or any network call, so the mistake surfaces at the earliest preview: it applies under `--dry-run` too, and identically to GI and Artifactory targets. Pass `--allow-empty` to override it.
 

@@ -974,6 +974,7 @@ Credentials are saved to `~/.fglpkg/credentials.json` and refreshed automaticall
 ```bash
 fglpkg publish
 fglpkg publish --dry-run     # preview every call without touching the network
+fglpkg publish --force       # re-upload a still-pending/rejected variant (approved is immutable — bump)
 ```
 
 **Empty-package guard.** If the staged archive would contain no asset — nothing but `fglpkg.json` and files matched by `docs` — `publish` refuses it with an actionable message (a common symptom of a `files` pattern that matches nothing). Any real content counts as an asset: BDL modules, `bin` scripts, a `webcomponents/` tree (html/js/css), `include` files, or a `profile`. Run `fglpkg pack --list` first to see exactly what would ship; it flags the empty case too. Pass `--allow-empty` to publish anyway (e.g. a docs-only placeholder).
@@ -982,10 +983,12 @@ Publishing is **additive and reviewed**: a freshly published version is marked *
 
 The publish flow:
 1. Builds a zip from the directory given by `root` (or `.`), collecting files matching `files` (default `*.42m`, `*.42f`, `*.sch`) plus declared `bin` scripts and `docs`, and SHA256s it.
-2. `POST /registry/packages` — creates the package on first publish (a `409` "already exists" is fine). New packages carry the manifest's `visibility` (`public` by default; set `"visibility": "private"` to restrict).
+2. `POST /registry/packages` — creates the package on first publish. A `409` is fine **when the slug is already yours** (an ordinary republish); if another account owns it, publish stops with a clear error rather than pushing a version onto a slug you may not own. New packages carry the manifest's `visibility` (`public` by default; set `"visibility": "private"` to restrict).
 3. `POST /registry/packages/:slug/versions` — creates the version and attaches its changelog (see below).
 4. `PUT …/versions/:version/artifacts/:variant` — streams the zip; the registry stores it and records size + checksum.
 5. `POST …/versions/:version/submit` — submits the version for admin review.
+
+**Re-publishing a variant.** By default `publish` refuses to overwrite a variant (a version + Genero major) that already exists. If that version is still *pending* or was *rejected*, `--force` re-uploads it in place (the artifact PUT carries `?force=1`). An **approved** variant is immutable: `--force` cannot overwrite it and publish tells you to bump the version instead.
 
 Authentication uses the OAuth/PAT bearer from `fglpkg login` (or `FGLPKG_TOKEN` in CI). No GitHub token is involved.
 
