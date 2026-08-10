@@ -61,7 +61,7 @@ UNLICENSED, detected repository) without prompting.
 		Long: `FLAGS:
   --local, -l              Force local project directory (.fglpkg/)
   --global, -g             Force global home directory (~/.fglpkg/)
-  --force, -f              Delete fglpkg.lock and .fglpkg/ first, then
+  --force, -f              Delete fglpkg-lock.json and .fglpkg/ first, then
                            re-download every package (local installs only)
   --save-dev, -D           Record added packages under "devDependencies"
   --save-optional, -O      Record added packages under "optionalDependencies"
@@ -80,13 +80,13 @@ UNLICENSED, detected repository) without prompting.
                            install (discouraged; overrides signing.enforce)
   --no-prune               Keep packages, webcomponents, and JARs the dependency
                            graph no longer requires instead of deleting them
-  --frozen                 Fail if fglpkg.lock disagrees with fglpkg.json instead
+  --frozen                 Fail if fglpkg-lock.json disagrees with fglpkg.json instead
                            of re-resolving. For CI and deployment builds
 
 With no package arguments, installs everything declared in fglpkg.json.
 
 Install converges .fglpkg/ on fglpkg.json: a dependency you delete from the
-manifest by hand is re-resolved out of fglpkg.lock AND deleted from disk, so it
+manifest by hand is re-resolved out of fglpkg-lock.json AND deleted from disk, so it
 stops appearing in 'fglpkg list' and stops resolving on FGLLDPATH. Pruning
 applies to local (.fglpkg/) installs only — a global ~/.fglpkg/ is shared
 across projects — and is skipped under --production, which resolves a
@@ -111,7 +111,7 @@ Without --local/--global, the target is auto-detected: local when a
   --global, -g             Force global home directory (~/.fglpkg/)
 
 Drops the package from fglpkg.json, re-resolves the remaining graph, and
-rewrites fglpkg.lock. For a local (.fglpkg/) install it also prunes packages
+rewrites fglpkg-lock.json. For a local (.fglpkg/) install it also prunes packages
 and Java JARs the graph no longer needs. Global (~/.fglpkg/) artifacts are
 shared across projects and are left on disk.
 `,
@@ -126,14 +126,14 @@ shared across projects and are left on disk.
   --registry <name>        Restrict this re-resolution to the named repository.
                            Without it, a configured "defaultConsumeRegistry"
                            (or FGLPKG_CONSUME_REGISTRY) restricts it instead
-  --production, --prod     Skip devDependencies (does not rewrite fglpkg.lock)
+  --production, --prod     Skip devDependencies (does not rewrite fglpkg-lock.json)
   --no-manifest-fallback   Do not install Java dependencies a package's bundled
                            manifest declares but its registry record omits; the
                            divergence is still reported
   --no-prune               Keep packages, webcomponents, and JARs the dependency
                            graph no longer requires instead of deleting them
 
-Ignores fglpkg.lock and re-resolves every dependency to the newest version
+Ignores fglpkg-lock.json and re-resolves every dependency to the newest version
 allowed by the manifest constraints.
 
 Like install, update then converges .fglpkg/ on the resolved graph: anything it
@@ -156,11 +156,11 @@ Prints the installed dependency tree: at every level, Genero packages and
 webcomponents first, then the Java JARs they pull in. A subtree already shown
 above is collapsed to a "(*)" leaf rather than repeated.
 
-Package parentage comes from fglpkg.lock. JAR parentage is not recorded there,
+Package parentage comes from fglpkg-lock.json. JAR parentage is not recorded there,
 so it is read from each installed package's bundled fglpkg.json — a JAR no
 installed manifest declares is shown at the top level.
 
-Needs a fglpkg.lock in the current directory. Without one — and always under
+Needs a fglpkg-lock.json in the current directory. Without one — and always under
 --global, which has no lock — the output falls back to --flat.
 `,
 	},
@@ -305,7 +305,7 @@ NOTES:
 	},
 	{
 		Name:       "sbom",
-		Summary:    "Emit a CycloneDX SBOM for the project from fglpkg.lock",
+		Summary:    "Emit a CycloneDX SBOM for the project from fglpkg-lock.json",
 		ListDetail: "\n(-o file, --pretty, --production)",
 		Usage:      "fglpkg sbom [flags]",
 		Long: `FLAGS:
@@ -316,7 +316,7 @@ NOTES:
                                   (spdx is reserved for a future release)
 
 NOTES:
-  v1 emits CycloneDX 1.5 JSON, generated from fglpkg.lock. No network calls.
+  v1 emits CycloneDX 1.5 JSON, generated from fglpkg-lock.json. No network calls.
   The serial number is derived from the content, so it is stable across runs
   for the same lockfile; set SOURCE_DATE_EPOCH for a byte-reproducible
   timestamp (otherwise the timestamp reflects the current time).

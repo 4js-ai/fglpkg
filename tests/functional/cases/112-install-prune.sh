@@ -123,6 +123,6 @@ _frozen_requires_a_lock() {
   mkpkg consumer.app 0.1.0
   run install --frozen
   assert_failure
-  assert_contains "requires a committed fglpkg.lock"
+  assert_contains "requires a committed fglpkg-lock.json"
 }
 it "install --frozen fails when no lock is committed" _frozen_requires_a_lock

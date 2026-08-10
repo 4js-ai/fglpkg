@@ -15,7 +15,7 @@ suite "install --no-verify-signature (mock registry)"
 # a subshell inside an `if` condition, and bash suppresses errexit there — so a
 # bare failing assertion mid-body is ignored and the verdict comes from the last
 # command alone. That is exactly how this bug hid: verification happens AFTER
-# extraction and after fglpkg.lock is written, so the trailing "package is on
+# extraction and after fglpkg-lock.json is written, so the trailing "package is on
 # disk" assertions all passed while the install had actually failed.
 
 # Baseline: require mode must reject the unsigned fixture, or the tests below
@@ -38,7 +38,7 @@ _nvs_flag_overrides_on_add() {
   assert_not_contains "artifact is not signed" || return 1
   assert_dir ".fglpkg/packages/demo-pkg" || return 1
   assert_file ".fglpkg/packages/demo-pkg/fglpkg.json" || return 1
-  assert_file_contains "fglpkg.lock" "demo-pkg" || return 1
+  assert_file_contains "fglpkg-lock.json" "demo-pkg" || return 1
 }
 it "install <pkg> --no-verify-signature overrides require mode" _nvs_flag_overrides_on_add
 
@@ -65,7 +65,7 @@ _nvs_flag_is_not_sticky() {
   export FGLPKG_SIGNING=require
   run install demo.pkg@1.0.0 --no-verify-signature
   assert_success || return 1
-  rm -rf .fglpkg fglpkg.lock
+  rm -rf .fglpkg fglpkg-lock.json
   run install
   assert_failure || return 1
   assert_contains "artifact is not signed" || return 1
@@ -80,6 +80,6 @@ _nvs_enforcement_still_applies_on_add() {
   run install demo.pkg@1.0.0
   assert_failure || return 1
   assert_contains "artifact is not signed" || return 1
-  assert_no_file "fglpkg.lock.tmp" || return 1
+  assert_no_file "fglpkg-lock.json.tmp" || return 1
 }
 it "install <pkg> without the flag still enforces require mode" _nvs_enforcement_still_applies_on_add

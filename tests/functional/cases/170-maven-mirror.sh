@@ -17,11 +17,11 @@ EOF
   assert_contains "Resolved 0 package(s), 1 JAR(s)"
   assert_contains "✓ gson-2.10.1.jar"
   assert_file ".fglpkg/jars/gson-2.10.1.jar"
-  assert_json_field "fglpkg.lock" "jars.0.key" "com.google.code.gson:gson"
-  assert_json_field "fglpkg.lock" "jars.0.groupId" "com.google.code.gson"
-  assert_json_field "fglpkg.lock" "jars.0.downloadUrl" \
+  assert_json_field "fglpkg-lock.json" "jars.0.key" "com.google.code.gson:gson"
+  assert_json_field "fglpkg-lock.json" "jars.0.groupId" "com.google.code.gson"
+  assert_json_field "fglpkg-lock.json" "jars.0.downloadUrl" \
     "$MAVEN_URL/com/google/code/gson/gson/2.10.1/gson-2.10.1.jar"
-  assert_not_contains "repo1.maven.org" "$(cat fglpkg.lock)"
+  assert_not_contains "repo1.maven.org" "$(cat fglpkg-lock.json)"
   assert_file_contains "$MAVEN_LOG" "gson-2.10.1.jar"
 }
 it "install reroutes a JAR through FGLPKG_MAVEN_URL and pins the mirror URL" _mm_env_var_reroutes
@@ -40,7 +40,7 @@ EOF
   run install --local
   assert_success
   assert_file ".fglpkg/jars/gson-2.10.1.jar"
-  assert_json_field "fglpkg.lock" "jars.0.downloadUrl" \
+  assert_json_field "fglpkg-lock.json" "jars.0.downloadUrl" \
     "$MAVEN_URL/com/google/code/gson/gson/2.10.1/gson-2.10.1.jar"
   assert_file_contains "$MAVEN_LOG" "gson-2.10.1.jar"
 }
@@ -60,7 +60,7 @@ _mm_per_dep_url_wins() {
 EOF
   run install --local
   assert_success
-  assert_json_field "fglpkg.lock" "jars.0.downloadUrl" "$MAVEN_URL/override/custom-lib.jar"
+  assert_json_field "fglpkg-lock.json" "jars.0.downloadUrl" "$MAVEN_URL/override/custom-lib.jar"
   assert_file ".fglpkg/jars/lib-1.0.0.jar"                    # on-disk name is coordinate-derived
   assert_file_contains "$MAVEN_LOG" "GET /override/custom-lib.jar"
   # the standard Maven2 path was never requested — the override short-circuits it
@@ -128,7 +128,7 @@ EOF
   run install --local
   assert_success
   assert_file ".fglpkg/jars/gson-2.10.1.jar"
-  assert_json_field "fglpkg.lock" "jars.0.downloadUrl" \
+  assert_json_field "fglpkg-lock.json" "jars.0.downloadUrl" \
     "$MAVEN_URL/com/google/code/gson/gson/2.10.1/gson-2.10.1.jar"
 }
 it "an authenticated mirror with a stored bearer credential installs the JAR" _mm_auth_bearer_credential_installs

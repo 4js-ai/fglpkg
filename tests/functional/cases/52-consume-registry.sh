@@ -23,7 +23,7 @@ _cd_gi_noop() {
   run install demo.pkg@1.0.0
   assert_success
   assert_dir ".fglpkg/packages/demo-pkg"
-  assert_file_contains "fglpkg.lock" "demo-pkg"
+  assert_file_contains "fglpkg-lock.json" "demo-pkg"
 }
 it "a default of gi is a no-op with only GI configured" _cd_gi_noop
 
@@ -80,7 +80,7 @@ _cd_excludes_gi() {
   export FGLPKG_CONSUME_REGISTRY=myrepo
   run install demo.pkg@1.0.0
   assert_failure
-  assert_no_file "fglpkg.lock"
+  assert_no_file "fglpkg-lock.json"
   # gi was excluded: the mock never saw a request for the package.
   assert_not_contains "demo-pkg" "$(cat "$MOCK_LOG")"
   assert_not_contains "demo.pkg" "$(cat "$MOCK_LOG")"
@@ -141,7 +141,7 @@ _cd_writes_no_pin() {
   run install demo.pkg@1.0.0
   assert_success
   assert_not_contains '"registry"' "$(cat fglpkg.json)"
-  assert_file_contains "fglpkg.lock" "demo-pkg"
+  assert_file_contains "fglpkg-lock.json" "demo-pkg"
 }
 it "installing under the default writes no per-dependency pin" _cd_writes_no_pin
 
@@ -235,8 +235,8 @@ EOF
   assert_secondary_dialed
   # ...and gi won it. The lock collapses a "gi" source to absent (GIS-249 C2), so
   # a secondary having served the package would show up here.
-  assert_file_contains "fglpkg.lock" "demo-pkg"
-  assert_not_contains '"source"' "$(cat fglpkg.lock)"
+  assert_file_contains "fglpkg-lock.json" "demo-pkg"
+  assert_not_contains '"source"' "$(cat fglpkg-lock.json)"
 }
 it "the publish defaultRegistry does not scope consumption" _cd_publish_default_does_not_leak
 

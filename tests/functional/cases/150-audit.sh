@@ -55,7 +55,7 @@ _audit_json() {
 it "audit --json emits valid JSON" _audit_json
 
 _audit_no_lock() {
-  run audit                             # no fglpkg.lock present
+  run audit                             # no fglpkg-lock.json present
   assert_exit 2                         # 2 = tool/setup failure (distinct from 1 = findings)
 }
 it "audit without a lockfile exits 2" _audit_no_lock

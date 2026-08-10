@@ -651,7 +651,7 @@ back to anonymous.
 5. Public Maven Central, anonymously (when none of the above is set — behavior
    is unchanged from having no mirror configured).
 
-The resolved mirror URL is recorded in `fglpkg.lock`, so a change to
+The resolved mirror URL is recorded in `fglpkg-lock.json`, so a change to
 `FGLPKG_MAVEN_URL` or the `mavenMirror` block takes effect on the next
 re-resolution (`fglpkg update`, or an `install` that changes the dependency set)
 — a locked `install` reuses the URL already pinned in the lockfile.

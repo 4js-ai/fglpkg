@@ -873,7 +873,7 @@ func isProjectDir() bool {
 	return false
 }
 
-// resetLocalInstall deletes fglpkg.lock and the local package and JAR
+// resetLocalInstall deletes fglpkg-lock.json and the local package and JAR
 // directories so the next install re-downloads everything from the
 // registry. Safe to call when nothing exists yet (missing files are
 // simply ignored).
@@ -887,7 +887,7 @@ func resetLocalInstall(projectDir string, inst *installer.Installer) error {
 			return fmt.Errorf("cannot remove %s: %w", dir, err)
 		}
 	}
-	fmt.Println("Cleared fglpkg.lock and .fglpkg/ — reloading from registry...")
+	fmt.Println("Cleared fglpkg-lock.json and .fglpkg/ — reloading from registry...")
 	return nil
 }
 

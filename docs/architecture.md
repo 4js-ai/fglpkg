@@ -19,7 +19,7 @@ dependencies — **BDL packages** (`.42m`/`.42f`/`.sch`, distributed as zips) an
 
 Guiding principles, reflected throughout the code:
 
-- **Reproducibility** — a committed `fglpkg.lock` pins every resolved version,
+- **Reproducibility** — a committed `fglpkg-lock.json` pins every resolved version,
   download URL, and SHA256, so an install is repeatable.
 - **Supply-chain safety** — every download is SHA256-verified in a single
   streaming pass; lifecycle **hooks are declarative** (`copy-files`/`mkdir`
@@ -42,7 +42,7 @@ flowchart TD
     cli --> manifest["manifest<br/>fglpkg.json"]
     cli --> resolver["resolver<br/>dependency graph"]
     cli --> installer["installer<br/>download/verify/extract"]
-    cli --> lockfile["lockfile<br/>fglpkg.lock"]
+    cli --> lockfile["lockfile<br/>fglpkg-lock.json"]
     cli --> regclient["registry<br/>HTTP client"]
     cli --> creds["credentials<br/>+ oauth"]
     cli --> workspace["workspace<br/>monorepo"]
@@ -79,7 +79,7 @@ flowchart TD
 | resolver | [internal/resolver/resolver.go](../internal/resolver/resolver.go) | BFS transitive resolution; filter candidates by Genero constraint + semver; scope promotion; workspace-local short-circuit; emits a `Plan`. |
 | installer | [internal/installer/installer.go](../internal/installer/installer.go) | Install from lock (fast path) or from a fresh `Plan`; download, verify, extract; manage `~/.fglpkg/` vs `.fglpkg/`. |
 | installer/parallel | [internal/installer/parallel.go](../internal/installer/parallel.go) | Bounded worker pool (`FGLPKG_INSTALL_CONCURRENCY`, default 4); serialized progress output. |
-| lockfile | [internal/lockfile/lockfile.go](../internal/lockfile/lockfile.go) | Read/write/validate `fglpkg.lock`; freshness checks; `FilterForProduction`. |
+| lockfile | [internal/lockfile/lockfile.go](../internal/lockfile/lockfile.go) | Read/write/validate `fglpkg-lock.json`; freshness checks; `FilterForProduction`. |
 | checksum | [internal/checksum/checksum.go](../internal/checksum/checksum.go) | Streaming SHA256 (`DigestingReader`) — hash while downloading. |
 | credentials | [internal/credentials/credentials.go](../internal/credentials/credentials.go) | `~/.fglpkg/credentials.json` (0600); `ActiveBearer` (OAuth→PAT→env); `ForceRefresh`. |
 | oauth | [internal/oauth/](../internal/oauth/) | Auth-code + PKCE login (`flow.go`), token model (`tokens.go`), PKCE (`pkce.go`), loopback server (`server.go`). |
@@ -143,7 +143,7 @@ sequenceDiagram
             R->>R: filter by genero constraint + semver; pick variant; promote scope
         end
         R-->>I: Plan (packages, JARs)
-        I->>L: write fglpkg.lock
+        I->>L: write fglpkg-lock.json
         I->>I: install from Plan (parallel)
         par bounded worker pool
             I->>Reg: GET artifact zip
@@ -259,7 +259,7 @@ variant is reinstalled deterministically.
 
 <project>/
 ├── fglpkg.json            # manifest
-├── fglpkg.lock            # lockfile (commit to VCS)
+├── fglpkg-lock.json            # lockfile (commit to VCS)
 ├── .fglpkg/               # local install (gitignore)
 │   ├── packages/  └─ jars/
 ├── README.md  USERGUIDE.md  # bundled + sent as publish metadata
@@ -267,7 +267,7 @@ variant is reinstalled deterministically.
 
 <monorepo>/
 ├── fglpkg.workspace.json  # member list
-├── fglpkg.lock            # single shared lock
+├── fglpkg-lock.json            # single shared lock
 └── <member>/fglpkg.json   # local members resolved from disk
 ```
 

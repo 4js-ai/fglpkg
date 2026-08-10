@@ -15,7 +15,7 @@ import (
 	"github.com/4js-mikefolcher/fglpkg/internal/lockfile"
 )
 
-// writeLockfileForAudit writes a minimal fglpkg.lock at dir containing
+// writeLockfileForAudit writes a minimal fglpkg-lock.json at dir containing
 // the provided JAR entries.
 func writeLockfileForAudit(t *testing.T, dir string, jars []lockfile.LockedJAR) {
 	t.Helper()
@@ -133,8 +133,8 @@ func TestCmdAuditMissingLockfile(t *testing.T) {
 	if got := exitCode(err); got != 2 {
 		t.Fatalf("exit code = %d, want 2 (missing lockfile)", got)
 	}
-	if !strings.Contains(err.Error(), "fglpkg.lock") {
-		t.Errorf("err = %v, want one mentioning fglpkg.lock", err)
+	if !strings.Contains(err.Error(), "fglpkg-lock.json") {
+		t.Errorf("err = %v, want one mentioning fglpkg-lock.json", err)
 	}
 }
 

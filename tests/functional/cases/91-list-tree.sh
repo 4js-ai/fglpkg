@@ -21,7 +21,7 @@ _fixture_lock() {
     "java": [ { "groupId":"com.google.code.gson", "artifactId":"gson", "version":"2.10.1" } ]
   } }
 EOF
-  cat > fglpkg.lock <<'EOF'
+  cat > fglpkg-lock.json <<'EOF'
 {
   "lockfileVersion": 1,
   "generatedAt": "2026-01-01T00:00:00Z",
@@ -72,7 +72,7 @@ _list_marks_webcomponents() {
 { "name":"wcapp", "version":"1.0.0", "genero":">=3.20",
   "dependencies": { "fgl": { "poiapi": "^1.4.0", "chart-widget": "^2.0.0" } } }
 EOF
-  cat > fglpkg.lock <<'EOF'
+  cat > fglpkg-lock.json <<'EOF'
 {
   "lockfileVersion": 1,
   "generatedAt": "2026-01-01T00:00:00Z",
@@ -160,12 +160,12 @@ EOF
 
   # Without a lock there is no parentage to draw, so list falls back to flat and
   # says why rather than silently dropping the tree.
-  rm fglpkg.lock
+  rm fglpkg-lock.json
   run list
   assert_success
   assert_contains "Installed JARs:"
   assert_contains "gson-2.10.1.jar"
-  assert_contains "no fglpkg.lock"
+  assert_contains "no fglpkg-lock.json"
   assert_not_contains "└─"
 }
 it "list reports a really-installed JAR, and falls back to flat with no lock" _list_after_real_install
@@ -178,7 +178,7 @@ _list_global_empty() {
   run list --global
   assert_success
   assert_contains "No packages installed."
-  assert_not_contains "no fglpkg.lock"
+  assert_not_contains "no fglpkg-lock.json"
 }
 it "list --global reports an empty global store without a lock complaint" _list_global_empty
 

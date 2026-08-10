@@ -53,7 +53,7 @@ const (
 	glyphBlank    = "   "
 	repeatMarker  = " (*)"
 	repeatLegend  = "(*) subtree already shown above"
-	noLockNote    = "(no fglpkg.lock — run 'fglpkg install' to see the dependency tree)"
+	noLockNote    = "(no fglpkg-lock.json — run 'fglpkg install' to see the dependency tree)"
 	emptyInstall  = "No packages installed."
 	flatHeader    = "Installed packages:"
 	flatJarHeader = "Installed JARs:"

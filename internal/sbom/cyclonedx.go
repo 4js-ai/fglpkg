@@ -1,5 +1,5 @@
 // Package sbom builds Software Bill of Materials documents from a
-// project's fglpkg.lock. v1 emits CycloneDX 1.5 JSON only.
+// project's fglpkg-lock.json. v1 emits CycloneDX 1.5 JSON only.
 //
 // The package performs no network I/O. All data flows from the
 // lockfile through the Build() function into a Document value that
