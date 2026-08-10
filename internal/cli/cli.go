@@ -2005,7 +2005,7 @@ func joinWithAnd(items []string) string {
 type publishFlags struct {
 	dryRun     bool
 	ci         bool
-	force      bool   // Artifactory: overwrite an existing variant
+	force      bool   // overwrite an existing variant: Artifactory, or a pending/rejected GI variant via ?force=1 (GIS-274)
 	allowEmpty bool   // publish even when the archive stages no assets (GIS-276)
 	registry   string // target repository ("" or "gi" = GI)
 	visibility string // "private"/"public" (GI only)
@@ -2145,8 +2145,24 @@ func cmdPublish(args []string) error {
 		return runHook(m, manifest.HookPostPublish, projectDir)
 	}
 
-	if err := checkVariantNotPublished(m, generoMajor); err != nil {
-		return err
+	// --force RELAXES the local pre-check, it does not skip it. The lookup is
+	// still the only way to know whether a variant is actually there (so the
+	// notice is truthful, not fired on a first publish) and still the guard
+	// against publishing blind when the registry cannot be consulted. Only the
+	// "already exists" verdict is downgraded from fatal to a warning under
+	// --force; an inconclusive check (network/server error) still aborts. The
+	// server has the final say at upload: an approved version stays immutable
+	// (?force=1 still 409s → "bump the version"), a pending/rejected one is
+	// overwritten in place. Safe unattended in --ci — it can never clobber
+	// published, approved bytes.
+	switch err := checkVariantNotPublished(m, generoMajor); {
+	case err == nil:
+		// Nothing to overwrite — no notice.
+	case pf.force && errors.Is(err, ErrVariantPublished):
+		fmt.Printf("  --force: %s@%s (Genero %s) already exists — it will be OVERWRITTEN if it is still pending/rejected; an approved version stays immutable.\n",
+			m.Name, m.Version, generoMajor)
+	default:
+		return err // already published without --force, or an inconclusive check
 	}
 	registryURL := defaultPublishRegistry()
 
@@ -2181,7 +2197,7 @@ func cmdPublish(args []string) error {
 	if err := runHook(m, manifest.HookPrePublish, projectDir); err != nil {
 		return err
 	}
-	if err := publishPackage(m, registryURL, generoMajor, dryRun, visibilityOverride, changelogText, built); err != nil {
+	if err := publishPackage(m, registryURL, generoMajor, dryRun, visibilityOverride, changelogText, pf.force, built); err != nil {
 		return fmt.Errorf("publish failed: %w", err)
 	}
 	if dryRun {
@@ -2273,7 +2289,7 @@ func publishToArtifactory(home string, m *manifest.Manifest, generoMajor string,
 //     streams the zip body. Server computes size + sha256 and stores in R2.
 //  5. POST /registry/packages/:slug/versions/:version/submit — marks the
 //     version pending so an admin reviews and approves.
-func publishPackage(m *manifest.Manifest, registryURL, generoMajor string, dryRun bool, visibilityOverride, changelogText string, built *builtPackage) error {
+func publishPackage(m *manifest.Manifest, registryURL, generoMajor string, dryRun bool, visibilityOverride, changelogText string, force bool, built *builtPackage) error {
 	// 1. Reuse the package staged during enforceLint rather than rebuilding.
 	zipData, checksum := built.zip, built.checksum
 	fmt.Printf("  Package zip: %d bytes (SHA256: %s)\n", len(zipData), checksum)
@@ -2393,7 +2409,7 @@ func publishPackage(m *manifest.Manifest, registryURL, generoMajor string, dryRu
 	// 4. Upload zip.
 	fmt.Printf("  → PUT    /registry/packages/%s/versions/%s/artifacts/%s\n",
 		slug, m.Version, variant)
-	if err := registry.PublishUploadArtifact(slug, m.Version, variant, filename, bytes.NewReader(zipData)); err != nil {
+	if err := registry.PublishUploadArtifact(slug, m.Version, variant, filename, force, bytes.NewReader(zipData)); err != nil {
 		return err
 	}
 

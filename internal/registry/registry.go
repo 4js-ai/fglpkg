@@ -565,14 +565,19 @@ func PublishCreateVersion(slug, version, changelog string, tags map[string][]str
 
 // PublishUploadArtifact streams the zip body for (slug, version, variant)
 // to the registry. The server computes size_bytes + sha256 and stores the
-// blob in R2. Allowed only while the version is pending or rejected; on an
-// approved version the server returns 409. filename is what the registry
-// records for download Content-Disposition.
-func PublishUploadArtifact(slug, version, variant, filename string, zip io.Reader) error {
+// blob in R2. A first upload of a variant always works; an existing variant
+// is immutable once submitted UNLESS force is set, which sends ?force=1 and
+// lets the server overwrite a pending/rejected variant in place (an approved
+// version stays immutable and still returns 409 — GIS-274 / GIS-434). filename
+// is what the registry records for download Content-Disposition.
+func PublishUploadArtifact(slug, version, variant, filename string, force bool, zip io.Reader) error {
 	u := fmt.Sprintf("%s/registry/packages/%s/versions/%s/artifacts/%s?filename=%s",
 		registryBase(),
 		url.PathEscape(slug), url.PathEscape(version), url.PathEscape(variant),
 		url.QueryEscape(filename))
+	if force {
+		u += "&force=1"
+	}
 	bearer := Bearer()
 	status, respBody, err := putBytes(u, "application/zip", bearer, zip)
 	if err != nil {
@@ -580,6 +585,46 @@ func PublishUploadArtifact(slug, version, variant, filename string, zip io.Reade
 	}
 	if status >= 200 && status < 300 {
 		return nil
+	}
+	// A 409 is the immutability guard, disambiguated by a machine-readable
+	// `code` (GIS-434). Branch on the code — server-driven, NOT on the local
+	// --force flag — so we always suggest the remedy the server actually
+	// intends:
+	//   - variant_immutable: the version is approved/published; --force cannot
+	//     help (the server returns this even with ?force=1), so the only path
+	//     is a new version.
+	//   - variant_exists: the variant is uploaded but not yet approved; --force
+	//     overwrites it in place. (Reached only without --force — with force the
+	//     server overwrites and returns 2xx.)
+	// An unrecognised or absent code fails closed with the server's own message
+	// rather than guessing a remedy that may not apply (cf. GIS-435).
+	if status == http.StatusConflict {
+		var e struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(respBody, &e)
+		op := fmt.Sprintf("upload artifact %s@%s/%s", slug, version, variant)
+		switch strings.ToLower(strings.TrimSpace(e.Code)) {
+		case "variant_immutable":
+			return fmt.Errorf("%s: this version is already published and is immutable — bump the version instead", op)
+		case "variant_exists":
+			return fmt.Errorf("%s: this variant is already uploaded — re-run with --force to overwrite it, or bump the version", op)
+		default:
+			// Unrecognised (or absent) code: prefer the server's own message;
+			// otherwise synthesize one that names the code and hints at a client
+			// upgrade — matching the GIS-435 sibling handler rather than dumping
+			// the raw JSON body (or a bare "HTTP 409:") into the error.
+			switch {
+			case e.Error != "":
+				return fmt.Errorf("%s: %s", op, e.Error)
+			case strings.TrimSpace(e.Code) != "":
+				return fmt.Errorf("%s: the registry reported an unrecognised conflict code %q (upgrade fglpkg if this is unexpected)",
+					op, strings.TrimSpace(e.Code))
+			default:
+				return fmt.Errorf("%s: the registry rejected the upload (HTTP 409) with no detail", op)
+			}
+		}
 	}
 	return fmt.Errorf("upload artifact %s@%s/%s: HTTP %d: %s",
 		slug, version, variant, status, string(respBody))
