@@ -909,3 +909,37 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// TestLegacyPresent: the helper that lets a "no lock" message tell the user
+// their lock is there under the pre-GIS-289 name. It must agree with Migrate
+// about whether there is something to migrate.
+func TestLegacyPresent(t *testing.T) {
+	t.Run("legacy only", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, lockfile.LegacyFilename), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if !lockfile.LegacyPresent(dir) {
+			t.Error("LegacyPresent = false, want true")
+		}
+		// Agreement with Migrate: it has something to do.
+		migrated, err := lockfile.Migrate(dir)
+		if err != nil || !migrated {
+			t.Errorf("Migrate = (%v, %v), want (true, nil) — helper and Migrate disagree", migrated, err)
+		}
+	})
+	t.Run("no legacy", func(t *testing.T) {
+		if lockfile.LegacyPresent(t.TempDir()) {
+			t.Error("LegacyPresent = true on an empty dir, want false")
+		}
+	})
+	t.Run("new name only", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, lockfile.Filename), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if lockfile.LegacyPresent(dir) {
+			t.Error("LegacyPresent = true with only the new name present, want false")
+		}
+	})
+}

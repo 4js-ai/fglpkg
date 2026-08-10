@@ -785,6 +785,17 @@ func cmdInstall(args []string) error {
 // runtime mismatch is a warning elsewhere, not lock staleness.
 func checkFrozen(m *manifest.Manifest, projectDir string) error {
 	if !lockfile.Exists(projectDir) {
+		// A pre-GIS-289 project has a lock, just under the old name — and
+		// --frozen runs before the install-time migration, so it is the first
+		// thing a CI build hits after an fglpkg upgrade. Saying "create one"
+		// there would describe generating a lock from scratch, which is the
+		// opposite of what happens: the rename preserves the resolved contents.
+		if lockfile.LegacyPresent(projectDir) {
+			return fmt.Errorf("--frozen requires a committed %s, but this project still has the legacy %s.\n"+
+				"  Run 'fglpkg install' once without --frozen to rename it in place\n"+
+				"  (resolved contents preserved — no re-resolution), then commit the rename.",
+				lockfile.Filename, lockfile.LegacyFilename)
+		}
 		return fmt.Errorf("--frozen requires a committed %s, but none was found.\n"+
 			"  Run 'fglpkg install' without --frozen to create one, then commit it.",
 			lockfile.Filename)

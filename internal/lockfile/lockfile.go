@@ -463,6 +463,17 @@ func Exists(dir string) bool {
 	return err == nil
 }
 
+// LegacyPresent reports whether dir still carries a pre-GIS-289 LegacyFilename
+// (fglpkg.lock). It exists so a command that finds no Filename can say the lock
+// is there under the old name — and that migrating it preserves the resolved
+// contents — instead of implying it must be regenerated from scratch. The test
+// deliberately matches Migrate's, so the two never disagree about whether there
+// is something to migrate.
+func LegacyPresent(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, LegacyFilename))
+	return err == nil
+}
+
 // Remove deletes dir/fglpkg-lock.json. A missing file is not an error, so callers
 // may remove unconditionally without racing Exists.
 func Remove(dir string) error {
