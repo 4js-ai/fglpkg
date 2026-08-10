@@ -539,10 +539,12 @@ func TestPublishUpdateMetadataNon2xxIsError(t *testing.T) {
 	}
 }
 
-// TestPublishCreatePackageHandles409 pins GIS-435: a 201 or a same-owner 409
-// (or an older server's code-less 409) must proceed so republishing an
-// already-owned slug still works, while a cross-owner 409 must fail loudly and
-// name the canonical slug instead of being swallowed as success.
+// TestPublishCreatePackageHandles409 pins GIS-435: the 409 branch is an
+// allow-list. A 201, a same-owner 409, an older server's code-less 409, or an
+// unparseable body must proceed so republishing an already-owned slug keeps
+// working; every recognised-or-not conflict code (cross-owner, org, reserved,
+// re-cased, or simply unknown) must fail closed and name the canonical slug,
+// rather than being swallowed as success.
 func TestPublishCreatePackageHandles409(t *testing.T) {
 	const slug = "fgl-ai-sdk"
 	cases := []struct {
@@ -552,6 +554,7 @@ func TestPublishCreatePackageHandles409(t *testing.T) {
 		wantErr   bool
 		wantInErr string
 	}{
+		// ── proceed-paths ──
 		{
 			name:   "201 created -> proceed",
 			status: http.StatusCreated, body: `{}`,
@@ -564,22 +567,53 @@ func TestPublishCreatePackageHandles409(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "409 owned by other -> fail loudly with server message",
+			name:    "409 owned by you, re-cased -> proceed (allow-list is case-insensitive)",
 			status:  http.StatusConflict,
-			body:    `{"code":"slug_owned_by_other","error":"The package slug \"fgl-ai-sdk\" is already registered to another account."}`,
-			wantErr: true, wantInErr: "another account",
-		},
-		{
-			name:    "409 owned by other, empty message -> synthesized error names the slug",
-			status:  http.StatusConflict,
-			body:    `{"code":"slug_owned_by_other"}`,
-			wantErr: true, wantInErr: "already registered to another account",
+			body:    `{"code":"SLUG_OWNED_BY_YOU"}`,
+			wantErr: false,
 		},
 		{
 			name:    "409 no code (older server) -> proceed (back-compat)",
 			status:  http.StatusConflict,
 			body:    `{"error":"slug already taken"}`,
 			wantErr: false,
+		},
+		{
+			name:    "409 unparseable body -> proceed (documented residual: empty code)",
+			status:  http.StatusConflict,
+			body:    `<html>502 Bad Gateway</html>`,
+			wantErr: false,
+		},
+		// ── fail-closed paths ──
+		{
+			name:    "409 owned by other -> abort with server message",
+			status:  http.StatusConflict,
+			body:    `{"code":"slug_owned_by_other","error":"The package slug \"fgl-ai-sdk\" is already registered to another account."}`,
+			wantErr: true, wantInErr: "another account",
+		},
+		{
+			name:    "409 owned by other, no message -> abort, synthesized error names the code",
+			status:  http.StatusConflict,
+			body:    `{"code":"slug_owned_by_other"}`,
+			wantErr: true, wantInErr: "slug_owned_by_other",
+		},
+		{
+			name:    "409 owned by other, re-cased/padded -> abort (normalized, still not benign)",
+			status:  http.StatusConflict,
+			body:    `{"code":"  SLUG_OWNED_BY_OTHER  "}`,
+			wantErr: true,
+		},
+		{
+			name:    "409 unknown code (org) with message -> abort (fail closed on unrecognised)",
+			status:  http.StatusConflict,
+			body:    `{"code":"slug_owned_by_org","error":"This slug belongs to your organization; contact an org admin."}`,
+			wantErr: true, wantInErr: "organization",
+		},
+		{
+			name:    "409 unknown code, no message -> abort, synthesized error names the code",
+			status:  http.StatusConflict,
+			body:    `{"code":"canonical_slug_conflict"}`,
+			wantErr: true, wantInErr: "canonical_slug_conflict",
 		},
 	}
 	for _, tc := range cases {
