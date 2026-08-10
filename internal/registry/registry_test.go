@@ -645,17 +645,19 @@ func TestPublishCreatePackageHandles409(t *testing.T) {
 	}
 }
 
-// TestPublishUploadArtifactForceSignal covers GIS-274: --force must append
-// ?force=1 to the PUT, and a 409 must produce an actionable message that differs
-// by whether force was used (re-run with --force vs bump the version).
+// TestPublishUploadArtifactForceSignal covers GIS-274: --force appends ?force=1
+// to the PUT, and the 409 remedy is driven by the server's machine-readable
+// `code` (GIS-434) — not by the local --force flag — so we never suggest a
+// remedy the server says will not work.
 func TestPublishUploadArtifactForceSignal(t *testing.T) {
 	var gotQuery string
 	var status int // 0 → 200 OK; otherwise the status to return
+	var body string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.RawQuery
 		if status != 0 {
 			w.WriteHeader(status)
-			_, _ = w.Write([]byte(`{"error":"variant already published","code":"variant_immutable"}`))
+			_, _ = w.Write([]byte(body))
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"artifact": map[string]any{"variant": "genero6"}})
@@ -666,30 +668,54 @@ func TestPublishUploadArtifactForceSignal(t *testing.T) {
 	t.Cleanup(func() { registry.Bearer = prev })
 	registry.Bearer = func() string { return "t" }
 
-	// force=true → ?force=1 present alongside the existing ?filename=.
-	if err := registry.PublishUploadArtifact("demo", "1.0.0", "genero6", "demo.zip", true, strings.NewReader("zip")); err != nil {
+	up := func(force bool) error {
+		return registry.PublishUploadArtifact("demo", "1.0.0", "genero6", "demo.zip", force, strings.NewReader("zip"))
+	}
+
+	// 2xx: force=true → ?force=1 present alongside the existing ?filename=.
+	if err := up(true); err != nil {
 		t.Fatalf("upload (force): %v", err)
 	}
 	if !strings.Contains(gotQuery, "force=1") {
 		t.Errorf("force=true: query = %q, want it to contain force=1", gotQuery)
 	}
-
 	// force=false → no force param.
-	if err := registry.PublishUploadArtifact("demo", "1.0.0", "genero6", "demo.zip", false, strings.NewReader("zip")); err != nil {
+	if err := up(false); err != nil {
 		t.Fatalf("upload (no force): %v", err)
 	}
 	if strings.Contains(gotQuery, "force=1") {
 		t.Errorf("force=false: query = %q, should not contain force=1", gotQuery)
 	}
 
-	// 409 without --force → message points at --force.
 	status = http.StatusConflict
-	if err := registry.PublishUploadArtifact("demo", "1.0.0", "genero6", "demo.zip", false, strings.NewReader("zip")); err == nil || !strings.Contains(err.Error(), "--force") {
-		t.Errorf("409 no-force error = %v, want it to mention --force", err)
+
+	// variant_exists (uploaded, not yet approved) → point at --force. Driven by
+	// the code, not the flag: this is the no-force case.
+	body = `{"code":"variant_exists","error":"variant already uploaded"}`
+	if err := up(false); err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Errorf("variant_exists error = %v, want it to mention --force", err)
 	}
 
-	// 409 with --force → the version is approved/immutable; point at bumping.
-	if err := registry.PublishUploadArtifact("demo", "1.0.0", "genero6", "demo.zip", true, strings.NewReader("zip")); err == nil || !strings.Contains(err.Error(), "bump the version") {
-		t.Errorf("409 force error = %v, want it to mention bump the version", err)
+	// variant_immutable (approved/published) → point at bumping and NOT at
+	// --force, even though this 409 is reachable *with* --force set (force can't
+	// help an approved version).
+	body = `{"code":"variant_immutable","error":"already published; immutable"}`
+	err := up(true)
+	if err == nil || !strings.Contains(err.Error(), "bump the version") {
+		t.Errorf("variant_immutable error = %v, want it to mention bump the version", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "--force") {
+		t.Errorf("variant_immutable error must NOT suggest --force (it cannot help): %v", err)
+	}
+
+	// Unrecognised code → fail closed, surfacing the server's own message,
+	// without guessing a remedy (cf. GIS-435).
+	body = `{"code":"variant_locked","error":"variant locked by an administrator"}`
+	err = up(false)
+	if err == nil || !strings.Contains(err.Error(), "variant locked by an administrator") {
+		t.Errorf("unknown-code error = %v, want it to surface the server message", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "--force") {
+		t.Errorf("unknown-code error must not guess --force: %v", err)
 	}
 }

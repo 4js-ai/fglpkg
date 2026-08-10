@@ -586,18 +586,36 @@ func PublishUploadArtifact(slug, version, variant, filename string, force bool, 
 	if status >= 200 && status < 300 {
 		return nil
 	}
-	// A 409 is the immutability guard. Without --force it means "already
-	// uploaded — force or bump"; with --force it means the version is approved
-	// (published, immutable) and force cannot help — the only path is a new
-	// version. The server body already carries an actionable message; surface it.
+	// A 409 is the immutability guard, disambiguated by a machine-readable
+	// `code` (GIS-434). Branch on the code — server-driven, NOT on the local
+	// --force flag — so we always suggest the remedy the server actually
+	// intends:
+	//   - variant_immutable: the version is approved/published; --force cannot
+	//     help (the server returns this even with ?force=1), so the only path
+	//     is a new version.
+	//   - variant_exists: the variant is uploaded but not yet approved; --force
+	//     overwrites it in place. (Reached only without --force — with force the
+	//     server overwrites and returns 2xx.)
+	// An unrecognised or absent code fails closed with the server's own message
+	// rather than guessing a remedy that may not apply (cf. GIS-435).
 	if status == http.StatusConflict {
-		detail := strings.TrimSpace(string(respBody))
-		if force {
-			return fmt.Errorf("upload artifact %s@%s/%s: this version is published and immutable — bump the version instead (%s)",
-				slug, version, variant, detail)
+		var e struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
 		}
-		return fmt.Errorf("upload artifact %s@%s/%s: this variant is already uploaded — re-run with --force to overwrite it, or bump the version (%s)",
-			slug, version, variant, detail)
+		_ = json.Unmarshal(respBody, &e)
+		op := fmt.Sprintf("upload artifact %s@%s/%s", slug, version, variant)
+		switch strings.ToLower(strings.TrimSpace(e.Code)) {
+		case "variant_immutable":
+			return fmt.Errorf("%s: this version is already published and is immutable — bump the version instead", op)
+		case "variant_exists":
+			return fmt.Errorf("%s: this variant is already uploaded — re-run with --force to overwrite it, or bump the version", op)
+		default:
+			if e.Error != "" {
+				return fmt.Errorf("%s: %s", op, e.Error)
+			}
+			return fmt.Errorf("%s: HTTP 409: %s", op, strings.TrimSpace(string(respBody)))
+		}
 	}
 	return fmt.Errorf("upload artifact %s@%s/%s: HTTP %d: %s",
 		slug, version, variant, status, string(respBody))
