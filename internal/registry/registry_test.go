@@ -538,3 +538,109 @@ func TestPublishUpdateMetadataNon2xxIsError(t *testing.T) {
 		t.Fatal("expected an error on HTTP 400, got nil")
 	}
 }
+
+// TestPublishCreatePackageHandles409 pins GIS-435: the 409 branch is an
+// allow-list. A 201, a same-owner 409, an older server's code-less 409, or an
+// unparseable body must proceed so republishing an already-owned slug keeps
+// working; every recognised-or-not conflict code (cross-owner, org, reserved,
+// re-cased, or simply unknown) must fail closed and name the canonical slug,
+// rather than being swallowed as success.
+func TestPublishCreatePackageHandles409(t *testing.T) {
+	const slug = "fgl-ai-sdk"
+	cases := []struct {
+		name      string
+		status    int
+		body      string
+		wantErr   bool
+		wantInErr string
+	}{
+		// ── proceed-paths ──
+		{
+			name:   "201 created -> proceed",
+			status: http.StatusCreated, body: `{}`,
+			wantErr: false,
+		},
+		{
+			name:    "409 owned by you -> proceed (benign republish)",
+			status:  http.StatusConflict,
+			body:    `{"code":"slug_owned_by_you","error":"You already own the package \"fgl-ai-sdk\"."}`,
+			wantErr: false,
+		},
+		{
+			name:    "409 owned by you, re-cased -> proceed (allow-list is case-insensitive)",
+			status:  http.StatusConflict,
+			body:    `{"code":"SLUG_OWNED_BY_YOU"}`,
+			wantErr: false,
+		},
+		{
+			name:    "409 no code (older server) -> proceed (back-compat)",
+			status:  http.StatusConflict,
+			body:    `{"error":"slug already taken"}`,
+			wantErr: false,
+		},
+		{
+			name:    "409 unparseable body -> proceed (documented residual: empty code)",
+			status:  http.StatusConflict,
+			body:    `<html>502 Bad Gateway</html>`,
+			wantErr: false,
+		},
+		// ── fail-closed paths ──
+		{
+			name:    "409 owned by other -> abort with server message",
+			status:  http.StatusConflict,
+			body:    `{"code":"slug_owned_by_other","error":"The package slug \"fgl-ai-sdk\" is already registered to another account."}`,
+			wantErr: true, wantInErr: "another account",
+		},
+		{
+			name:    "409 owned by other, no message -> abort, synthesized error names the code",
+			status:  http.StatusConflict,
+			body:    `{"code":"slug_owned_by_other"}`,
+			wantErr: true, wantInErr: "slug_owned_by_other",
+		},
+		{
+			name:    "409 owned by other, re-cased/padded -> abort (normalized, still not benign)",
+			status:  http.StatusConflict,
+			body:    `{"code":"  SLUG_OWNED_BY_OTHER  "}`,
+			wantErr: true,
+		},
+		{
+			name:    "409 unknown code (org) with message -> abort (fail closed on unrecognised)",
+			status:  http.StatusConflict,
+			body:    `{"code":"slug_owned_by_org","error":"This slug belongs to your organization; contact an org admin."}`,
+			wantErr: true, wantInErr: "organization",
+		},
+		{
+			name:    "409 unknown code, no message -> abort, synthesized error names the code",
+			status:  http.StatusConflict,
+			body:    `{"code":"canonical_slug_conflict"}`,
+			wantErr: true, wantInErr: "canonical_slug_conflict",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer ts.Close()
+			t.Setenv("FGLPKG_REGISTRY", ts.URL)
+
+			err := registry.PublishCreatePackage(slug, slug, "", "public")
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("expected success (proceed), got error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected a cross-owner collision error, got nil (409 was swallowed as success)")
+			}
+			if !strings.Contains(err.Error(), slug) {
+				t.Errorf("error must name the canonical slug %q, got: %v", slug, err)
+			}
+			if tc.wantInErr != "" && !strings.Contains(err.Error(), tc.wantInErr) {
+				t.Errorf("error should contain %q, got: %v", tc.wantInErr, err)
+			}
+		})
+	}
+}

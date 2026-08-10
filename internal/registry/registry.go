@@ -400,8 +400,28 @@ func Search(term string) ([]SearchResult, error) {
 // ─── Publisher API (new /registry/... protocol) ──────────────────────────────
 
 // PublishCreatePackage creates the slug on the registry if it doesn't exist.
-// Returns nil on both 201 (created) and 409 (already exists) — callers don't
-// need to differentiate, they only care that the slug is now claimable.
+//
+// A 201 means it was created. A 409 means the server is reporting a conflict on
+// the canonical slug, disambiguated by a machine-readable `code` (GIS-278/277).
+// The branch is an ALLOW-LIST, not a deny-list: only codes we positively
+// recognise as benign proceed; every other conflict fails closed. This is
+// deliberate — the server `code` vocabulary is still in flight (GIS-278 has not
+// shipped), so a deny-list keyed to one string would silently revert to the
+// pre-fix bug (publishing versions/artifacts against a slug we may not own,
+// GIS-435) the moment a code is renamed or added.
+//
+// Proceed-paths:
+//   - "slug_owned_by_you" — the benign republish case: the caller owns the slug.
+//   - empty code — a pre-guard server, whose 409 only ever meant "already
+//     yours"; kept for back-compat. NOTE this also lets an unparseable or empty
+//     409 body proceed (it too leaves the code empty) — a deliberate, documented
+//     residual so republish against an older registry keeps working; a mangled
+//     body from a live guard server is the one case this does not catch.
+//
+// Everything else — an unknown or renamed code (e.g. a different owner, an org,
+// a reserved slug), or a re-cased/whitespaced variant — aborts with the
+// server's message when present, else a synthesized one naming the slug and the
+// unrecognised code so the failure is self-diagnosing.
 func PublishCreatePackage(slug, name, description, visibility string) error {
 	if visibility == "" {
 		visibility = "public"
@@ -416,10 +436,26 @@ func PublishCreatePackage(slug, name, description, visibility string) error {
 	if err != nil {
 		return fmt.Errorf("create package %q: %w", slug, err)
 	}
-	if status == http.StatusCreated || status == http.StatusConflict {
+	switch status {
+	case http.StatusCreated:
 		return nil
+	case http.StatusConflict:
+		var e struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(respBody, &e) // absent/malformed body → zero value → empty code
+		switch strings.ToLower(strings.TrimSpace(e.Code)) {
+		case "", "slug_owned_by_you":
+			return nil
+		}
+		if e.Error != "" {
+			return fmt.Errorf("cannot publish %q: %s", slug, e.Error)
+		}
+		return fmt.Errorf("cannot publish %q: the registry reported an unrecognised conflict code %q; the slug may be registered to another account (upgrade fglpkg if this is unexpected)", slug, e.Code)
+	default:
+		return fmt.Errorf("create package %q: HTTP %d: %s", slug, status, string(respBody))
 	}
-	return fmt.Errorf("create package %q: HTTP %d: %s", slug, status, string(respBody))
 }
 
 // PublishUpdateMetadata pushes the package's current discovery metadata
