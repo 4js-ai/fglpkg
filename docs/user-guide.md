@@ -686,6 +686,8 @@ $ fglpkg install --frozen
 
 It checks the committed lock against the manifest only — nothing needs to be installed yet, which is exactly the fresh-checkout case. `--frozen` cannot be combined with a package argument or `--force` (both require re-resolving), and is not valid for `update`, whose whole purpose is to move the lock.
 
+On a checkout that still carries the pre-rename `fglpkg.lock` (and no `fglpkg-lock.json` yet), `--frozen` fails and points you at migration rather than migrating silently — it never rewrites the working tree. Run a plain `fglpkg install` (or `fglpkg update`) once to rename the lock to `fglpkg-lock.json` and commit it, then `--frozen` works in CI. See [Migrating from the old name](#lock-files).
+
 ### Listing Installed Dependencies
 
 `fglpkg list` prints the installed dependency tree. At every level, Genero packages and webcomponents come first, then the Java JARs they pull in:

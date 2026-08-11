@@ -183,6 +183,8 @@ myproject/
 └── ...
 ```
 
+`fglpkg-lock.json` is written next to `fglpkg.json` — **commit it** for reproducible installs, and add it to your formatter's ignore list (like `package-lock.json`, it is machine-generated). A lock from an older fglpkg — named `fglpkg.lock` — is renamed to `fglpkg-lock.json` automatically on the next `install`/`update`. See [Lock Files](docs/user-guide.md#lock-files) in the user guide.
+
 ## Local vs Global (Context-Aware)
 
 fglpkg automatically detects whether to use local or global package storage:
