@@ -1691,6 +1691,11 @@ publish your internal packages there while still pulling public packages from GI
 This is entirely client-side — nothing changes on the GI side. (Java JARs are not
 routed through Artifactory; they stay on Maven Central.)
 
+> **In a hurry?** The [Artifactory quickstart](artifactory-quickstart.md) is the
+> few-minute version of this section — declare → login → install → publish. The
+> [full Artifactory guide](artifactory.md) is the complete reference (auth schemes,
+> the collision guard, Maven routing, CI, and troubleshooting).
+
 ### 1. Declare the repository
 
 Repositories are listed in a `registries` array. It contains **no secrets** —
