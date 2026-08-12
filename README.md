@@ -619,6 +619,8 @@ their **internal** packages in their own Artifactory. Everything is client-side 
 no GI backend involvement. (Java JARs are out of scope here; they continue to
 resolve from Maven Central.)
 
+> **Guides.** New to this? Start with the [Artifactory quickstart](docs/artifactory-quickstart.md) — declare → login → install → publish in a few minutes. For the complete reference (authentication schemes, the dependency-confusion guard, Maven/JAR routing, CI, and troubleshooting) see the [full Artifactory guide](docs/artifactory.md). The section below is the narrative summary.
+
 ### Configuring repositories
 
 Repositories are declared in a `registries` array, with **no secrets** — those
