@@ -123,16 +123,26 @@ func TestAuditFlagParsing(t *testing.T) {
 			t.Errorf("severity = %q, want high", f.severity)
 		}
 	})
+	// Both error cases assert the MESSAGE, not just "an error happened": the
+	// pre-fix parser also errored on these inputs — with `unknown argument
+	// "--severity"`, which is the bug itself. A bare err != nil check would
+	// pass against the very behavior these tests exist to rule out.
 	t.Run("severity_space_form_invalid", func(t *testing.T) {
 		_, err := parseAuditFlags([]string{"--severity", "urgent"})
 		if err == nil {
 			t.Fatal("expected error for invalid severity, got nil")
+		}
+		if !strings.Contains(err.Error(), `invalid --severity "urgent"`) {
+			t.Errorf("err = %v, want one rejecting the VALUE (not the flag)", err)
 		}
 	})
 	t.Run("severity_space_form_missing_value", func(t *testing.T) {
 		_, err := parseAuditFlags([]string{"--severity"})
 		if err == nil {
 			t.Fatal("expected error when --severity has no value, got nil")
+		}
+		if !strings.Contains(err.Error(), "--severity requires a value") {
+			t.Errorf("err = %v, want one reporting the MISSING VALUE (not an unknown flag)", err)
 		}
 	})
 	// The consumed value must not swallow a following flag: --severity takes
