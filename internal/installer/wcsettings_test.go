@@ -128,6 +128,34 @@ func TestSyncWCSettingsOnlyMatchesTheDirectorysOwnName(t *testing.T) {
 	mustAbsentWC(t, wcDir, "wcsettings/SomethingElse.wcsettings")
 }
 
+// TestSyncWCSettingsNeedsARealComponent guards the rule that a descriptor is
+// only mirrored from a directory that is itself a loadable component. The
+// pure-WC installer extracts a package's docs globs into the shared namespace
+// too (the GIS-248 pollution), so without the entry-point check a stray
+// docs/docs.wcsettings would offer "docs" to Studio as a COMPONENTTYPE that
+// cannot be loaded.
+func TestSyncWCSettingsNeedsARealComponent(t *testing.T) {
+	wcDir := t.TempDir()
+	installed := []string{
+		"MyWidget/MyWidget.html",
+		"MyWidget/MyWidget.wcsettings",
+		"docs/docs.wcsettings", // ancillary tree, no docs/docs.html
+		"docs/guide.md",
+	}
+	for _, rel := range installed {
+		writeWC(t, wcDir, rel, "x")
+	}
+
+	written, err := syncWCSettings(wcDir, installed)
+	if err != nil {
+		t.Fatalf("syncWCSettings: %v", err)
+	}
+	if len(written) != 1 || written[0] != "wcsettings/MyWidget.wcsettings" {
+		t.Fatalf("written = %v, want only the real component's descriptor", written)
+	}
+	mustAbsentWC(t, wcDir, "wcsettings/docs.wcsettings")
+}
+
 // TestSyncWCSettingsIconNeedsItsDescriptor verifies an icon alone is never
 // mirrored. Component bundles routinely ship a <NAME>.png as a RUNTIME asset;
 // only a package that also ships <NAME>.wcsettings has opted into Form Designer

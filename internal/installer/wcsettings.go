@@ -125,9 +125,14 @@ func syncWCSettings(webcomponentsDir string, installed []string) ([]string, erro
 // icon) files to mirror, keyed by COMPONENTTYPE, and the full set of component
 // names the install touched.
 //
-// A descriptor counts only at <NAME>/<NAME>.wcsettings — the same
-// name-matches-directory rule Genero applies to the .html entry point, and the
-// rule that makes the flattened filename unambiguous.
+// A descriptor counts only at <NAME>/<NAME>.wcsettings IN A DIRECTORY THAT IS
+// ITSELF A REAL COMPONENT (one carrying <NAME>/<NAME>.html) — the same
+// name-matches-directory contract Genero applies to the entry point, and the
+// one internal/env's isComponentDir enforces for --gwa and FGLIMAGEPATH
+// (GIS-248). Requiring the entry point matters because the pure-WC installer
+// extracts a package's docs globs into the shared namespace too: without it, a
+// stray docs/docs.wcsettings would flatten into wcsettings/docs.wcsettings and
+// offer "docs" to Studio as a COMPONENTTYPE that cannot be loaded.
 func classifyWCSettings(installed []string) (descriptors map[string][]string, touched []string) {
 	descriptors = map[string][]string{}
 	seenName := map[string]bool{}
@@ -151,6 +156,9 @@ func classifyWCSettings(installed []string) (descriptors map[string][]string, to
 		}
 		if file != name+wcSettingsExt {
 			continue
+		}
+		if !present[name+"/"+name+".html"] {
+			continue // not a loadable component — see the doc comment
 		}
 		files := []string{rel}
 		for _, ext := range wcSettingsIconExts {
