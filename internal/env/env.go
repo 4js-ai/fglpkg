@@ -375,6 +375,39 @@ func isNonEmptyDir(dir string) bool {
 	return err == nil && len(entries) > 0
 }
 
+// isComponentDir reports whether dir is a Genero webcomponent bundle: a
+// directory holding the required <COMPONENTTYPE>.html entry point named after
+// the directory itself. Ancillary trees a package ships through its docs globs
+// (docs/, examples/, com/) can land under webcomponents/ too but fail this
+// test, so they are never mistaken for loadable components. This mirrors
+// Genero's own contract — the direct-mode loader, GAS, and gwabuildtool all
+// require <dir>/<dir>.html — and the check pack already enforces (GIS-248).
+//
+// The name is matched exactly; on a case-insensitive filesystem Stat matches
+// case-insensitively, which is how Genero itself resolves there.
+func isComponentDir(dir string) bool {
+	name := filepath.Base(dir)
+	info, err := os.Stat(filepath.Join(dir, name+".html"))
+	return err == nil && !info.IsDir()
+}
+
+// hasInstalledComponents reports whether wcDir holds at least one real
+// webcomponent (per isComponentDir), rather than only ancillary trees. It gates
+// the FGLIMAGEPATH export: a webcomponents/ dir containing nothing but docs/ or
+// examples/ pollution must not add the webcomponents parent to FGLIMAGEPATH.
+func hasInstalledComponents(wcDir string) bool {
+	entries, err := os.ReadDir(wcDir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() && isComponentDir(filepath.Join(wcDir, e.Name())) {
+			return true
+		}
+	}
+	return false
+}
+
 // ─── scopes ───────────────────────────────────────────────────────────────────
 
 // envScope is one .fglpkg tree to harvest. Scopes are listed in precedence
@@ -575,8 +608,10 @@ func (g *Generator) buildPlan(s *scanner, scopes []envScope, includeWorkspace bo
 		// because Genero's direct-mode loader searches
 		// "<fglimagepath-dir>/webcomponents/<COMPONENTTYPE>/<COMPONENTTYPE>.html".
 		// Emitting it before any packaged image dir keeps the historical
-		// ordering.
-		if isNonEmptyDir(sc.wcDir) {
+		// ordering. Gate on a REAL component, not just a non-empty dir: a
+		// webcomponents/ holding only ancillary trees (docs/, examples/) has
+		// nothing the loader can resolve, so it must not add the entry (GIS-248).
+		if hasInstalledComponents(sc.wcDir) {
 			parent := filepath.Dir(sc.wcDir)
 			p.wcParents = append(p.wcParents, parent)
 			p.addPath(varImage, parent)
@@ -896,6 +931,12 @@ func (g *Generator) GenerateGST() ([]string, error) {
 // splice into a `gwabuildtool` invocation. Each flag points at a COMPONENTTYPE
 // directory, which is the unit gwabuildtool consumes.
 //
+// Only genuine components are emitted: a directory carrying <name>/<name>.html
+// (see isComponentDir). Ancillary trees a package ships through its docs globs
+// (docs/, examples/, com/) can land under webcomponents/ alongside the real
+// component, but have no entry point — passing them to gwabuildtool makes it
+// fail looking for a missing root page, so they are filtered out (GIS-248).
+//
 // Looks in both .fglpkg/webcomponents/ (local project) and
 // ~/.fglpkg/webcomponents/ (global) — typical projects only install locally,
 // but the global fallback lets `fglpkg env --gwa` work outside a project too.
@@ -912,6 +953,9 @@ func (g *Generator) GenerateGWA() ([]string, error) {
 				continue
 			}
 			abs := filepath.Join(dir, e.Name())
+			if !isComponentDir(abs) {
+				continue // skip docs/, examples/, and other non-component trees
+			}
 			if !seen[e.Name()] {
 				lines = append(lines, "--webcomponent "+abs)
 				seen[e.Name()] = true
