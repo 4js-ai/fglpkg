@@ -26,14 +26,15 @@ type sbomFlags struct {
 //	fglpkg sbom -o sbom.json                    Write to file
 //	fglpkg sbom --pretty                        Indented JSON
 //	fglpkg sbom --production                    Skip dev-scoped JARs
-//	fglpkg sbom --format=cyclonedx              Default (only supported in v1)
+//	fglpkg sbom --format cyclonedx              Default (only supported in v1;
+//	                                            --format=cyclonedx also accepted)
 func cmdSbom(args []string) error {
 	flags, err := parseSbomFlags(args)
 	if err != nil {
 		return err
 	}
 	if flags.format != "" && flags.format != "cyclonedx" {
-		return fmt.Errorf("%s format not supported in v1 (use --format=cyclonedx)", flags.format)
+		return fmt.Errorf("%s format not supported in v1 (use --format cyclonedx)", flags.format)
 	}
 
 	projectDir, err := os.Getwd()
@@ -85,6 +86,12 @@ func parseSbomFlags(args []string) (sbomFlags, error) {
 			f.output = args[i]
 		case strings.HasPrefix(a, "--output="):
 			f.output = strings.TrimPrefix(a, "--output=")
+		case a == "--format":
+			if i+1 >= len(args) {
+				return f, fmt.Errorf("--format requires a value (cyclonedx)")
+			}
+			i++
+			f.format = args[i]
 		case strings.HasPrefix(a, "--format="):
 			f.format = strings.TrimPrefix(a, "--format=")
 		default:

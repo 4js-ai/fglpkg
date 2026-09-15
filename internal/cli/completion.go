@@ -48,10 +48,15 @@ var completionFlags = []string{
 	"--production",
 	"--no-manifest-fallback",
 	"--no-verify-signature",
-	"--severity=",
+	// Both spellings, as for --shell: parseAuditFlags accepts "--severity high"
+	// and "--severity=high", and the space form is the one the help documents
+	// (GIS-540).
+	"--severity", "--severity=",
 	"--offline",
 	"--pretty",
-	"--format=",
+	// Both spellings, as for --severity: parseSbomFlags accepts "--format
+	// cyclonedx" and "--format=cyclonedx" (GIS-540).
+	"--format", "--format=",
 	"--help", "-h",
 	"--version", "-v",
 	"--yes", "-y",

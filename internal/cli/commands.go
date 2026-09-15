@@ -278,12 +278,13 @@ Java dependencies are not checked (they use exact version pins).
 	{
 		Name:       "audit",
 		Summary:    "Check installed Java JARs for known vulnerabilities",
-		ListDetail: "\n(--json, --severity=<level>, --production; or `audit signatures`)",
+		ListDetail: "\n(--json, --severity <level>, --production; or `audit signatures`)",
 		Usage:      "fglpkg audit [flags]   |   fglpkg audit signatures",
 		Long: `FLAGS:
   --json                          Emit a JSON report on stdout
-  --severity=<low|medium|high|critical>
-                                  Minimum severity that fails the build (default: medium)
+  --severity <low|medium|high|critical>
+                                  Minimum severity that fails the build (default: medium).
+                                  Accepts either form: --severity high or --severity=high
   --production, --prod            Skip dev-scoped JARs
   --offline                       Reserved for a future cached-advisory mode (errors today)
 
@@ -312,8 +313,10 @@ NOTES:
   -o, --output <path>             Write to file instead of stdout
   --pretty                        Indented JSON (default: compact)
   --production, --prod            Skip dev-scoped JARs
-  --format=<cyclonedx|spdx>       Output format. Default: cyclonedx
-                                  (spdx is reserved for a future release)
+  --format <cyclonedx|spdx>       Output format. Default: cyclonedx
+                                  (spdx is reserved for a future release).
+                                  Accepts either form: --format cyclonedx or
+                                  --format=cyclonedx
 
 NOTES:
   v1 emits CycloneDX 1.5 JSON, generated from fglpkg-lock.json. No network calls.

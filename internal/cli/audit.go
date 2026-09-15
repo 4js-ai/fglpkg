@@ -63,7 +63,7 @@ func auditNotes(webcomponentCount int) []string {
 //
 //	fglpkg audit                                Default: severity floor = medium
 //	fglpkg audit --json                         Machine-readable JSON output
-//	fglpkg audit --severity=<low|medium|high|critical>
+//	fglpkg audit --severity <low|medium|high|critical>   (or --severity=<level>)
 //	fglpkg audit --production                   Skip dev-scoped JARs
 //
 // Exit codes:
@@ -144,7 +144,19 @@ func cmdAudit(args []string) error {
 // permissive run.
 func parseAuditFlags(args []string) (auditFlags, error) {
 	f := auditFlags{severity: audit.SeverityMedium}
-	for _, a := range args {
+	setSeverity := func(v string) error {
+		if !audit.ValidSeverity(v) {
+			return fmt.Errorf("invalid --severity %q (want: low, medium, high, critical)", v)
+		}
+		f.severity = v
+		return nil
+	}
+	// Index-based so --severity can take a VALUE in the following argument,
+	// matching --shell (parseEnvFlags) and --depth (parseListFlags): every other
+	// value-flag accepts BOTH `--flag value` and `--flag=value`, and --severity
+	// used to accept only the `=` form (GIS-540).
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		switch {
 		case a == "--json":
 			f.jsonOut = true
@@ -152,12 +164,18 @@ func parseAuditFlags(args []string) (auditFlags, error) {
 			f.production = true
 		case a == "--offline":
 			f.offline = true
-		case strings.HasPrefix(a, "--severity="):
-			sev := strings.TrimPrefix(a, "--severity=")
-			if !audit.ValidSeverity(sev) {
-				return f, fmt.Errorf("invalid --severity %q (want: low, medium, high, critical)", sev)
+		case a == "--severity":
+			if i+1 >= len(args) {
+				return f, fmt.Errorf("--severity requires a value (low, medium, high, critical)")
 			}
-			f.severity = sev
+			i++
+			if err := setSeverity(args[i]); err != nil {
+				return f, err
+			}
+		case strings.HasPrefix(a, "--severity="):
+			if err := setSeverity(strings.TrimPrefix(a, "--severity=")); err != nil {
+				return f, err
+			}
 		default:
 			return f, fmt.Errorf("unknown argument %q", a)
 		}

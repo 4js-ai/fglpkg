@@ -2036,7 +2036,7 @@ Set `signing.enforce` in `~/.fglpkg/config.json` (or the `FGLPKG_SIGNING` enviro
 ```bash
 fglpkg audit
 fglpkg audit --json
-fglpkg audit --severity=high
+fglpkg audit --severity high
 fglpkg audit --production
 ```
 
@@ -2045,7 +2045,7 @@ Flags:
 | Flag | Effect |
 |---|---|
 | `--json` | Emit a schema-versioned JSON report on stdout (each finding carries a `cvssScore` where one could be computed) instead of the human-readable table |
-| `--severity=<low\|medium\|high\|critical>` | Severity floor that fails the build. Default `medium`. **Equals form only** — `--severity high` is not accepted |
+| `--severity <low\|medium\|high\|critical>` | Severity floor that fails the build. Default `medium`. Accepts either form — `--severity high` and `--severity=high` both work |
 | `--production` (alias `--prod`) | Skip JARs recorded under the `dev` scope; optional-scoped JARs are still audited |
 | `--offline` | Reserved for a future cached-advisory mode; it currently errors |
 
@@ -2094,7 +2094,7 @@ Flags:
 | `-o`, `--output <path>` | Write the document to a file instead of stdout |
 | `--pretty` | Indent the JSON (the default is compact) |
 | `--production` (alias `--prod`) | Skip JARs recorded under the `dev` scope |
-| `--format=<cyclonedx\|spdx>` | Output format. Default (and only supported) `cyclonedx`; `spdx` is reserved for a future release and errors today |
+| `--format <cyclonedx\|spdx>` | Output format. Default (and only supported) `cyclonedx`; `spdx` is reserved for a future release and errors today. Accepts either form — `--format cyclonedx` and `--format=cyclonedx` both work |
 
 The v1 output is CycloneDX 1.5 JSON. The document's serial number is derived from its content, so it is stable across runs for the same lockfile. Set `SOURCE_DATE_EPOCH` (the reproducible-builds convention) to a Unix timestamp to pin the document's timestamp for a byte-reproducible SBOM; otherwise the timestamp reflects the current time.
 
