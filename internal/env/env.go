@@ -408,6 +408,40 @@ func hasInstalledComponents(wcDir string) bool {
 	return false
 }
 
+// The Genero Studio descriptor layout, mirrored from Genero's own
+// $FGLDIR/webcomponents/. Declared here rather than imported from
+// internal/installer because env must not depend on the installer (env is
+// read-only and runs in shells where nothing is installable); the two are one
+// contract, and internal/installer's syncWCSettings is the writer.
+const (
+	wcSettingsDirName = "wcsettings"
+	wcSettingsExt     = ".wcsettings"
+)
+
+// hasWCSettings reports whether wcDir holds a wcsettings/ directory carrying at
+// least one <COMPONENTTYPE>.wcsettings descriptor — the Genero Studio Form
+// Designer metadata the installer mirrors there (see internal/installer's
+// syncWCSettings). It gates the GSTWCDIR export: Studio reads that directory
+// for descriptors and icons only, so pointing it at an empty or absent one
+// buys nothing (GIS-536).
+//
+// Deliberately NOT gated on hasInstalledComponents: the two are independent
+// questions, and a descriptor with no matching component would still be a
+// (harmless) thing Studio can list, while a component with no descriptor must
+// not add an entry.
+func hasWCSettings(wcDir string) bool {
+	entries, err := os.ReadDir(filepath.Join(wcDir, wcSettingsDirName))
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), wcSettingsExt) {
+			return true
+		}
+	}
+	return false
+}
+
 // ─── scopes ───────────────────────────────────────────────────────────────────
 
 // envScope is one .fglpkg tree to harvest. Scopes are listed in precedence
@@ -474,6 +508,13 @@ type envPlan struct {
 	assets    map[envVar][]string // varResource / varDB / varImage -> ordered dirs
 	profiles  []string            // ordered full FILE paths
 	wcParents []string            // parents of webcomponents/ dirs — GAS hint only
+
+	// wcSettingsDirs holds the webcomponents/wcsettings/ dirs that actually
+	// carry a Genero Studio descriptor, in scope order — the GSTWCDIR value
+	// for --gst. Separate from wcParents because the two answer different
+	// questions: wcParents is "where are the components" (FGLIMAGEPATH, the
+	// GAS hint), wcSettingsDirs is "where are their Studio descriptors".
+	wcSettingsDirs []string
 
 	seen     map[envVar]map[string]bool
 	owners   map[envVar]map[string]owner
@@ -615,6 +656,15 @@ func (g *Generator) buildPlan(s *scanner, scopes []envScope, includeWorkspace bo
 			parent := filepath.Dir(sc.wcDir)
 			p.wcParents = append(p.wcParents, parent)
 			p.addPath(varImage, parent)
+		}
+
+		// GSTWCDIR (--gst only) names the dir holding the .wcsettings
+		// descriptors, NOT the dir holding the components — Studio's own
+		// default is $(FGLDIR)/webcomponents/wcsettings, and every DVM from
+		// 3.20 to 7.00 ships that shape. Harvested here so renderGST does no
+		// filesystem work of its own (GIS-536).
+		if hasWCSettings(sc.wcDir) {
+			p.wcSettingsDirs = append(p.wcSettingsDirs, filepath.Join(sc.wcDir, wcSettingsDirName))
 		}
 
 		entries, err := os.ReadDir(sc.packagesDir)
@@ -773,6 +823,36 @@ func renderGST(p *envPlan, localRoot string) []string {
 	for _, v := range assetVarOrder {
 		emit(v, p.assets[v])
 	}
+
+	// GSTWCDIR points Genero Studio's Form Designer at the directory holding the
+	// installed components' .wcsettings descriptors (and their optional icons) —
+	// NOT at the directory holding the components themselves. The two are
+	// different things: the descriptor is design-time metadata that populates the
+	// componentType combobox, while the bundle is what a front-end loads at
+	// runtime (that one is FGLIMAGEPATH / WEB_COMPONENT_DIRECTORY). Studio's own
+	// default is $(FGLDIR)/webcomponents/wcsettings, and every DVM from 3.20 to
+	// 7.00 ships that shape, so fglpkg mirrors it at
+	// .fglpkg/webcomponents/wcsettings (GIS-536).
+	//
+	// The variable is a "dirlist" in Studio's environment-set schema, so the
+	// ";$(GSTWCDIR)" append is correct and leaves the built-in descriptors
+	// ($FGLDIR's fglgallery, fglrichtext, fglsvgcanvas) resolvable.
+	//
+	// wcSettingsDirs is already gated on a descriptor actually being present, and
+	// GST is local-only, so there is at most the project's own entry here.
+	var wcParts []string
+	seenWC := make(map[string]bool)
+	for _, dir := range p.wcSettingsDirs {
+		tpl, ok := gstPath(localRoot, dir)
+		if ok && !seenWC[tpl] {
+			seenWC[tpl] = true
+			wcParts = append(wcParts, tpl)
+		}
+	}
+	if len(wcParts) > 0 {
+		lines = append(lines, fmt.Sprintf("GSTWCDIR=%s;$(GSTWCDIR)", strings.Join(wcParts, ";")))
+	}
+
 	emit(varProfile, p.profiles)
 
 	p.checkValueLengths(";")

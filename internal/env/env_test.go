@@ -81,6 +81,43 @@ func TestGenerateGWASkipsNonComponentDirs(t *testing.T) {
 	}
 }
 
+// TestGenerateGWASkipsWCSettingsDir guards the GIS-248 invariant against the
+// GSTWCDIR work (GIS-536): install now mirrors a wcsettings/ directory next to
+// the components (holding Form Designer descriptors, not a component). It has no
+// <name>/<name>.html entry point, so isComponentDir filters it and --gwa must
+// never emit it — otherwise gwabuildtool fails on it exactly as it would on a
+// docs/ or examples/ tree.
+func TestGenerateGWASkipsWCSettingsDir(t *testing.T) {
+	projectDir := t.TempDir()
+	wc := filepath.Join(projectDir, ".fglpkg", "webcomponents")
+	mustMkdir(t, filepath.Join(wc, "MyWidget"))
+	mustWriteFile(t, filepath.Join(wc, "MyWidget", "MyWidget.html"), "<html></html>")
+	// The descriptor dir the installer mirrors (syncWCSettings): a real directory
+	// under webcomponents/, but not a loadable component.
+	mustMkdir(t, filepath.Join(wc, "wcsettings"))
+	mustWriteFile(t, filepath.Join(wc, "wcsettings", "MyWidget.wcsettings"), "<WebComponent/>")
+
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	g := New(t.TempDir())
+	flags, err := g.GenerateGWA()
+	if err != nil {
+		t.Fatalf("GenerateGWA: %v", err)
+	}
+	if len(flags) != 1 {
+		t.Fatalf("expected exactly 1 --webcomponent flag (MyWidget only), got %d: %v", len(flags), flags)
+	}
+	// Base-name check (robust to a temp path that contains "wcsettings"): the one
+	// flag must be the component, never the descriptor dir.
+	if got := filepath.Base(strings.TrimPrefix(flags[0], "--webcomponent ")); got != "MyWidget" {
+		t.Errorf("expected the only flag to point at MyWidget, got base %q (%q); wcsettings/ must be filtered", got, flags[0])
+	}
+}
+
 // TestGenerateLocalIncludesFGLIMAGEPATH verifies that the local-scope env
 // output prepends the project's .fglpkg/ directory onto FGLIMAGEPATH when
 // at least one webcomponent is installed.
@@ -206,6 +243,128 @@ func TestGenerateGSTSkipsFGLIMAGEPATHWhenEmpty(t *testing.T) {
 	for _, line := range exports {
 		if strings.Contains(line, "FGLIMAGEPATH") {
 			t.Errorf("unexpected FGLIMAGEPATH line: %q", line)
+		}
+	}
+}
+
+// TestGenerateGSTIncludesGSTWCDIR verifies that --gst emits GSTWCDIR pointing at
+// the wcsettings/ directory — where the installer mirrors each component's
+// Genero Studio descriptor — and NOT at the webcomponents dir itself. Studio's
+// Form Designer reads .wcsettings files from there, exactly as its own default
+// $(FGLDIR)/webcomponents/wcsettings does (GIS-536).
+func TestGenerateGSTIncludesGSTWCDIR(t *testing.T) {
+	projectDir := t.TempDir()
+	wc := filepath.Join(projectDir, ".fglpkg", "webcomponents")
+	mustMkdir(t, filepath.Join(wc, "MyWidget"))
+	mustWriteFile(t, filepath.Join(wc, "MyWidget", "MyWidget.html"), "<html></html>")
+	mustMkdir(t, filepath.Join(wc, "wcsettings"))
+	mustWriteFile(t, filepath.Join(wc, "wcsettings", "MyWidget.wcsettings"), "<WebComponent/>")
+
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	g := New(t.TempDir())
+	exports, err := g.GenerateGST()
+	if err != nil {
+		t.Fatalf("GenerateGST: %v", err)
+	}
+	joined := strings.Join(exports, "\n")
+	if !strings.Contains(joined, "GSTWCDIR=$(ProjectDir)/.fglpkg/webcomponents/wcsettings;$(GSTWCDIR)") {
+		t.Errorf("expected GSTWCDIR GST line in:\n%s", joined)
+	}
+}
+
+// TestGenerateGSTSkipsGSTWCDIRWithoutDescriptors is the gate that matters most:
+// a real, loadable component is installed, but it shipped no .wcsettings. Studio
+// has nothing to list, so no GSTWCDIR entry may be emitted — and in particular
+// the webcomponents dir itself must never be offered as the value, which is what
+// an FGLIMAGEPATH-shaped gate would have produced (GIS-536).
+func TestGenerateGSTSkipsGSTWCDIRWithoutDescriptors(t *testing.T) {
+	projectDir := t.TempDir()
+	wc := filepath.Join(projectDir, ".fglpkg", "webcomponents")
+	mustMkdir(t, filepath.Join(wc, "MyWidget"))
+	mustWriteFile(t, filepath.Join(wc, "MyWidget", "MyWidget.html"), "<html></html>")
+
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	g := New(t.TempDir())
+	exports, err := g.GenerateGST()
+	if err != nil {
+		t.Fatalf("GenerateGST: %v", err)
+	}
+	joined := strings.Join(exports, "\n")
+	for _, line := range exports {
+		if strings.Contains(line, "GSTWCDIR") {
+			t.Errorf("unexpected GSTWCDIR line when no descriptor is installed: %q", line)
+		}
+	}
+	// The component is still real, so FGLIMAGEPATH must be unaffected: the two
+	// gates answer different questions and must not have been collapsed.
+	if !strings.Contains(joined, "FGLIMAGEPATH=$(ProjectDir)/.fglpkg") {
+		t.Errorf("FGLIMAGEPATH should still be emitted for a real component:\n%s", joined)
+	}
+}
+
+// TestGenerateGSTGSTWCDIRIgnoresStrayFiles verifies the gate requires an actual
+// .wcsettings file: a wcsettings/ dir holding only an icon (or anything else)
+// does not earn a GSTWCDIR entry.
+func TestGenerateGSTGSTWCDIRIgnoresStrayFiles(t *testing.T) {
+	projectDir := t.TempDir()
+	wc := filepath.Join(projectDir, ".fglpkg", "webcomponents")
+	mustMkdir(t, filepath.Join(wc, "MyWidget"))
+	mustWriteFile(t, filepath.Join(wc, "MyWidget", "MyWidget.html"), "<html></html>")
+	mustMkdir(t, filepath.Join(wc, "wcsettings"))
+	mustWriteFile(t, filepath.Join(wc, "wcsettings", "MyWidget.png"), "PNG")
+
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	g := New(t.TempDir())
+	exports, err := g.GenerateGST()
+	if err != nil {
+		t.Fatalf("GenerateGST: %v", err)
+	}
+	for _, line := range exports {
+		if strings.Contains(line, "GSTWCDIR") {
+			t.Errorf("an icon alone must not earn a GSTWCDIR entry: %q", line)
+		}
+	}
+}
+
+// TestGenerateGSTSkipsGSTWCDIRWhenOnlyNonComponents verifies GSTWCDIR is not
+// emitted when webcomponents/ holds only ancillary trees (no <name>/<name>.html):
+// there is no real component for Studio to discover. Gated like FGLIMAGEPATH
+// (GIS-536 / GIS-248).
+func TestGenerateGSTSkipsGSTWCDIRWhenOnlyNonComponents(t *testing.T) {
+	projectDir := t.TempDir()
+	wc := filepath.Join(projectDir, ".fglpkg", "webcomponents")
+	mustMkdir(t, filepath.Join(wc, "docs"))
+	mustWriteFile(t, filepath.Join(wc, "docs", "README.md"), "# docs")
+
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	g := New(t.TempDir())
+	exports, err := g.GenerateGST()
+	if err != nil {
+		t.Fatalf("GenerateGST: %v", err)
+	}
+	for _, line := range exports {
+		if strings.Contains(line, "GSTWCDIR") {
+			t.Errorf("unexpected GSTWCDIR line when only non-component trees installed: %q", line)
 		}
 	}
 }

@@ -925,6 +925,14 @@ func (i *Installer) installBDL(info *registry.PackageInfo) error {
 	if err != nil {
 		return err
 	}
+	// Mirror any Genero Studio descriptor into webcomponents/wcsettings/ so
+	// `env --gst` can point GSTWCDIR at it (GIS-536). The copies are appended
+	// to the ownership record below, so `remove` prunes them with the package.
+	wcSettings, err := syncWCSettings(i.webcomponentsDir, wcInstalled)
+	if err != nil {
+		return err
+	}
+	wcInstalled = append(wcInstalled, wcSettings...)
 	// Track any webcomponent bundle this mixed package routed into the shared
 	// webcomponents dir so `remove` can prune it too (GIS-372).
 	if err := recordWCOwnership(i.webcomponentsDir, info.Name, wcInstalled); err != nil {
@@ -984,6 +992,13 @@ func (i *Installer) installWebcomponent(info *registry.PackageInfo) error {
 	if err != nil {
 		return err
 	}
+	// Mirror any Genero Studio descriptor into webcomponents/wcsettings/ so
+	// `env --gst` can point GSTWCDIR at it (GIS-536).
+	wcSettings, err := syncWCSettings(i.webcomponentsDir, installed)
+	if err != nil {
+		return err
+	}
+	installed = append(installed, wcSettings...)
 	// Record which files this package installed so `remove` can prune them
 	// without deleting files a still-installed package shares (GIS-372).
 	return recordWCOwnership(i.webcomponentsDir, info.Name, installed)
