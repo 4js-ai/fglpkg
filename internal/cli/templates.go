@@ -76,6 +76,7 @@ var templates = []projectTemplate{
 			{path: "webcomponents/MyWidget/MyWidget.html", content: webcomponentHTML},
 			{path: "webcomponents/MyWidget/MyWidget.css", content: webcomponentCSS},
 			{path: "webcomponents/MyWidget/MyWidget.js", content: webcomponentJS},
+			{path: "webcomponents/MyWidget/MyWidget.wcsettings", content: webcomponentWCSettings},
 		},
 	},
 }
@@ -202,7 +203,14 @@ const webcomponentReadme = "# {{NAME}}\n\n" +
 	"    MyWidget.html      # required entry point\n" +
 	"    MyWidget.css\n" +
 	"    MyWidget.js\n" +
+	"    MyWidget.wcsettings  # optional: Genero Studio Form Designer descriptor\n" +
+	"    MyWidget.png         # optional: its Form Designer icon\n" +
 	"```\n\n" +
+	"The `.wcsettings` descriptor is what puts your component in Form Designer's\n" +
+	"`componentType` list. Author it here, named after the directory; `fglpkg install`\n" +
+	"mirrors it into `.fglpkg/webcomponents/wcsettings/` (the layout Genero itself\n" +
+	"uses in `$FGLDIR/webcomponents/`), and `fglpkg env --gst` emits a `GSTWCDIR`\n" +
+	"pointing there.\n\n" +
 	"Rename `MyWidget` to your COMPONENTTYPE and update the `webcomponents` array\n" +
 	"in `fglpkg.json` to match. You may ship multiple components in one package by\n" +
 	"adding more directories and listing each name in `webcomponents`.\n\n" +
@@ -235,6 +243,30 @@ const webcomponentCSS = `#root {
     font-family: system-ui, sans-serif;
     padding: 1rem;
 }
+`
+
+// webcomponentWCSettings is the Genero Studio Form Designer descriptor. It is
+// authored INSIDE the component directory — that tree is what `fglpkg pack`
+// stages, so shipping it needs no manifest field — and `fglpkg install`
+// mirrors it into .fglpkg/webcomponents/wcsettings/, the flat directory
+// `fglpkg env --gst` points GSTWCDIR at (matching $FGLDIR/webcomponents/
+// wcsettings). The COMPONENTTYPE comes from the FILENAME, so this file must
+// stay named after its directory.
+//
+// Each DynamicProperty becomes an editable property on the WEBCOMPONENT form
+// item in Form Designer, and maps to one entry of the field's PROPERTIES
+// attribute. Drop an optional MyWidget.png beside this file for a custom icon.
+const webcomponentWCSettings = `<?xml version="1.0" encoding="utf-8"?>
+<!-- {{NAME}} webcomponent — Genero Studio Form Designer descriptor -->
+<WebComponent>
+    <DynamicProperty
+        name="selection"
+        label="selection"
+        type="TEXT"
+        description="The action to fire when the user selects something"
+        initialValue=""
+    />
+</WebComponent>
 `
 
 const webcomponentJS = `// {{NAME}} — Genero webcomponent

@@ -259,11 +259,13 @@ FGLRESOURCEPATH=$(ProjectDir)/.fglpkg/packages/poiapi/com/fourjs/poiapi;$(FGLRES
 
 Genero Studio translates `$(ProjectDir)` to the actual project path and `;` to the platform-specific separator automatically.
 
-For a project with a web-component dependency, `--gst` also emits `GSTWCDIR`, the variable Genero Studio uses to discover custom web components. It points at the installed webcomponents directory (only when a real component is installed):
+For a project whose web components ship a Genero Studio descriptor, `--gst` also emits `GSTWCDIR`, the variable Studio's Form Designer reads to populate the `componentType` list:
 
 ```
-GSTWCDIR=$(ProjectDir)/.fglpkg/webcomponents;$(GSTWCDIR)
+GSTWCDIR=$(ProjectDir)/.fglpkg/webcomponents/wcsettings;$(GSTWCDIR)
 ```
+
+`GSTWCDIR` names the directory holding the components' `.wcsettings` descriptors and their optional icons — **not** the directory holding the components themselves. That is the same split Genero uses in `$FGLDIR/webcomponents/`, where `fglgallery/` holds the component and `wcsettings/fglgallery.wcsettings` describes it. A package authors its descriptor inside the component directory (`webcomponents/MyWidget/MyWidget.wcsettings`), and `fglpkg install` mirrors it into `.fglpkg/webcomponents/wcsettings/`; the line is emitted only when at least one descriptor is installed. `GSTWCDIR` is a directory list, so the appended `$(GSTWCDIR)` keeps Genero's built-in descriptors resolvable.
 
 There is no automatic apply for `--gst` (unlike the shell modes' `eval`): paste the lines into the project's environment variable settings — a Genero Studio Environment Set — by hand.
 
