@@ -773,6 +773,28 @@ func renderGST(p *envPlan, localRoot string) []string {
 	for _, v := range assetVarOrder {
 		emit(v, p.assets[v])
 	}
+
+	// GSTWCDIR points Genero Studio at the webcomponents directory (the parent of
+	// the <COMPONENTTYPE>/ subdirs), mirroring the GAS WEB_COMPONENT_DIRECTORY
+	// value the shell modes hint at — Studio discovers custom web components
+	// through this variable. wcParents is populated only when a real component is
+	// installed (the same hasInstalledComponents gate as FGLIMAGEPATH), so a
+	// project with no webcomponents emits no GSTWCDIR line. GST is local-only, so
+	// there is at most the project's own .fglpkg/webcomponents. (GIS-536 — the
+	// exact value contract is pending verification against a real GST project.)
+	var wcParts []string
+	seenWC := make(map[string]bool)
+	for _, parent := range p.wcParents {
+		tpl, ok := gstPath(localRoot, filepath.Join(parent, "webcomponents"))
+		if ok && !seenWC[tpl] {
+			seenWC[tpl] = true
+			wcParts = append(wcParts, tpl)
+		}
+	}
+	if len(wcParts) > 0 {
+		lines = append(lines, fmt.Sprintf("GSTWCDIR=%s;$(GSTWCDIR)", strings.Join(wcParts, ";")))
+	}
+
 	emit(varProfile, p.profiles)
 
 	p.checkValueLengths(";")

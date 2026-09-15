@@ -210,6 +210,59 @@ func TestGenerateGSTSkipsFGLIMAGEPATHWhenEmpty(t *testing.T) {
 	}
 }
 
+// TestGenerateGSTIncludesGSTWCDIR verifies that --gst emits GSTWCDIR pointing at
+// the project's webcomponents directory (the parent of the COMPONENTTYPE subdirs)
+// when a real component is installed, so Genero Studio can discover it (GIS-536).
+func TestGenerateGSTIncludesGSTWCDIR(t *testing.T) {
+	projectDir := t.TempDir()
+	mustMkdir(t, filepath.Join(projectDir, ".fglpkg", "webcomponents", "MyWidget"))
+	mustWriteFile(t, filepath.Join(projectDir, ".fglpkg", "webcomponents", "MyWidget", "MyWidget.html"), "<html></html>")
+
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	g := New(t.TempDir())
+	exports, err := g.GenerateGST()
+	if err != nil {
+		t.Fatalf("GenerateGST: %v", err)
+	}
+	joined := strings.Join(exports, "\n")
+	if !strings.Contains(joined, "GSTWCDIR=$(ProjectDir)/.fglpkg/webcomponents;$(GSTWCDIR)") {
+		t.Errorf("expected GSTWCDIR GST line in:\n%s", joined)
+	}
+}
+
+// TestGenerateGSTSkipsGSTWCDIRWhenOnlyNonComponents verifies GSTWCDIR is not
+// emitted when webcomponents/ holds only ancillary trees (no <name>/<name>.html):
+// there is no real component for Studio to discover. Gated like FGLIMAGEPATH
+// (GIS-536 / GIS-248).
+func TestGenerateGSTSkipsGSTWCDIRWhenOnlyNonComponents(t *testing.T) {
+	projectDir := t.TempDir()
+	wc := filepath.Join(projectDir, ".fglpkg", "webcomponents")
+	mustMkdir(t, filepath.Join(wc, "docs"))
+	mustWriteFile(t, filepath.Join(wc, "docs", "README.md"), "# docs")
+
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	g := New(t.TempDir())
+	exports, err := g.GenerateGST()
+	if err != nil {
+		t.Fatalf("GenerateGST: %v", err)
+	}
+	for _, line := range exports {
+		if strings.Contains(line, "GSTWCDIR") {
+			t.Errorf("unexpected GSTWCDIR line when only non-component trees installed: %q", line)
+		}
+	}
+}
+
 // TestGenerateGlobalIsGlobalOnly verifies that --global output (GenerateGlobal)
 // emits only the global home's packages and never merges in the current
 // project's local .fglpkg/ packages (GIS-290).

@@ -259,6 +259,14 @@ FGLRESOURCEPATH=$(ProjectDir)/.fglpkg/packages/poiapi/com/fourjs/poiapi;$(FGLRES
 
 Genero Studio translates `$(ProjectDir)` to the actual project path and `;` to the platform-specific separator automatically.
 
+For a project with a web-component dependency, `--gst` also emits `GSTWCDIR`, the variable Genero Studio uses to discover custom web components. It points at the installed webcomponents directory (only when a real component is installed):
+
+```
+GSTWCDIR=$(ProjectDir)/.fglpkg/webcomponents;$(GSTWCDIR)
+```
+
+There is no automatic apply for `--gst` (unlike the shell modes' `eval`): paste the lines into the project's environment variable settings — a Genero Studio Environment Set — by hand.
+
 ### Environment Output Modes
 
 `fglpkg env` varies its output depending on context and flags:
