@@ -13,8 +13,12 @@ import (
 // per COMPONENTTYPE directory under .fglpkg/webcomponents/.
 func TestGenerateGWAEmitsFlags(t *testing.T) {
 	projectDir := t.TempDir()
+	// A component is a dir carrying <name>/<name>.html — the entry point makes
+	// it a loadable webcomponent (isComponentDir / GIS-248), not a bare dir.
 	mustMkdir(t, filepath.Join(projectDir, ".fglpkg", "webcomponents", "3DChart"))
+	mustWriteFile(t, filepath.Join(projectDir, ".fglpkg", "webcomponents", "3DChart", "3DChart.html"), "<html></html>")
 	mustMkdir(t, filepath.Join(projectDir, ".fglpkg", "webcomponents", "Heatmap"))
+	mustWriteFile(t, filepath.Join(projectDir, ".fglpkg", "webcomponents", "Heatmap", "Heatmap.html"), "<html></html>")
 
 	origDir, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(origDir) })
@@ -41,12 +45,49 @@ func TestGenerateGWAEmitsFlags(t *testing.T) {
 	}
 }
 
+// TestGenerateGWASkipsNonComponentDirs verifies --gwa emits a flag only for
+// directories carrying <name>/<name>.html. Ancillary trees a package ships via
+// its docs globs (docs/, examples/) also land under webcomponents/, but have no
+// entry point and would make gwabuildtool fail — they must be filtered out
+// (GIS-248).
+func TestGenerateGWASkipsNonComponentDirs(t *testing.T) {
+	projectDir := t.TempDir()
+	wc := filepath.Join(projectDir, ".fglpkg", "webcomponents")
+	mustMkdir(t, filepath.Join(wc, "3DChart"))
+	mustWriteFile(t, filepath.Join(wc, "3DChart", "3DChart.html"), "<html></html>")
+	mustMkdir(t, filepath.Join(wc, "docs"))
+	mustWriteFile(t, filepath.Join(wc, "docs", "README.md"), "# docs")
+	mustMkdir(t, filepath.Join(wc, "examples"))
+	mustWriteFile(t, filepath.Join(wc, "examples", "demo.4gl"), "MAIN END MAIN")
+
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	g := New(t.TempDir())
+	flags, err := g.GenerateGWA()
+	if err != nil {
+		t.Fatalf("GenerateGWA: %v", err)
+	}
+	if len(flags) != 1 {
+		t.Fatalf("expected exactly 1 --webcomponent flag (3DChart only), got %d: %v", len(flags), flags)
+	}
+	// Base-name check rather than a substring scan: it is robust to a temp path
+	// that happens to contain "docs"/"examples".
+	if got := filepath.Base(strings.TrimPrefix(flags[0], "--webcomponent ")); got != "3DChart" {
+		t.Errorf("expected the only flag to point at 3DChart, got base %q (%q)", got, flags[0])
+	}
+}
+
 // TestGenerateLocalIncludesFGLIMAGEPATH verifies that the local-scope env
 // output prepends the project's .fglpkg/ directory onto FGLIMAGEPATH when
 // at least one webcomponent is installed.
 func TestGenerateLocalIncludesFGLIMAGEPATH(t *testing.T) {
 	projectDir := t.TempDir()
 	mustMkdir(t, filepath.Join(projectDir, ".fglpkg", "webcomponents", "MyWidget"))
+	mustWriteFile(t, filepath.Join(projectDir, ".fglpkg", "webcomponents", "MyWidget", "MyWidget.html"), "<html></html>")
 
 	origDir, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(origDir) })
@@ -95,12 +136,41 @@ func TestGenerateLocalSkipsFGLIMAGEPATHWhenEmpty(t *testing.T) {
 	}
 }
 
+// TestGenerateLocalSkipsFGLIMAGEPATHWhenOnlyNonComponents verifies that a
+// webcomponents/ dir holding only ancillary trees (no <name>/<name>.html) does
+// not trigger an FGLIMAGEPATH export — the loader would have nothing to resolve
+// there (GIS-248).
+func TestGenerateLocalSkipsFGLIMAGEPATHWhenOnlyNonComponents(t *testing.T) {
+	projectDir := t.TempDir()
+	wc := filepath.Join(projectDir, ".fglpkg", "webcomponents")
+	mustMkdir(t, filepath.Join(wc, "docs"))
+	mustWriteFile(t, filepath.Join(wc, "docs", "README.md"), "# docs")
+
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	g := New(t.TempDir())
+	exports, err := g.GenerateLocal()
+	if err != nil {
+		t.Fatalf("GenerateLocal: %v", err)
+	}
+	for _, line := range exports {
+		if strings.Contains(line, "FGLIMAGEPATH") {
+			t.Errorf("unexpected FGLIMAGEPATH line when only non-component trees installed: %q", line)
+		}
+	}
+}
+
 // TestGenerateGSTIncludesFGLIMAGEPATH verifies the Genero Studio env output
 // emits FGLIMAGEPATH (pointing at $(ProjectDir)/.fglpkg) when a webcomponent
 // is installed locally (GIS-293).
 func TestGenerateGSTIncludesFGLIMAGEPATH(t *testing.T) {
 	projectDir := t.TempDir()
 	mustMkdir(t, filepath.Join(projectDir, ".fglpkg", "webcomponents", "MyWidget"))
+	mustWriteFile(t, filepath.Join(projectDir, ".fglpkg", "webcomponents", "MyWidget", "MyWidget.html"), "<html></html>")
 
 	origDir, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(origDir) })

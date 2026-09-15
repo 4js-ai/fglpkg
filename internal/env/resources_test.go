@@ -257,6 +257,9 @@ func TestFGLIMAGEPATHCoversImageExtensions(t *testing.T) {
 func TestFGLIMAGEPATHWebcomponentParentFirstThenImages(t *testing.T) {
 	chdirTemp(t)
 	mustMkdir(t, filepath.FromSlash(".fglpkg/webcomponents/MyWidget"))
+	// The entry point is what makes MyWidget a real component (isComponentDir /
+	// GIS-248); without it the webcomponents parent no longer lands on FGLIMAGEPATH.
+	envTestWrite(t, ".fglpkg/webcomponents/MyWidget/MyWidget.html", "<html></html>")
 	envTestWrite(t, ".fglpkg/packages/icons/fglpkg.json",
 		`{ "name": "icons", "version": "1.0.0", "dependencies": { "fgl": {} } }`)
 	envTestWrite(t, ".fglpkg/packages/icons/img/logo.png", "PNG")
