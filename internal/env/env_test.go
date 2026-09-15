@@ -81,6 +81,43 @@ func TestGenerateGWASkipsNonComponentDirs(t *testing.T) {
 	}
 }
 
+// TestGenerateGWASkipsWCSettingsDir guards the GIS-248 invariant against the
+// GSTWCDIR work (GIS-536): install now mirrors a wcsettings/ directory next to
+// the components (holding Form Designer descriptors, not a component). It has no
+// <name>/<name>.html entry point, so isComponentDir filters it and --gwa must
+// never emit it — otherwise gwabuildtool fails on it exactly as it would on a
+// docs/ or examples/ tree.
+func TestGenerateGWASkipsWCSettingsDir(t *testing.T) {
+	projectDir := t.TempDir()
+	wc := filepath.Join(projectDir, ".fglpkg", "webcomponents")
+	mustMkdir(t, filepath.Join(wc, "MyWidget"))
+	mustWriteFile(t, filepath.Join(wc, "MyWidget", "MyWidget.html"), "<html></html>")
+	// The descriptor dir the installer mirrors (syncWCSettings): a real directory
+	// under webcomponents/, but not a loadable component.
+	mustMkdir(t, filepath.Join(wc, "wcsettings"))
+	mustWriteFile(t, filepath.Join(wc, "wcsettings", "MyWidget.wcsettings"), "<WebComponent/>")
+
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	g := New(t.TempDir())
+	flags, err := g.GenerateGWA()
+	if err != nil {
+		t.Fatalf("GenerateGWA: %v", err)
+	}
+	if len(flags) != 1 {
+		t.Fatalf("expected exactly 1 --webcomponent flag (MyWidget only), got %d: %v", len(flags), flags)
+	}
+	// Base-name check (robust to a temp path that contains "wcsettings"): the one
+	// flag must be the component, never the descriptor dir.
+	if got := filepath.Base(strings.TrimPrefix(flags[0], "--webcomponent ")); got != "MyWidget" {
+		t.Errorf("expected the only flag to point at MyWidget, got base %q (%q); wcsettings/ must be filtered", got, flags[0])
+	}
+}
+
 // TestGenerateLocalIncludesFGLIMAGEPATH verifies that the local-scope env
 // output prepends the project's .fglpkg/ directory onto FGLIMAGEPATH when
 // at least one webcomponent is installed.
