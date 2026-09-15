@@ -181,8 +181,48 @@ func TestCmdRegistryRemove_ProjectKeepsUnrelatedDefault(t *testing.T) {
 func TestCmdRegistryAdd_DuplicatePriorityRejected(t *testing.T) {
 	chdirTemp(t)
 	// Priority 1 collides with the built-in gi → validation error, nothing written.
-	if err := cmdRegistryAdd([]string{"acme", "https://a", "--repo-key", "K", "--priority", "1"}); err == nil {
+	err := cmdRegistryAdd([]string{"acme", "https://a", "--repo-key", "K", "--priority", "1"})
+	if err == nil {
 		t.Fatal("expected priority-collision error")
+	}
+	// GIS-537: the message names the conflicting registry, suggests the next free
+	// value, and points at 'registry list' — not just "priorities must be unique".
+	msg := err.Error()
+	for _, want := range []string{`"gi"`, "--priority 2", "registry list"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("clash message missing %q:\n%s", want, msg)
+		}
+	}
+}
+
+// TestCmdRegistryAdd_PriorityClashSuggestsNextFree covers the GIS-537 message for
+// a clash with a non-builtin registry: it names that registry and suggests the
+// next free value (one past the highest existing priority), and writes nothing.
+func TestCmdRegistryAdd_PriorityClashSuggestsNextFree(t *testing.T) {
+	chdirTemp(t)
+	m := manifest.New("app", "1.0.0", "", "")
+	m.Registries = []config.Registry{
+		{Name: "acme", Type: config.TypeArtifactory, URL: "https://a.example", RepoKey: "K", Priority: 2},
+	}
+	if err := m.Save("."); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	err := cmdRegistryAdd([]string{"corp", "https://c.example", "--repo-key", "K", "--priority", "2", "--local"})
+	if err == nil {
+		t.Fatal("expected priority-collision error")
+	}
+	msg := err.Error()
+	for _, want := range []string{`"acme"`, "--priority 3", "registry list"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("clash message missing %q:\n%s", want, msg)
+		}
+	}
+	got, err := manifest.Load(".")
+	if err != nil {
+		t.Fatalf("reload manifest: %v", err)
+	}
+	if _, ok := config.Find(got.Registries, "corp"); ok {
+		t.Errorf("corp must not be written on a priority clash: %+v", got.Registries)
 	}
 }
 

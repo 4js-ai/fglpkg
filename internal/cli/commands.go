@@ -557,7 +557,9 @@ FLAGS (add):
   --type <t>               genero | artifactory (default artifactory)
   --repo-key <k>           Artifactory generic-repo key; optional when the URL already carries it
   --auth <scheme>          bearer | basic | apikey | anonymous (default bearer)
-  --priority <n>           Lower is tried first; unique. Defaults to max+1 when omitted
+  --priority <n>           Lower is tried first; unique. Defaults to max+1 when omitted.
+                           See the priorities in use with 'fglpkg registry list'
+                           (PRIO column); a clash reports the next free value
   --packages <globs>       Comma-separated name-scope allow-list (e.g. 'acme-*,foo-*')
   --local, -l              Write to the project fglpkg.json (checked-in repo config).
                            Default is the user config ~/.fglpkg/config.json; --global/-g

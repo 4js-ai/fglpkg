@@ -3751,6 +3751,31 @@ func flagValue(a string, i *int, args []string) (string, error) {
 	return args[*i], nil
 }
 
+// priorityOwner returns the name of the registry in regs that already holds
+// priority p, and whether one does — used to name the conflict when an explicit
+// --priority clashes (GIS-537).
+func priorityOwner(regs []config.Registry, p int) (string, bool) {
+	for _, r := range regs {
+		if r.Priority == p {
+			return r.Name, true
+		}
+	}
+	return "", false
+}
+
+// nextFreePriority returns one past the highest priority in regs — the value
+// 'registry add' auto-assigns when --priority is omitted, and always free since
+// it exceeds every existing entry.
+func nextFreePriority(regs []config.Registry) int {
+	max := 0
+	for _, r := range regs {
+		if r.Priority > max {
+			max = r.Priority
+		}
+	}
+	return max + 1
+}
+
 func cmdRegistryAdd(args []string) error {
 	f, err := parseRegistryAddFlags(args)
 	if err != nil {
@@ -3792,17 +3817,27 @@ func cmdRegistryAdd(args []string) error {
 	if _, dup := config.Find(current, f.name); dup {
 		return fmt.Errorf("a registry named %q already exists; run 'fglpkg registry remove %s' first", f.name, f.name)
 	}
-	// A nil priority means the flag was omitted → auto-assign max+1 so the common
-	// case needs no --priority. An explicit value (including 0) is left as-is and
-	// validated by config.Resolve, which rejects any priority < 1. (GIS-249)
-	if f.priority == nil {
-		max := 0
-		for _, r := range current {
-			if r.Priority > max {
-				max = r.Priority
-			}
+	// An explicit --priority that collides is failed here, with a message that
+	// names the conflict and suggests a free value — priorities are hard to guess
+	// without consulting 'registry list'. config.Resolve would reject it below too,
+	// but only with a bare "priorities must be unique". An omitted --priority is
+	// auto-assigned below and never reaches here. (GIS-537)
+	if f.priority != nil {
+		if owner, clash := priorityOwner(current, *f.priority); clash {
+			next := nextFreePriority(current)
+			return fmt.Errorf(
+				"priority %d is already used by registry %q; priorities must be unique.\n"+
+					"  Use --priority %d (the next free value), or omit --priority to auto-assign it.\n"+
+					"  Run 'fglpkg registry list' to see the priorities already in use (the PRIO column).",
+				*f.priority, owner, next)
 		}
-		p := max + 1
+	}
+	// A nil priority means the flag was omitted → auto-assign the next free value
+	// (max existing + 1) so the common case needs no --priority. An explicit value
+	// (including 0) is left as-is and validated by config.Resolve, which rejects
+	// any priority < 1. (GIS-249)
+	if f.priority == nil {
+		p := nextFreePriority(current)
 		f.priority = &p
 	}
 
