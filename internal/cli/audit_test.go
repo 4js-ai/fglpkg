@@ -112,6 +112,43 @@ func TestAuditFlagParsing(t *testing.T) {
 			t.Errorf("severity = %q, want high", f.severity)
 		}
 	})
+	// GIS-540: --severity must accept the space form too, matching --shell and
+	// --depth. It used to reject it as an unknown argument.
+	t.Run("severity_valid_space_form", func(t *testing.T) {
+		f, err := parseAuditFlags([]string{"--severity", "high"})
+		if err != nil {
+			t.Fatalf("parseAuditFlags error: %v", err)
+		}
+		if f.severity != audit.SeverityHigh {
+			t.Errorf("severity = %q, want high", f.severity)
+		}
+	})
+	t.Run("severity_space_form_invalid", func(t *testing.T) {
+		_, err := parseAuditFlags([]string{"--severity", "urgent"})
+		if err == nil {
+			t.Fatal("expected error for invalid severity, got nil")
+		}
+	})
+	t.Run("severity_space_form_missing_value", func(t *testing.T) {
+		_, err := parseAuditFlags([]string{"--severity"})
+		if err == nil {
+			t.Fatal("expected error when --severity has no value, got nil")
+		}
+	})
+	// The consumed value must not swallow a following flag: --severity takes
+	// exactly the next token, and the flags around it still parse.
+	t.Run("severity_space_form_among_other_flags", func(t *testing.T) {
+		f, err := parseAuditFlags([]string{"--json", "--severity", "critical", "--production"})
+		if err != nil {
+			t.Fatalf("parseAuditFlags error: %v", err)
+		}
+		if f.severity != audit.SeverityCritical {
+			t.Errorf("severity = %q, want critical", f.severity)
+		}
+		if !f.jsonOut || !f.production {
+			t.Errorf("surrounding flags not parsed: %+v", f)
+		}
+	})
 	t.Run("severity_invalid", func(t *testing.T) {
 		_, err := parseAuditFlags([]string{"--severity=urgent"})
 		if err == nil {

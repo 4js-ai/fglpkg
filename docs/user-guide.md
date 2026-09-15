@@ -2036,7 +2036,7 @@ Set `signing.enforce` in `~/.fglpkg/config.json` (or the `FGLPKG_SIGNING` enviro
 ```bash
 fglpkg audit
 fglpkg audit --json
-fglpkg audit --severity=high
+fglpkg audit --severity high
 fglpkg audit --production
 ```
 
@@ -2045,7 +2045,7 @@ Flags:
 | Flag | Effect |
 |---|---|
 | `--json` | Emit a schema-versioned JSON report on stdout (each finding carries a `cvssScore` where one could be computed) instead of the human-readable table |
-| `--severity=<low\|medium\|high\|critical>` | Severity floor that fails the build. Default `medium`. **Equals form only** — `--severity high` is not accepted |
+| `--severity <low\|medium\|high\|critical>` | Severity floor that fails the build. Default `medium`. Accepts either form — `--severity high` and `--severity=high` both work |
 | `--production` (alias `--prod`) | Skip JARs recorded under the `dev` scope; optional-scoped JARs are still audited |
 | `--offline` | Reserved for a future cached-advisory mode; it currently errors |
 
