@@ -301,7 +301,7 @@ EXIT CODES:
 
 NOTES:
   Java JARs are audited against the OSV.dev v1 API (anonymous, free).
-  BDL packages are not scanned in this version (no public advisory feed).
+  BDL packages are not scanned: no public advisory feed indexes them yet.
 `,
 	},
 	{
@@ -345,7 +345,11 @@ Or source:       source <(fglpkg completion bash)
   --list, -l               List BDL programs across installed packages
 
 Runs a program declared in an installed package's "programs" list via fglrun.
-Arguments after the module name are passed to the program unchanged.
+bdl applies the package environment itself before launching fglrun — the same
+variables 'fglpkg env' manages (FGLLDPATH, CLASSPATH, the resource/schema/image
+search paths, and FGLPROFILE), resolved from the global package root — so you do
+not need to run 'fglpkg env' first. Arguments after the module name are passed to
+the program unchanged.
 `,
 	},
 	{
@@ -563,8 +567,11 @@ FLAGS (add):
 
 Repositories are configured via a "registries" array in fglpkg.json and/or
 ~/.fglpkg/config.json, alongside the built-in Genero Intelligence registry.
-Lower "priority" is tried first; priorities must be unique. 'add'/'remove' edit
-these files for you; credentials still flow through 'fglpkg login --registry'.
+Lower "priority" is tried first for search and listing order; priorities must be
+unique. It is ordering only, not a precedence tiebreak — a package found in more
+than one repository is reported as a collision, never silently resolved to the
+higher-priority repo. 'add'/'remove' edit these files for you; credentials still
+flow through 'fglpkg login --registry'.
 
 LOGIN column values:
   yes     credentials are stored for this repo (via 'fglpkg login')
