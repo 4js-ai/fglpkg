@@ -699,6 +699,11 @@ func TestGenerateGSTEmitsNewVarsProjectDirRelative(t *testing.T) {
 func TestGenerateGSTEmitsNoCommentLines(t *testing.T) {
 	chdirTemp(t)
 	mustMkdir(t, filepath.FromSlash(".fglpkg/webcomponents/MyWidget"))
+	// The entry point is what makes MyWidget a real component (isComponentDir /
+	// GIS-248), and a real component is what triggers the GAS hint. Without it
+	// this test would still pass, but vacuously: the hint it asserts is absent
+	// would never have been produced in the first place.
+	envTestWrite(t, ".fglpkg/webcomponents/MyWidget/MyWidget.html", "<html></html>")
 	for _, pkg := range []string{"alpha", "beta"} {
 		envTestWrite(t, ".fglpkg/packages/"+pkg+"/fglpkg.json",
 			`{ "name": "`+pkg+`", "version": "1.0.0", "dependencies": { "fgl": {} } }`)
