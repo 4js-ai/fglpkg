@@ -3763,6 +3763,30 @@ func priorityOwner(regs []config.Registry, p int) (string, bool) {
 	return "", false
 }
 
+// nextFreePriorityAtOrAfter returns the smallest priority >= from that no
+// registry in regs holds. It is what an explicit, clashing --priority is
+// answered with: the user stated a POSITION, so the useful suggestion is the
+// nearest free slot to it, not the end of the list. (Priorities below 1 are
+// invalid — config.Resolve rejects them — so the search never starts under 1.)
+//
+// Deliberately different from nextFreePriority: the two answer different
+// questions. An omitted --priority stated no position, so appending after the
+// highest is right; a stated-but-taken one wants to stay near where it aimed.
+func nextFreePriorityAtOrAfter(regs []config.Registry, from int) int {
+	used := make(map[int]bool, len(regs))
+	for _, r := range regs {
+		used[r.Priority] = true
+	}
+	p := from
+	if p < 1 {
+		p = 1
+	}
+	for used[p] {
+		p++
+	}
+	return p
+}
+
 // nextFreePriority returns one past the highest priority in regs — the value
 // 'registry add' auto-assigns when --priority is omitted, and always free since
 // it exceeds every existing entry.
@@ -3824,12 +3848,25 @@ func cmdRegistryAdd(args []string) error {
 	// auto-assigned below and never reaches here. (GIS-537)
 	if f.priority != nil {
 		if owner, clash := priorityOwner(current, *f.priority); clash {
-			next := nextFreePriority(current)
+			// The nearest free slot at or after the requested one — lower is
+			// tried first, so suggesting max+1 here would answer "I want this
+			// tried 1st" with "put it last", the opposite of the intent.
+			nearest := nextFreePriorityAtOrAfter(current, *f.priority)
+			last := nextFreePriority(current)
+			advice := fmt.Sprintf(
+				"Use --priority %d (the nearest free value), or omit --priority to auto-assign it.", nearest)
+			if nearest != last {
+				// A gap below the highest: name both slots, so the choice
+				// between "near where I asked" and "last" is explicit.
+				advice = fmt.Sprintf(
+					"Use --priority %d (the nearest free value), or omit --priority to add it last (priority %d).",
+					nearest, last)
+			}
 			return fmt.Errorf(
 				"priority %d is already used by registry %q; priorities must be unique.\n"+
-					"  Use --priority %d (the next free value), or omit --priority to auto-assign it.\n"+
+					"  %s\n"+
 					"  Run 'fglpkg registry list' to see the priorities already in use (the PRIO column).",
-				*f.priority, owner, next)
+				*f.priority, owner, advice)
 		}
 	}
 	// A nil priority means the flag was omitted → auto-assign the next free value

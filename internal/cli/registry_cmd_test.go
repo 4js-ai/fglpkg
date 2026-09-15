@@ -226,6 +226,62 @@ func TestCmdRegistryAdd_PriorityClashSuggestsNextFree(t *testing.T) {
 	}
 }
 
+// TestCmdRegistryAdd_PriorityClashSuggestsNearestNotLast is the gap case: with
+// priorities 1, 2 and 9 in use, a clash on 2 must suggest 3 — the nearest free
+// slot at or after what was asked for — and NOT 10. Lower is tried first, so
+// answering "I want this tried 2nd" with "use 10" sends the registry to the
+// opposite end of the search order. 10 is still offered, but explicitly as
+// "add it last" (GIS-537).
+func TestCmdRegistryAdd_PriorityClashSuggestsNearestNotLast(t *testing.T) {
+	chdirTemp(t)
+	m := manifest.New("app", "1.0.0", "", "")
+	m.Registries = []config.Registry{
+		{Name: "acme", Type: config.TypeArtifactory, URL: "https://a.example", RepoKey: "K", Priority: 2},
+		{Name: "far", Type: config.TypeArtifactory, URL: "https://f.example", RepoKey: "K", Priority: 9},
+	}
+	if err := m.Save("."); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+	err := cmdRegistryAdd([]string{"corp", "https://c.example", "--repo-key", "K", "--priority", "2", "--local"})
+	if err == nil {
+		t.Fatal("expected priority-collision error")
+	}
+	msg := err.Error()
+	for _, want := range []string{`"acme"`, "--priority 3", "the nearest free value", "priority 10"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("clash message missing %q:\n%s", want, msg)
+		}
+	}
+	// The end-of-list value must never be offered AS the nearest one — that is
+	// the bug this guards.
+	if strings.Contains(msg, "--priority 10") {
+		t.Errorf("10 is the last slot, not the nearest free value:\n%s", msg)
+	}
+}
+
+// TestNextFreePriorityAtOrAfter pins the search directly, including the case
+// where the requested value sits inside a run of taken priorities.
+func TestNextFreePriorityAtOrAfter(t *testing.T) {
+	regs := []config.Registry{{Priority: 1}, {Priority: 2}, {Priority: 3}, {Priority: 9}}
+	cases := []struct{ from, want int }{
+		{1, 4},  // inside a run — skip to the far side
+		{3, 4},  // last of the run
+		{4, 4},  // already free
+		{9, 10}, // the highest
+		{0, 4},  // below 1 is invalid; the search starts at 1
+	}
+	for _, c := range cases {
+		if got := nextFreePriorityAtOrAfter(regs, c.from); got != c.want {
+			t.Errorf("nextFreePriorityAtOrAfter(from=%d) = %d, want %d", c.from, got, c.want)
+		}
+	}
+	// The omitted-flag helper stays end-of-list: the two answer different
+	// questions and must not be collapsed.
+	if got := nextFreePriority(regs); got != 10 {
+		t.Errorf("nextFreePriority = %d, want 10", got)
+	}
+}
+
 // TestCmdRegistryAdd_ExplicitPriorityZeroRejected is the GIS-249 minor: an
 // explicit --priority 0 must be validated (positive required) rather than
 // silently auto-reassigned like an omitted flag.
