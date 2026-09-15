@@ -54,7 +54,9 @@ var completionFlags = []string{
 	"--severity", "--severity=",
 	"--offline",
 	"--pretty",
-	"--format=",
+	// Both spellings, as for --severity: parseSbomFlags accepts "--format
+	// cyclonedx" and "--format=cyclonedx" (GIS-540).
+	"--format", "--format=",
 	"--help", "-h",
 	"--version", "-v",
 	"--yes", "-y",

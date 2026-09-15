@@ -74,6 +74,40 @@ func TestSbomFlagParsing(t *testing.T) {
 			t.Errorf("flags wrong: %+v", f)
 		}
 	})
+	// GIS-540: --format must accept the space form too. It was the last
+	// value-flag in the CLI to reject it, so `--format cyclonedx` failed with
+	// `unknown argument "--format"` while the -o beside it took both forms.
+	// The error assertions below pin the MESSAGE, not just err != nil: the
+	// pre-fix parser errored on these same inputs as an unknown argument, so a
+	// bare nil-check would pass against the behavior they exist to rule out.
+	t.Run("format_space_form", func(t *testing.T) {
+		f, err := parseSbomFlags([]string{"--format", "cyclonedx"})
+		if err != nil {
+			t.Fatalf("parseSbomFlags error: %v", err)
+		}
+		if f.format != "cyclonedx" {
+			t.Errorf("format = %q, want cyclonedx", f.format)
+		}
+	})
+	t.Run("format_space_form_missing_value", func(t *testing.T) {
+		_, err := parseSbomFlags([]string{"--format"})
+		if err == nil {
+			t.Fatal("expected error when --format has no value, got nil")
+		}
+		if !strings.Contains(err.Error(), "--format requires a value") {
+			t.Errorf("err = %v, want one reporting the MISSING VALUE (not an unknown flag)", err)
+		}
+	})
+	// The consumed value must not swallow a following flag.
+	t.Run("format_space_form_among_other_flags", func(t *testing.T) {
+		f, err := parseSbomFlags([]string{"--pretty", "--format", "cyclonedx", "-o", "out.json"})
+		if err != nil {
+			t.Fatalf("parseSbomFlags error: %v", err)
+		}
+		if f.format != "cyclonedx" || f.output != "out.json" || !f.pretty {
+			t.Errorf("surrounding flags not parsed: %+v", f)
+		}
+	})
 	t.Run("unknown_arg", func(t *testing.T) {
 		_, err := parseSbomFlags([]string{"--what"})
 		if err == nil {
@@ -98,12 +132,14 @@ func TestCmdSbomFormatSpdxRejected(t *testing.T) {
 	dir := t.TempDir()
 	chdirTest(t, dir)
 	writeLockfileForSbom(t, dir, nil, nil)
-	err := cmdSbom([]string{"--format=spdx"})
-	if err == nil {
-		t.Fatal("expected error for spdx format")
-	}
-	if !strings.Contains(err.Error(), "spdx") {
-		t.Errorf("err = %v, want one mentioning spdx", err)
+	for _, args := range [][]string{{"--format=spdx"}, {"--format", "spdx"}} {
+		err := cmdSbom(args)
+		if err == nil {
+			t.Fatalf("%v: expected error for spdx format", args)
+		}
+		if !strings.Contains(err.Error(), "spdx") {
+			t.Errorf("%v: err = %v, want one mentioning spdx", args, err)
+		}
 	}
 }
 

@@ -313,8 +313,10 @@ NOTES:
   -o, --output <path>             Write to file instead of stdout
   --pretty                        Indented JSON (default: compact)
   --production, --prod            Skip dev-scoped JARs
-  --format=<cyclonedx|spdx>       Output format. Default: cyclonedx
-                                  (spdx is reserved for a future release)
+  --format <cyclonedx|spdx>       Output format. Default: cyclonedx
+                                  (spdx is reserved for a future release).
+                                  Accepts either form: --format cyclonedx or
+                                  --format=cyclonedx
 
 NOTES:
   v1 emits CycloneDX 1.5 JSON, generated from fglpkg-lock.json. No network calls.
