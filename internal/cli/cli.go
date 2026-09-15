@@ -4660,6 +4660,9 @@ ENVIRONMENT:
                            mavenMirror. Default: https://repo1.maven.org/maven2
   FGLPKG_GENERO_VERSION    Override Genero version detection
   FGLPKG_INSTALL_CONCURRENCY  Cap parallel downloads during install (default 4)
+  FGLPKG_NO_UPDATE_CHECK   Set to disable the passive "new version available"
+                           check (also via updateCheck in ~/.fglpkg/config.json).
+                           Always off in CI and for dev builds.
 
 `)
 	if runtime.GOOS == "windows" {
