@@ -709,6 +709,16 @@ func cmdInstall(args []string) error {
 	}
 	noteConsumeDefault(rs, reg, fromDefault)
 
+	// A global "tool" install — `install <pkg> --global` outside a project —
+	// materializes into the shared store but must leave the current directory
+	// untouched: the global store is tracked by scanning, not a project
+	// manifest/lock (GIS-565). Inside a project, --global keeps its existing
+	// meaning (record in this project's manifest, store globally).
+	globalToolInstall := flags.global && !isProjectDir()
+	if globalToolInstall {
+		fmt.Println("Installing to the global store (shared across projects); the current directory is left unchanged.")
+	}
+
 	scopeLabel := scopeDisplayName(flags.scope)
 	for _, pkg := range flags.pkgs {
 		name, version, err := parsePackageArg(pkg)
@@ -742,14 +752,26 @@ func cmdInstall(args []string) error {
 		// version per name, so this would only pull a registry snapshot of this
 		// project into its own tree. Reject early with a clear message; the
 		// manifest validator enforces the same rule at load/publish time.
-		if m.Name != "" && slugutil.Canonical(info.Name) == slugutil.Canonical(m.Name) {
+		// The self-dependency guard compares against the project's own name. For a
+		// global tool install there is no project — m.Name is only the incidental
+		// cwd basename (from LoadOrNew) — so skip it, or `install foo --global` in a
+		// directory named "foo" would wrongly reject itself.
+		if !globalToolInstall && m.Name != "" && slugutil.Canonical(info.Name) == slugutil.Canonical(m.Name) {
 			return fmt.Errorf("cannot add %q: a package cannot depend on itself", info.Name)
 		}
 		m.AddFGLDependencyPinned(info.Name, info.Version, flags.registry, flags.scope)
-		fmt.Printf("✓ Added %s@%s to %s [%s]\n", info.Name, info.Version, manifest.Filename, scopeLabel)
+		if globalToolInstall {
+			fmt.Printf("✓ %s@%s → global store\n", info.Name, info.Version)
+		} else {
+			fmt.Printf("✓ Added %s@%s to %s [%s]\n", info.Name, info.Version, manifest.Filename, scopeLabel)
+		}
 	}
-	if err := m.Save("."); err != nil {
-		return err
+	// A global tool install writes nothing to the current directory — neither the
+	// manifest here nor (via SkipLock below) a lock file (GIS-565).
+	if !globalToolInstall {
+		if err := m.Save("."); err != nil {
+			return err
+		}
 	}
 	// Rebuild the installer from the saved manifest so its routing picks up any
 	// freshly-written registry pin — otherwise a pinned (collision) package
@@ -768,6 +790,9 @@ func cmdInstall(args []string) error {
 	if err := runHook(m, manifest.HookPreInstall, projectDir); err != nil {
 		return err
 	}
+	// Keep the current directory clean for a global tool install: materialize into
+	// the store and build the global merged root, but write no project lock (GIS-565).
+	instOpts.SkipLock = globalToolInstall
 	if err := inst.InstallAllWithOptions(m, projectDir, true, instOpts); err != nil {
 		return err
 	}

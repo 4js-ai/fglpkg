@@ -324,6 +324,15 @@ type Options struct {
 	// Production, which resolves a deliberately narrowed graph (no dev scope)
 	// and so must never be allowed to delete a developer's dev packages.
 	Prune bool
+
+	// SkipLock suppresses every project lock-file write (and the legacy-lock
+	// migration) so an install materializes into the store and builds the merged
+	// root but leaves projectDir untouched. Set for a global "tool" install
+	// (`fglpkg install <pkg> --global` outside a project): the global store is
+	// tracked by scanning, not a project lock, so the current directory must stay
+	// clean (GIS-565). Honoured on the resolve path (forceResolve), which is the
+	// only path that add-a-package global installs take.
+	SkipLock bool
 }
 
 // InstallAll resolves or reads from the lock file, then installs every
@@ -347,10 +356,12 @@ func (i *Installer) InstallAllWithOptions(m *manifest.Manifest, projectDir strin
 	// runs in a project that still carries the old name. projectDir is the same
 	// directory every lock read/write below uses (the workspace root under a
 	// workspace), so the rename always lands where the lock is expected.
-	if migrated, err := lockfile.Migrate(projectDir); err != nil {
-		return err
-	} else if migrated {
-		fmt.Printf("Renamed %s to %s — commit the rename.\n", lockfile.LegacyFilename, lockfile.Filename)
+	if !opts.SkipLock {
+		if migrated, err := lockfile.Migrate(projectDir); err != nil {
+			return err
+		} else if migrated {
+			fmt.Printf("Renamed %s to %s — commit the rename.\n", lockfile.LegacyFilename, lockfile.Filename)
+		}
 	}
 
 	// Detect Genero version once — used for both lock validation and resolution.
@@ -451,7 +462,7 @@ func (i *Installer) InstallAllWithOptions(m *manifest.Manifest, projectDir strin
 	// installation is interrupted partway through.
 	// When --production is in effect we do NOT overwrite the lock file,
 	// because it would drop dev entries that should remain recorded.
-	if !opts.Production {
+	if !opts.Production && !opts.SkipLock {
 		lf := lockfile.FromPlan(plan, m, i.mavenBase)
 		if err := lf.Save(projectDir); err != nil {
 			// Non-fatal: warn but continue with the install.
@@ -851,7 +862,7 @@ func (i *Installer) installFromPlan(plan *resolver.Plan, root *manifest.Manifest
 		return err
 	}
 
-	if !opts.Production {
+	if !opts.Production && !opts.SkipLock {
 		i.recordManifestJARs(projectDir, supplemental)
 	}
 
@@ -863,7 +874,9 @@ func (i *Installer) installFromPlan(plan *resolver.Plan, root *manifest.Manifest
 
 	// Materialize the PACKAGE-correct merged FGLLDPATH root from the now-installed
 	// stores. A namespace clash aborts the install (strict one-package-per-namespace).
-	if err := i.syncMergedRoot(projectDir, !opts.Production); err != nil {
+	// recordLock is off under SkipLock so the merged root is still built (the global
+	// tool must resolve) but nothing is written into projectDir (GIS-565).
+	if err := i.syncMergedRoot(projectDir, !opts.Production && !opts.SkipLock); err != nil {
 		return err
 	}
 	return nil
