@@ -1022,7 +1022,16 @@ func cmdRemove(args []string) error {
 		return err
 	}
 	if len(pkgArgs) == 0 {
-		return fmt.Errorf("usage: fglpkg remove <package>")
+		return fmt.Errorf("usage: fglpkg remove <package> [<package>...]")
+	}
+	// A package slug is [a-z0-9-] and never contains a comma, so a comma-joined
+	// argument like "foo,bar" is one shell token that matches nothing. Reject it
+	// with the space-separated form rather than silently report a bogus removal
+	// (GIS-564).
+	for _, pkg := range pkgArgs {
+		if strings.Contains(pkg, ",") {
+			return fmt.Errorf("separate package names with spaces, not commas:\n  fglpkg remove %s", strings.ReplaceAll(pkg, ",", " "))
+		}
 	}
 	home, isLocal, err := resolveHome(forceLocal, forceGlobal)
 	if err != nil {
@@ -1033,20 +1042,35 @@ func cmdRemove(args []string) error {
 		return fmt.Errorf("failed to load %s: %w", manifest.Filename, err)
 	}
 	projectDir, _ := os.Getwd()
+
+	// Apply the removals to the in-memory manifest, warning on any name that is
+	// not actually declared — a mistyped name must never report success. Nothing
+	// is written or pruned until we know at least one dependency really left, so
+	// `remove <typo>` is a clean no-op with a non-zero exit rather than the old
+	// "✓ Removed <typo> (not declared in manifest)" (GIS-564).
+	removedAny := false
+	for _, pkg := range pkgArgs {
+		if scope := m.RemoveFGLDependency(pkg); scope != "" {
+			fmt.Printf("✓ Removed %s from %s\n", pkg, scopeDisplayName(scope))
+			removedAny = true
+		} else {
+			fmt.Printf("warning: %q is not a declared dependency; nothing to remove\n", pkg)
+		}
+	}
+	if !removedAny {
+		return fmt.Errorf("no declared dependencies matched; nothing was removed")
+	}
+
+	// At least one dependency is leaving — fire the pre-uninstall hook before
+	// anything is pruned from disk. (The on-disk manifest still lists it here;
+	// Save happens next.)
 	if err := runHook(m, manifest.HookPreUninstall, projectDir); err != nil {
 		return err
 	}
 
-	// Update the manifest first. Pruning of installed files (below) is driven
+	// Persist the shrunk manifest. Pruning of installed files (below) is driven
 	// by re-resolving the *updated* manifest, so nothing is deleted until the
 	// dependency it belongs to is actually gone from the graph.
-	for _, pkg := range pkgArgs {
-		if scope := m.RemoveFGLDependency(pkg); scope != "" {
-			fmt.Printf("✓ Removed %s from %s\n", pkg, scopeDisplayName(scope))
-		} else {
-			fmt.Printf("✓ Removed %s (not declared in manifest)\n", pkg)
-		}
-	}
 	if err := m.Save("."); err != nil {
 		return err
 	}
