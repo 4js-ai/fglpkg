@@ -3,39 +3,45 @@ package installer
 import (
 	"testing"
 
+	"github.com/4js-mikefolcher/fglpkg/internal/genero"
 	"github.com/4js-mikefolcher/fglpkg/internal/lockfile"
+	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 )
 
-// TestSyncMergedRootSkipsLockWhenNotRecording backs the global-tool install
-// (GIS-565): with recordLock=false — the value InstallAllWithOptions passes
-// under Options.SkipLock — the merged FGLLDPATH root is still built (so a
-// globally installed package resolves), but no lock file is written into
-// projectDir. That is what keeps `install <pkg> --global` from leaving an
-// fglpkg-lock.json in the user's current directory.
-func TestSyncMergedRootSkipsLockWhenNotRecording(t *testing.T) {
-	home := t.TempDir()
-	projectDir := t.TempDir()
-	i := New(home, "", "", "")
+// TestInstallAllWithOptionsSkipLock backs the global-tool install (GIS-565):
+// Options.SkipLock must suppress the project lock write on the resolve path —
+// the write (lockfile.FromPlan(...).Save(projectDir)) that leaked into the
+// current directory — while a default install still writes it.
+//
+// An empty manifest resolves to an empty plan, so this exercises the resolve
+// path with no registry or downloads; it needs only genero.Detect(), which is
+// skipped when Genero is not installed. Removing the SkipLock guards in
+// installer.go makes the SkipLock sub-test fail.
+func TestInstallAllWithOptionsSkipLock(t *testing.T) {
+	if _, err := genero.Detect(); err != nil {
+		t.Skipf("Genero not detected: %v", err)
+	}
+	m := manifest.New("app", "1.0.0", "", "") // no dependencies -> empty plan, no network
 
-	writeStore(t, i, "dbconnection", `{
-  "name": "dbconnection", "version": "1.0.0",
-  "generoPackages": ["com.fourjs.db"],
-  "dependencies": { "fgl": {} }
-}`, map[string]string{
-		"com/fourjs/db/DbConnection.42m": "DB",
+	t.Run("default install writes a lock", func(t *testing.T) {
+		i := New(t.TempDir(), "", "", "")
+		projectDir := t.TempDir()
+		if err := i.InstallAllWithOptions(m, projectDir, true, Options{}); err != nil {
+			t.Fatalf("install: %v", err)
+		}
+		if !lockfile.Exists(projectDir) {
+			t.Fatal("a normal resolve-path install must write a lock file")
+		}
 	})
 
-	if err := i.syncMergedRoot(projectDir, false); err != nil {
-		t.Fatalf("syncMergedRoot: %v", err)
-	}
-
-	// The merged root must be built regardless — this is what makes the globally
-	// installed package usable.
-	if !mergedHas(i, "com/fourjs/db/DbConnection.42m") {
-		t.Fatal("merged root should be built even when the lock is not recorded")
-	}
-	// ...but no lock may be written into the current directory.
-	if lockfile.Exists(projectDir) {
-		t.Fatalf("no lock file should be written when recordLock is false (projectDir=%s)", projectDir)
-	}
+	t.Run("SkipLock writes no lock", func(t *testing.T) {
+		i := New(t.TempDir(), "", "", "")
+		projectDir := t.TempDir()
+		if err := i.InstallAllWithOptions(m, projectDir, true, Options{SkipLock: true}); err != nil {
+			t.Fatalf("install: %v", err)
+		}
+		if lockfile.Exists(projectDir) {
+			t.Fatal("SkipLock must not write a lock file into projectDir (GIS-565)")
+		}
+	})
 }

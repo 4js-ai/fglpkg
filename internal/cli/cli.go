@@ -713,8 +713,12 @@ func cmdInstall(args []string) error {
 	// materializes into the shared store but must leave the current directory
 	// untouched: the global store is tracked by scanning, not a project
 	// manifest/lock (GIS-565). Inside a project, --global keeps its existing
-	// meaning (record in this project's manifest, store globally).
-	globalToolInstall := flags.global && !isProjectDir()
+	// meaning (record in this project's manifest, store globally). Key it on
+	// where the install actually lands — isLocal already honours --local's
+	// precedence over --global — so `install <pkg> --local --global` stays a
+	// normal local install rather than a store-only one that would orphan an
+	// empty .fglpkg/ with no manifest.
+	globalToolInstall := !isLocal && !isProjectDir()
 	if globalToolInstall {
 		fmt.Println("Installing to the global store (shared across projects); the current directory is left unchanged.")
 	}
@@ -752,11 +756,7 @@ func cmdInstall(args []string) error {
 		// version per name, so this would only pull a registry snapshot of this
 		// project into its own tree. Reject early with a clear message; the
 		// manifest validator enforces the same rule at load/publish time.
-		// The self-dependency guard compares against the project's own name. For a
-		// global tool install there is no project — m.Name is only the incidental
-		// cwd basename (from LoadOrNew) — so skip it, or `install foo --global` in a
-		// directory named "foo" would wrongly reject itself.
-		if !globalToolInstall && m.Name != "" && slugutil.Canonical(info.Name) == slugutil.Canonical(m.Name) {
+		if m.Name != "" && slugutil.Canonical(info.Name) == slugutil.Canonical(m.Name) {
 			return fmt.Errorf("cannot add %q: a package cannot depend on itself", info.Name)
 		}
 		m.AddFGLDependencyPinned(info.Name, info.Version, flags.registry, flags.scope)
@@ -1052,11 +1052,27 @@ func cmdRemove(args []string) error {
 	// A package slug is [a-z0-9-] and never contains a comma, so a comma-joined
 	// argument like "foo,bar" is one shell token that matches nothing. Reject it
 	// with the space-separated form rather than silently report a bogus removal
-	// (GIS-564).
+	// (GIS-564). The suggestion is rebuilt from every argument (split on commas
+	// and spaces) and keeps the scope flag, so nothing is dropped.
+	commaSeen := false
+	var suggestNames []string
 	for _, pkg := range pkgArgs {
 		if strings.Contains(pkg, ",") {
-			return fmt.Errorf("separate package names with spaces, not commas:\n  fglpkg remove %s", strings.ReplaceAll(pkg, ",", " "))
+			commaSeen = true
 		}
+		suggestNames = append(suggestNames, strings.FieldsFunc(pkg, func(r rune) bool {
+			return r == ',' || r == ' '
+		})...)
+	}
+	if commaSeen {
+		flagPart := ""
+		switch {
+		case forceLocal:
+			flagPart = "--local "
+		case forceGlobal:
+			flagPart = "--global "
+		}
+		return fmt.Errorf("separate package names with spaces, not commas:\n  fglpkg remove %s%s", flagPart, strings.Join(suggestNames, " "))
 	}
 	home, isLocal, err := resolveHome(forceLocal, forceGlobal)
 	if err != nil {
@@ -1069,35 +1085,42 @@ func cmdRemove(args []string) error {
 	projectDir, _ := os.Getwd()
 
 	// Apply the removals to the in-memory manifest, warning on any name that is
-	// not actually declared — a mistyped name must never report success. Nothing
-	// is written or pruned until we know at least one dependency really left, so
-	// `remove <typo>` is a clean no-op with a non-zero exit rather than the old
-	// "✓ Removed <typo> (not declared in manifest)" (GIS-564).
-	removedAny := false
+	// not actually declared — a mistyped name must never report success. The ✓
+	// lines are deferred until the change is committed (hook + Save): printing
+	// them here would claim success even when a failing preuninstall hook then
+	// aborts the command (the same false-success class GIS-564 fixes).
+	type removal struct {
+		name  string
+		scope manifest.Scope
+	}
+	var removed []removal
 	for _, pkg := range pkgArgs {
 		if scope := m.RemoveFGLDependency(pkg); scope != "" {
-			fmt.Printf("✓ Removed %s from %s\n", pkg, scopeDisplayName(scope))
-			removedAny = true
+			removed = append(removed, removal{pkg, scope})
 		} else {
 			fmt.Printf("warning: %q is not a declared dependency; nothing to remove\n", pkg)
 		}
 	}
-	if !removedAny {
+	if len(removed) == 0 {
 		return fmt.Errorf("no declared dependencies matched; nothing was removed")
 	}
 
 	// At least one dependency is leaving — fire the pre-uninstall hook before
 	// anything is pruned from disk. (The on-disk manifest still lists it here;
-	// Save happens next.)
+	// Save happens next.) A hook failure aborts before any ✓ is printed.
 	if err := runHook(m, manifest.HookPreUninstall, projectDir); err != nil {
 		return err
 	}
 
-	// Persist the shrunk manifest. Pruning of installed files (below) is driven
-	// by re-resolving the *updated* manifest, so nothing is deleted until the
+	// Persist the shrunk manifest, then report what left — only now is the
+	// removal committed. Pruning of installed files (below) is driven by
+	// re-resolving the *updated* manifest, so nothing is deleted until the
 	// dependency it belongs to is actually gone from the graph.
 	if err := m.Save("."); err != nil {
 		return err
+	}
+	for _, r := range removed {
+		fmt.Printf("✓ Removed %s from %s\n", r.name, scopeDisplayName(r.scope))
 	}
 
 	// Reconcile installed state with the shrunk manifest: rewrite the lock and
