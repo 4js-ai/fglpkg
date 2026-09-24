@@ -7,6 +7,21 @@ import (
 	"testing"
 )
 
+// chdirTest switches to dir for the duration of the test and restores the
+// original working directory afterwards. (testing.T.Chdir is Go 1.24+; this
+// module targets the version in go.mod, which CI builds with.)
+func chdirTest(t *testing.T, dir string) {
+	t.Helper()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir %s: %v", dir, err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+}
+
 // TestBinScriptPath_HonorsRoot: `bin` paths are relative to `root`, so the
 // resolved script must sit under it — the rule `pack` stages from (GIS-569).
 func TestBinScriptPath_HonorsRoot(t *testing.T) {
@@ -81,7 +96,7 @@ func TestLoadOrNew_NamesAfterWorkingDirectory(t *testing.T) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	t.Chdir(dir)
+	chdirTest(t, dir)
 
 	m, err := LoadOrNew(".")
 	if err != nil {
@@ -107,7 +122,7 @@ func TestLoadOrNew_KeepsExistingName(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, Filename), []byte(body), 0644); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
-	t.Chdir(dir)
+	chdirTest(t, dir)
 
 	m, err := LoadOrNew(".")
 	if err != nil {
