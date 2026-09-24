@@ -709,6 +709,20 @@ func cmdInstall(args []string) error {
 	}
 	noteConsumeDefault(rs, reg, fromDefault)
 
+	// A global "tool" install — `install <pkg> --global` outside a project —
+	// materializes into the shared store but must leave the current directory
+	// untouched: the global store is tracked by scanning, not a project
+	// manifest/lock (GIS-565). Inside a project, --global keeps its existing
+	// meaning (record in this project's manifest, store globally). Key it on
+	// where the install actually lands — isLocal already honours --local's
+	// precedence over --global — so `install <pkg> --local --global` stays a
+	// normal local install rather than a store-only one that would orphan an
+	// empty .fglpkg/ with no manifest.
+	globalToolInstall := !isLocal && !isProjectDir()
+	if globalToolInstall {
+		fmt.Println("Installing to the global store (shared across projects); the current directory is left unchanged.")
+	}
+
 	scopeLabel := scopeDisplayName(flags.scope)
 	for _, pkg := range flags.pkgs {
 		name, version, err := parsePackageArg(pkg)
@@ -746,10 +760,18 @@ func cmdInstall(args []string) error {
 			return fmt.Errorf("cannot add %q: a package cannot depend on itself", info.Name)
 		}
 		m.AddFGLDependencyPinned(info.Name, info.Version, flags.registry, flags.scope)
-		fmt.Printf("✓ Added %s@%s to %s [%s]\n", info.Name, info.Version, manifest.Filename, scopeLabel)
+		if globalToolInstall {
+			fmt.Printf("✓ %s@%s → global store\n", info.Name, info.Version)
+		} else {
+			fmt.Printf("✓ Added %s@%s to %s [%s]\n", info.Name, info.Version, manifest.Filename, scopeLabel)
+		}
 	}
-	if err := m.Save("."); err != nil {
-		return err
+	// A global tool install writes nothing to the current directory — neither the
+	// manifest here nor (via SkipLock below) a lock file (GIS-565).
+	if !globalToolInstall {
+		if err := m.Save("."); err != nil {
+			return err
+		}
 	}
 	// Rebuild the installer from the saved manifest so its routing picks up any
 	// freshly-written registry pin — otherwise a pinned (collision) package
@@ -768,6 +790,9 @@ func cmdInstall(args []string) error {
 	if err := runHook(m, manifest.HookPreInstall, projectDir); err != nil {
 		return err
 	}
+	// Keep the current directory clean for a global tool install: materialize into
+	// the store and build the global merged root, but write no project lock (GIS-565).
+	instOpts.SkipLock = globalToolInstall
 	if err := inst.InstallAllWithOptions(m, projectDir, true, instOpts); err != nil {
 		return err
 	}
@@ -1022,7 +1047,32 @@ func cmdRemove(args []string) error {
 		return err
 	}
 	if len(pkgArgs) == 0 {
-		return fmt.Errorf("usage: fglpkg remove <package>")
+		return fmt.Errorf("usage: fglpkg remove <package> [<package>...]")
+	}
+	// A package slug is [a-z0-9-] and never contains a comma, so a comma-joined
+	// argument like "foo,bar" is one shell token that matches nothing. Reject it
+	// with the space-separated form rather than silently report a bogus removal
+	// (GIS-564). The suggestion is rebuilt from every argument (split on commas
+	// and spaces) and keeps the scope flag, so nothing is dropped.
+	commaSeen := false
+	var suggestNames []string
+	for _, pkg := range pkgArgs {
+		if strings.Contains(pkg, ",") {
+			commaSeen = true
+		}
+		suggestNames = append(suggestNames, strings.FieldsFunc(pkg, func(r rune) bool {
+			return r == ',' || r == ' '
+		})...)
+	}
+	if commaSeen {
+		flagPart := ""
+		switch {
+		case forceLocal:
+			flagPart = "--local "
+		case forceGlobal:
+			flagPart = "--global "
+		}
+		return fmt.Errorf("separate package names with spaces, not commas:\n  fglpkg remove %s%s", flagPart, strings.Join(suggestNames, " "))
 	}
 	home, isLocal, err := resolveHome(forceLocal, forceGlobal)
 	if err != nil {
@@ -1033,22 +1083,44 @@ func cmdRemove(args []string) error {
 		return fmt.Errorf("failed to load %s: %w", manifest.Filename, err)
 	}
 	projectDir, _ := os.Getwd()
+
+	// Apply the removals to the in-memory manifest, warning on any name that is
+	// not actually declared — a mistyped name must never report success. The ✓
+	// lines are deferred until the change is committed (hook + Save): printing
+	// them here would claim success even when a failing preuninstall hook then
+	// aborts the command (the same false-success class GIS-564 fixes).
+	type removal struct {
+		name  string
+		scope manifest.Scope
+	}
+	var removed []removal
+	for _, pkg := range pkgArgs {
+		if scope := m.RemoveFGLDependency(pkg); scope != "" {
+			removed = append(removed, removal{pkg, scope})
+		} else {
+			fmt.Printf("warning: %q is not a declared dependency; nothing to remove\n", pkg)
+		}
+	}
+	if len(removed) == 0 {
+		return fmt.Errorf("no declared dependencies matched; nothing was removed")
+	}
+
+	// At least one dependency is leaving — fire the pre-uninstall hook before
+	// anything is pruned from disk. (The on-disk manifest still lists it here;
+	// Save happens next.) A hook failure aborts before any ✓ is printed.
 	if err := runHook(m, manifest.HookPreUninstall, projectDir); err != nil {
 		return err
 	}
 
-	// Update the manifest first. Pruning of installed files (below) is driven
-	// by re-resolving the *updated* manifest, so nothing is deleted until the
+	// Persist the shrunk manifest, then report what left — only now is the
+	// removal committed. Pruning of installed files (below) is driven by
+	// re-resolving the *updated* manifest, so nothing is deleted until the
 	// dependency it belongs to is actually gone from the graph.
-	for _, pkg := range pkgArgs {
-		if scope := m.RemoveFGLDependency(pkg); scope != "" {
-			fmt.Printf("✓ Removed %s from %s\n", pkg, scopeDisplayName(scope))
-		} else {
-			fmt.Printf("✓ Removed %s (not declared in manifest)\n", pkg)
-		}
-	}
 	if err := m.Save("."); err != nil {
 		return err
+	}
+	for _, r := range removed {
+		fmt.Printf("✓ Removed %s from %s\n", r.name, scopeDisplayName(r.scope))
 	}
 
 	// Reconcile installed state with the shrunk manifest: rewrite the lock and
