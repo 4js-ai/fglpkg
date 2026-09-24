@@ -4489,32 +4489,14 @@ func cmdRunList() error {
 	return nil
 }
 
-// rootOrDot returns a manifest root, defaulting to "." when unset.
-func rootOrDot(root string) string {
-	if root == "" {
-		return "."
-	}
-	return root
-}
-
-// projectBinScriptPath resolves a project bin's script under the package root —
-// the same base `pack` stages from — after rejecting an unsafe path (empty,
-// absolute, "/"-rooted, or ".."-escaping) with the manifest package's own rule,
-// so `run` never executes a script `pack`/`publish` would refuse to ship and the
-// two can't drift apart.
-func projectBinScriptPath(wd, root, scriptRel string) (string, error) {
-	if err := manifest.SafeRelPath("bin script path", scriptRel); err != nil {
-		return "", err
-	}
-	return filepath.Join(wd, rootOrDot(root), scriptRel), nil
-}
-
 // findBinCommand resolves a bin command by name. The current project's own
-// fglpkg.json is checked first (project-first precedence, GIS-566): its script
-// is resolved under the package root, the same base `pack` uses. Installed
-// packages are searched next (the local and global stores); a command defined by
-// more than one installed package is an ambiguity error. Returns the script
-// path, the owning name, and the source ("project" or "installed").
+// fglpkg.json is checked first (project-first precedence, GIS-566). Every bin
+// script — the project's and an installed package's alike — is resolved under
+// its manifest's `root`, the same base `pack` stages from, via
+// manifest.BinScriptPath (GIS-569). Installed packages are searched next (the
+// local and global stores); a command defined by more than one installed package
+// is an ambiguity error. Returns the script path, the owning name, and the
+// source ("project" or "installed").
 func findBinCommand(commandName string) (scriptPath, pkgName, source string, err error) {
 	// The current project's own bin takes precedence over installed packages. A
 	// load failure is surfaced rather than silently skipped, now that the project
@@ -4528,12 +4510,12 @@ func findBinCommand(commandName string) (scriptPath, pkgName, source string, err
 				fmt.Fprintf(os.Stderr, "warning: cannot read project %s: %v\n", manifest.Filename, loadErr)
 			}
 		} else if scriptRel, ok := m.Bin[commandName]; ok {
-			full, pathErr := projectBinScriptPath(wd, m.Root, scriptRel)
+			full, pathErr := m.BinScriptPath(wd, scriptRel)
 			if pathErr != nil {
 				return "", "", "", fmt.Errorf("project bin %q: %w", commandName, pathErr)
 			}
 			if _, statErr := os.Stat(full); statErr != nil {
-				return "", "", "", fmt.Errorf("project declares bin %q but its script %s (under root %q) was not found", commandName, scriptRel, rootOrDot(m.Root))
+				return "", "", "", fmt.Errorf("project declares bin %q but its script %s (under root %q) was not found", commandName, scriptRel, m.RootOrDot())
 			}
 			return full, m.Name, "project", nil
 		}
@@ -4560,7 +4542,14 @@ func findBinCommand(commandName string) (scriptPath, pkgName, source string, err
 				continue
 			}
 			if scriptRel, ok := m.Bin[commandName]; ok {
-				fullPath := filepath.Join(pkgDir, scriptRel)
+				// Installed manifests come from a registry, so an unsafe bin path
+				// disqualifies the package rather than aborting the command — a
+				// well-formed package of the same name elsewhere still resolves.
+				fullPath, pathErr := m.BinScriptPath(pkgDir, scriptRel)
+				if pathErr != nil {
+					fmt.Fprintf(os.Stderr, "warning: ignoring bin %q from installed package %q: %v\n", commandName, m.Name, pathErr)
+					continue
+				}
 				if _, statErr := os.Stat(fullPath); statErr == nil {
 					matches = append(matches, match{
 						scriptPath: fullPath,

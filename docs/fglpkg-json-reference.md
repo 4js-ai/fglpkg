@@ -386,8 +386,9 @@ you declare it. Installed docs are browsable with `fglpkg docs`.
 
 #### `bin` — object (map: command name → script path)
 Executable scripts shipped with the package so consumers can run them after
-install. Keys are command names; values are paths to the scripts relative to
-the package root, e.g. `{ "migrate": "scripts/migrate.sh" }`. Rules:
+install. Keys are command names; values are script paths **relative to `root`**
+— the same base as `files` and `profile` — e.g. with `root: "src"`,
+`{ "migrate": "scripts/migrate.sh" }` means `src/scripts/migrate.sh`. Rules:
 - A command name must be non-empty and must **not** contain path separators
   (`/` or `\`).
 - A script path must be a safe relative path inside the package.
@@ -395,6 +396,9 @@ the package root, e.g. `{ "migrate": "scripts/migrate.sh" }`. Rules:
   `.fglpkgignore` pattern would otherwise exclude them — dropping a declared
   script would silently break the package. Scripts are marked executable on
   install.
+- `fglpkg run <command>` resolves the script under `root` in both the current
+  project and any installed package, so a package that sets `root` runs the
+  same way it packs.
 
 #### `profile` — array of string
 Genero **configuration files** (`FGLPROFILE` entries) this package ships, as
@@ -906,7 +910,7 @@ authority (see [§5](#5-parsing--validation-rules)).
 | `files` | string[] | No | Globs to package (default `*.42m`,`*.42f`,`*.sch`). |
 | `include` | string[] | No | Extra files folded into the archive root by basename. |
 | `docs` | string[] | No | Globs of docs to package (no default). |
-| `bin` | map | No | Command name → script path. |
+| `bin` | map | No | Command name → script path, relative to `root`. |
 | `profile` | string[] | No | `FGLPROFILE` config files to ship; always packed, placed ahead of any existing `FGLPROFILE`. |
 | `dependencies` | bucket | No | Production deps (`fgl` + `java`). |
 | `devDependencies` | bucket | No | Dev-only deps; not transitive; stripped on publish. |

@@ -65,3 +65,21 @@ PY
   assert_not_contains "downloading"      # not the raw HTTP error
 }
 it "install from a lock whose package was deleted fails with an actionable message" _install_gone_locked_dep
+
+# GIS-568: `install <pkg>` in a directory that is not yet a project initialises
+# it, and the generated manifest must be named after the DIRECTORY. It used to
+# be named "." (filepath.Base(".")), which is not a legal package name — so the
+# new project's manifest was born invalid and `publish` rejected it later.
+_install_new_project_name() {
+  mock_registry_start
+  mkdir -p brand-new-proj && cd brand-new-proj
+  run install demo.pkg@1.0.0
+  assert_success
+  assert_file "fglpkg.json"
+  assert_file_contains "fglpkg.json" '"name": "brand-new-proj"'
+  assert_not_contains '"name": "."' "$(cat fglpkg.json)"
+  # The generated manifest must pass the same validation publish enforces.
+  run lint
+  assert_success
+}
+it "install in a new directory names the project after the directory" _install_new_project_name

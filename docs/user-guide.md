@@ -551,7 +551,7 @@ A freshly created manifest looks like this (with `repository` filled in from the
 fglpkg automatically detects whether to install packages locally or globally:
 
 - **Inside a project** (directory has `.fglpkg/` or `fglpkg.json`): packages install to `.fglpkg/` in the project directory.
-- **Outside a project**: `fglpkg install <pkg>` initialises the current directory as a project and installs locally to `.fglpkg/`. (A bare `fglpkg install`, with nothing to add, needs an existing `fglpkg.json`.)
+- **Outside a project**: `fglpkg install <pkg>` initialises the current directory as a project and installs locally to `.fglpkg/`. The generated `fglpkg.json` is named after the directory (lowercased, with separators collapsed — `My_Proj/` becomes `my-proj`); edit it before publishing if you want a different name. (A bare `fglpkg install`, with nothing to add, needs an existing `fglpkg.json`.)
 
 You can override this with flags:
 

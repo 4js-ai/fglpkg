@@ -486,6 +486,35 @@ func (m *Manifest) BinFiles() []string {
 	return paths
 }
 
+// RootOrDot returns the package source base, defaulting to "." when `root` is
+// unset. `root` is the base that `files`, `bin` and `main` are relative to.
+func (m *Manifest) RootOrDot() string {
+	if m.Root == "" {
+		return "."
+	}
+	return m.Root
+}
+
+// BinScriptPath resolves one of this manifest's bin scripts to a path under
+// baseDir — the project directory for a project's own bin, the installed
+// package directory for a dependency's.
+//
+// `bin` paths are relative to `root`, not to the manifest's directory: `pack`
+// stages them from filepath.Join(root, script), and PublishCopy rewrites `root`
+// to the post-importRoot-strip layout, so a shipped package's script really does
+// sit at <pkgDir>/<root>/<script>. Resolving without `root` (the GIS-569 bug)
+// misses the script entirely for any package that sets one.
+//
+// The path is validated with the manifest package's own rule first, so nothing
+// here ever resolves a script that `pack`/`publish` would refuse to ship — an
+// installed manifest arrives from a registry and is not inherently trusted.
+func (m *Manifest) BinScriptPath(baseDir, scriptRel string) (string, error) {
+	if err := SafeRelPath("bin script path", scriptRel); err != nil {
+		return "", err
+	}
+	return filepath.Join(baseDir, m.RootOrDot(), scriptRel), nil
+}
+
 // New creates a new Manifest with sensible defaults.
 func New(name, version, description, author string) *Manifest {
 	return &Manifest{
@@ -550,13 +579,37 @@ func Load(dir string) (*Manifest, error) {
 	return &m, nil
 }
 
-// LoadOrNew loads fglpkg.json if it exists, otherwise returns a blank manifest.
+// LoadOrNew loads fglpkg.json if it exists, otherwise returns a blank manifest
+// named after dir.
 func LoadOrNew(dir string) (*Manifest, error) {
 	m, err := Load(dir)
 	if os.IsNotExist(err) {
-		return New(filepath.Base(dir), "0.1.0", "", ""), nil
+		return New(DefaultNameForDir(dir), "0.1.0", "", ""), nil
 	}
 	return m, err
+}
+
+// FallbackPackageName is the generated name used when a directory's own name
+// yields nothing usable as a slug (e.g. "…/" at a filesystem root, or a name
+// made entirely of punctuation).
+const FallbackPackageName = "my-package"
+
+// DefaultNameForDir derives a package name from a directory path: the directory's
+// real basename, canonicalized to a valid slug.
+//
+// dir is resolved to an absolute path first. Callers pass "." (the current
+// directory) far more often than a spelled-out path, and filepath.Base(".") is
+// "." — which is not a legal package name, so the generated manifest carried
+// `"name": "."` and `publish` later rejected it (GIS-568).
+func DefaultNameForDir(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		abs = dir
+	}
+	if name := slugutil.Sanitize(filepath.Base(abs)); name != "" {
+		return name
+	}
+	return FallbackPackageName
 }
 
 // Save writes the manifest as formatted JSON to dir/fglpkg.json.
