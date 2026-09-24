@@ -19,6 +19,12 @@ var (
 	// validRe is the shape a canonical slug must satisfy: 2–64 chars,
 	// lowercase alphanumerics and hyphens, starting and ending alphanumeric.
 	validRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$`)
+
+	// nonSlugChar matches anything a canonical slug may not contain. Canonical
+	// has already lowercased and collapsed the separator characters, so what is
+	// left is spaces, punctuation, and non-ASCII — each folded to a hyphen by
+	// Sanitize rather than dropped, so "fgl utils" reads as "fgl-utils".
+	nonSlugChar = regexp.MustCompile(`[^a-z0-9-]+`)
 )
 
 // Canonical returns the canonical slug for a package name: lowercased, with
@@ -29,6 +35,26 @@ var (
 // the result.
 func Canonical(name string) string {
 	return strings.ToLower(sepRun.ReplaceAllString(name, "-"))
+}
+
+// Sanitize derives a well-formed canonical slug from an arbitrary string —
+// typically a directory name being turned into a package name. Beyond
+// Canonical's lowercasing and separator collapsing it replaces every remaining
+// character outside [a-z0-9-] with a hyphen, collapses the resulting runs, trims
+// leading and trailing hyphens, and truncates to the 64-character limit. It
+// returns "" when nothing valid survives (an empty name, a single character, or
+// a name made entirely of punctuation), leaving the fallback to the caller —
+// this package never invents a name.
+func Sanitize(name string) string {
+	s := nonSlugChar.ReplaceAllString(Canonical(name), "-")
+	s = strings.Trim(sepRun.ReplaceAllString(s, "-"), "-")
+	if len(s) > 64 {
+		s = strings.TrimRight(s[:64], "-")
+	}
+	if !IsValid(s) {
+		return ""
+	}
+	return s
 }
 
 // IsValid reports whether s is a well-formed canonical slug: 2–64 characters,

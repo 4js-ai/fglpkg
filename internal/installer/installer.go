@@ -1576,15 +1576,23 @@ func (i *Installer) ensureDirs() error {
 
 // makeBinScriptsExecutable sets the executable bit on all bin scripts
 // after extraction. On Windows this is a no-op.
+//
+// Scripts are resolved under the package's `root` — the base `bin` paths are
+// relative to — via manifest.BinScriptPath. Joining them straight onto pkgDir
+// missed the script for any package that sets `root`, which failed the whole
+// install with "cannot set bin script permissions" (GIS-569).
 func makeBinScriptsExecutable(pkgDir string, m *manifest.Manifest) error {
 	if runtime.GOOS == "windows" {
 		return nil
 	}
 	for _, scriptPath := range m.BinFiles() {
-		fullPath := filepath.Join(pkgDir, scriptPath)
+		fullPath, err := m.BinScriptPath(pkgDir, scriptPath)
+		if err != nil {
+			return fmt.Errorf("bin script %q in installed package: %w", scriptPath, err)
+		}
 		info, err := os.Stat(fullPath)
 		if err != nil {
-			return fmt.Errorf("bin script %q not found in installed package: %w", scriptPath, err)
+			return fmt.Errorf("bin script %q not found in installed package (under root %q): %w", scriptPath, m.RootOrDot(), err)
 		}
 		if err := os.Chmod(fullPath, info.Mode()|0111); err != nil {
 			return fmt.Errorf("cannot chmod %s: %w", fullPath, err)

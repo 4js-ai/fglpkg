@@ -65,3 +65,56 @@ PY
   assert_not_contains "downloading"      # not the raw HTTP error
 }
 it "install from a lock whose package was deleted fails with an actionable message" _install_gone_locked_dep
+
+# GIS-568: `install <pkg>` in a directory that is not yet a project initialises
+# it, and the generated manifest must be named after the DIRECTORY. It used to
+# be named "." (filepath.Base(".")), which is not a legal package name — so the
+# new project's manifest was born invalid and `publish` rejected it later.
+_install_new_project_name() {
+  mock_registry_start
+  mkdir -p brand-new-proj && cd brand-new-proj
+  run install demo.pkg@1.0.0
+  assert_success
+  assert_file "fglpkg.json"
+  assert_file_contains "fglpkg.json" '"name": "brand-new-proj"'
+  assert_not_contains '"name": "."' "$(cat fglpkg.json)"
+  # The generated manifest must pass the same validation publish enforces.
+  run lint
+  assert_success
+}
+it "install in a new directory names the project after the directory" _install_new_project_name
+
+# PR #87 review (T1): once a new project is named after its directory (GIS-568),
+# installing a package from a directory that happens to share its name hit the
+# self-dependency guard — an error about a name the user never chose. The new
+# project is renamed instead.
+_install_dir_named_like_pkg() {
+  mock_registry_start
+  mkdir -p demo-pkg && cd demo-pkg
+  run install demo.pkg@1.0.0
+  assert_success
+  assert_not_contains "cannot depend on itself"
+  assert_file_contains "fglpkg.json" '"name": "demo-pkg-app"'   # renamed, not refused
+  assert_file_contains "fglpkg.json" '"demo-pkg"'               # and the dependency was added
+  run lint
+  assert_success                                                # no self-dependency to trip over later
+}
+it "install into a directory named like the package renames the new project" _install_dir_named_like_pkg
+
+# PR #87 review (T2): --global outside a project writes no manifest at all
+# (GIS-565), so a self-dependency check cannot apply — it must not block the
+# install just because the cwd is named like the package.
+_install_global_dir_named_like_pkg() {
+  mock_registry_start
+  mkdir -p demo-pkg && cd demo-pkg
+  run install demo.pkg@1.0.0 --global
+  assert_success
+  assert_not_contains "cannot depend on itself"
+  # No project is created here, so the user must not be told one was renamed —
+  # this is what separates the global case from the new-project one.
+  assert_not_contains "the new project is named"
+  assert_no_file "fglpkg.json"          # still writes nothing here (GIS-565)
+  assert_no_file "fglpkg-lock.json"
+  assert_no_file ".fglpkg"
+}
+it "install --global from a directory named like the package is not a self-dependency" _install_global_dir_named_like_pkg

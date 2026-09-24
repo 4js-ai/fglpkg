@@ -1,6 +1,9 @@
 package slug
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCanonical(t *testing.T) {
 	cases := []struct{ in, want string }{
@@ -60,6 +63,38 @@ func TestCanonicalOutputIsValidForRealNames(t *testing.T) {
 	for _, in := range []string{"fgl_ai_sdk", "Fgl.AI.SDK", "My_Cool.Pkg", "poiapi"} {
 		if got := Canonical(in); !IsValid(got) {
 			t.Errorf("Canonical(%q) = %q, which is not a valid slug", in, got)
+		}
+	}
+}
+
+// TestSanitize covers deriving a package name from an arbitrary directory name
+// (GIS-568): everything outside the slug alphabet folds to a hyphen, and a name
+// with nothing usable left returns "" so the caller supplies the fallback.
+func TestSanitize(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"newproj", "newproj"},
+		{"NewProj", "newproj"},
+		{"My Project", "my-project"},      // spaces fold to a hyphen, not dropped
+		{"fgl_ai.sdk", "fgl-ai-sdk"},      // PEP 503 separators (Canonical)
+		{"my  cool   pkg", "my-cool-pkg"}, // runs collapse to one hyphen
+		{"--weird--", "weird"},            // leading/trailing hyphens trimmed
+		{"...", ""},                       // all separators
+		{"!!!", ""},                       // all punctuation
+		{"", ""},                          // empty
+		{".", ""},                         // the GIS-568 value itself
+		{"x", ""},                         // one character is below the 2-char floor
+		{"café", "caf"},                   // non-ASCII folds then trims
+		{strings.Repeat("a", 80), strings.Repeat("a", 64)},         // truncated
+		{strings.Repeat("a", 64) + "-bb", strings.Repeat("a", 64)}, // truncation never leaves a trailing hyphen
+	}
+	for _, tc := range cases {
+		got := Sanitize(tc.in)
+		if got != tc.want {
+			t.Errorf("Sanitize(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		// Whatever comes back must be usable as a package name.
+		if got != "" && !IsValid(got) {
+			t.Errorf("Sanitize(%q) = %q, which is not a valid slug", tc.in, got)
 		}
 	}
 }

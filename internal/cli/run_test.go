@@ -57,6 +57,21 @@ func writeInstalledPkgWithBin(t *testing.T, projectDir, pkg, cmd string) {
 	writeScript(t, filepath.Join(inst, "run.sh"))
 }
 
+// writeInstalledPkgWithRootBin hand-places an installed package that sets
+// `root`, with its bin script under that root — the layout `pack` produces and
+// `PublishCopy` records (GIS-569).
+func writeInstalledPkgWithRootBin(t *testing.T, projectDir, pkg, cmd, root string) string {
+	t.Helper()
+	inst := filepath.Join(projectDir, ".fglpkg", "packages", pkg)
+	if err := os.MkdirAll(inst, 0755); err != nil {
+		t.Fatalf("mkdir installed pkg: %v", err)
+	}
+	writeRawManifest(t, inst, `{"name":"`+pkg+`","version":"1.0.0","root":"`+root+`","bin":{"`+cmd+`":"scripts/run.sh"}}`+"\n")
+	script := filepath.Join(inst, root, "scripts", "run.sh")
+	writeScript(t, script)
+	return script
+}
+
 func writeScript(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -90,8 +105,8 @@ func TestCmdRunList_IncludesProjectBin(t *testing.T) {
 // installed (local) rows.
 func TestCmdRunList_ProjectListedBeforeInstalled(t *testing.T) {
 	dir := t.TempDir()
-	writeProjectWithBin(t, dir, true)                        // project bin "greet"
-	writeInstalledPkgWithBin(t, dir, "other", "othercmd")    // installed bin "othercmd"
+	writeProjectWithBin(t, dir, true)                     // project bin "greet"
+	writeInstalledPkgWithBin(t, dir, "other", "othercmd") // installed bin "othercmd"
 	isolateGlobalStore(t)
 	chdirTest(t, dir)
 
@@ -109,7 +124,7 @@ func TestCmdRunList_ProjectListedBeforeInstalled(t *testing.T) {
 // flagged, so the user can see which one wins.
 func TestCmdRunList_MarksShadowed(t *testing.T) {
 	dir := t.TempDir()
-	writeProjectWithBin(t, dir, true)                 // project "greet"
+	writeProjectWithBin(t, dir, true)                  // project "greet"
 	writeInstalledPkgWithBin(t, dir, "other", "greet") // installed also defines "greet"
 	isolateGlobalStore(t)
 	chdirTest(t, dir)
@@ -269,5 +284,82 @@ func TestFindBinCommand_ProjectShadowsInstalled(t *testing.T) {
 	}
 	if pkg != "myproj" || source != "project" {
 		t.Fatalf("the project's bin must win over the installed package, got %q/%q", pkg, source)
+	}
+}
+
+// TestFindBinCommand_InstalledHonorsRoot: an installed package that sets `root`
+// keeps its bin script under that root, so resolution must join it — without
+// this, `run --list` advertised the command while `run <cmd>` reported it "not
+// found in any installed package" (GIS-569).
+func TestFindBinCommand_InstalledHonorsRoot(t *testing.T) {
+	dir := t.TempDir()
+	writeRawManifest(t, dir, `{"name":"myproj","version":"1.0.0"}`+"\n") // project declares no bin
+	want := writeInstalledPkgWithRootBin(t, dir, "tool", "dothing", "src")
+	// A decoy at the package root must NOT be picked when root is "src".
+	writeScript(t, filepath.Join(dir, ".fglpkg", "packages", "tool", "scripts", "run.sh"))
+	isolateGlobalStore(t)
+	chdirTest(t, dir)
+
+	script, pkg, source, err := findBinCommand("dothing")
+	if err != nil {
+		t.Fatalf("findBinCommand: %v", err)
+	}
+	if pkg != "tool" || source != "installed" {
+		t.Fatalf("expected the installed package to own the command, got %q/%q", pkg, source)
+	}
+	if !strings.HasSuffix(script, filepath.Join("src", "scripts", "run.sh")) {
+		t.Fatalf("expected the script under the package root 'src', got %q (want suffix of %s)", script, want)
+	}
+}
+
+// TestFindBinCommand_InstalledRejectsUnsafeBinPath: an installed manifest comes
+// from a registry, so a bin path that escapes the package is skipped — the
+// escaping target exists, so a dropped check would resolve and run it.
+func TestFindBinCommand_InstalledRejectsUnsafeBinPath(t *testing.T) {
+	dir := t.TempDir()
+	writeRawManifest(t, dir, `{"name":"myproj","version":"1.0.0"}`+"\n")
+	inst := filepath.Join(dir, ".fglpkg", "packages", "tool")
+	if err := os.MkdirAll(inst, 0755); err != nil {
+		t.Fatalf("mkdir installed pkg: %v", err)
+	}
+	writeRawManifest(t, inst, `{"name":"tool","version":"1.0.0","bin":{"dothing":"../../../outside.sh"}}`+"\n")
+	writeScript(t, filepath.Join(dir, "outside.sh")) // the escaping target really exists
+	isolateGlobalStore(t)
+	chdirTest(t, dir)
+
+	script, _, _, err := findBinCommand("dothing")
+	if err == nil {
+		t.Fatalf("an escaping installed bin path must not resolve, got script %q", script)
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("the package should be skipped, leaving a plain not-found error, got: %v", err)
+	}
+}
+
+// TestFindBinCommand_InstalledRejectsUnsafeRoot: the run-side twin of the
+// installer test — an installed manifest whose `root` escapes the package must
+// not resolve to a file outside it, even though its `bin` path is itself
+// harmless (PR #87 review). The escaping target exists and is executable, so a
+// dropped check would resolve and run it.
+func TestFindBinCommand_InstalledRejectsUnsafeRoot(t *testing.T) {
+	dir := t.TempDir()
+	writeRawManifest(t, dir, `{"name":"myproj","version":"1.0.0"}`+"\n")
+	inst := filepath.Join(dir, ".fglpkg", "packages", "demo-pkg")
+	if err := os.MkdirAll(inst, 0755); err != nil {
+		t.Fatalf("mkdir installed pkg: %v", err)
+	}
+	// root escapes back to the consumer's project directory; the bin path itself
+	// is an innocent "victim.sh".
+	writeRawManifest(t, inst, `{"name":"demo-pkg","version":"1.0.0","root":"../../..","bin":{"greet":"victim.sh"}}`+"\n")
+	writeScript(t, filepath.Join(dir, "victim.sh")) // exists, and is executable
+	isolateGlobalStore(t)
+	chdirTest(t, dir)
+
+	script, _, _, err := findBinCommand("greet")
+	if err == nil {
+		t.Fatalf("an escaping root must not resolve, got script %q", script)
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("the package should be skipped, leaving a plain not-found error, got: %v", err)
 	}
 }

@@ -486,6 +486,46 @@ func (m *Manifest) BinFiles() []string {
 	return paths
 }
 
+// RootOrDot returns the package source base, defaulting to "." when `root` is
+// unset. `root` is the base that `files`, `bin` and `main` are relative to.
+func (m *Manifest) RootOrDot() string {
+	if m.Root == "" {
+		return "."
+	}
+	return m.Root
+}
+
+// BinScriptPath resolves one of this manifest's bin scripts to a path under
+// baseDir — the project directory for a project's own bin, the installed
+// package directory for a dependency's.
+//
+// `bin` paths are relative to `root`, not to the manifest's directory: `pack`
+// stages them from filepath.Join(root, script). Resolving without `root` (the
+// GIS-569 bug) misses the script entirely for any package that sets one.
+//
+// This holds for the layouts where `root` describes the shipped tree: no
+// importRoot, or `root` under `importRoot` (PublishCopy rebases `root` to the
+// post-strip layout). It does NOT hold when `importRoot` sits *inside* `root`
+// (e.g. root ".", importRoot "lib"): there PublishCopy cannot rebase `root`,
+// so the shipped manifest's bin path disagrees with the archive and nothing can
+// resolve it. That layout is broken on both sides of GIS-569 — see GIS-570.
+//
+// BOTH manifest-supplied path segments are validated with the manifest
+// package's own rule before they are joined: an installed manifest arrives from
+// a registry and is not inherently trusted, and an escaping `root` reaches
+// outside the package just as effectively as an escaping bin path.
+func (m *Manifest) BinScriptPath(baseDir, scriptRel string) (string, error) {
+	if m.Root != "" {
+		if err := SafeRelPath("root", m.Root); err != nil {
+			return "", err
+		}
+	}
+	if err := SafeRelPath("bin script path", scriptRel); err != nil {
+		return "", err
+	}
+	return filepath.Join(baseDir, m.RootOrDot(), scriptRel), nil
+}
+
 // New creates a new Manifest with sensible defaults.
 func New(name, version, description, author string) *Manifest {
 	return &Manifest{
@@ -550,13 +590,60 @@ func Load(dir string) (*Manifest, error) {
 	return &m, nil
 }
 
-// LoadOrNew loads fglpkg.json if it exists, otherwise returns a blank manifest.
+// LoadOrNew loads fglpkg.json if it exists, otherwise returns a blank manifest
+// named after dir.
 func LoadOrNew(dir string) (*Manifest, error) {
 	m, err := Load(dir)
 	if os.IsNotExist(err) {
-		return New(filepath.Base(dir), "0.1.0", "", ""), nil
+		return New(DefaultNameForDir(dir), "0.1.0", "", ""), nil
 	}
 	return m, err
+}
+
+// FallbackPackageName is the generated name used when a directory's own name
+// yields nothing usable as a slug (e.g. "…/" at a filesystem root, or a name
+// made entirely of punctuation).
+const FallbackPackageName = "my-package"
+
+// DefaultNameForDir derives a package name from a directory path: the directory's
+// real basename, canonicalized to a valid slug.
+//
+// dir is resolved to an absolute path first. Callers pass "." (the current
+// directory) far more often than a spelled-out path, and filepath.Base(".") is
+// "." — which is not a legal package name, so the generated manifest carried
+// `"name": "."` and `publish` later rejected it (GIS-568).
+func DefaultNameForDir(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		abs = dir
+	}
+	if name := slugutil.Sanitize(filepath.Base(abs)); name != "" {
+		return name
+	}
+	return FallbackPackageName
+}
+
+// NameAvoiding returns name, adjusted so it does not canonically collide with
+// avoid. Names are compared canonically (GIS-271), the same way the
+// self-dependency rule compares them.
+//
+// It exists for the one case where a package name is DERIVED rather than
+// chosen: a new project named after its directory (see DefaultNameForDir). A
+// user who makes a scratch directory `poiapi/` to try out `poiapi` should get a
+// working project, not "a package cannot depend on itself" about a name they
+// never picked. A name the user actually wrote is never adjusted — the caller
+// decides which case it has.
+func NameAvoiding(name, avoid string) string {
+	if avoid == "" || slugutil.Canonical(name) != slugutil.Canonical(avoid) {
+		return name
+	}
+	// Sanitize re-applies the 64-char limit, which can truncate the suffix back
+	// into a collision; fall back rather than return a colliding name.
+	if suffixed := slugutil.Sanitize(name + "-app"); suffixed != "" &&
+		slugutil.Canonical(suffixed) != slugutil.Canonical(avoid) {
+		return suffixed
+	}
+	return FallbackPackageName
 }
 
 // Save writes the manifest as formatted JSON to dir/fglpkg.json.
@@ -875,6 +962,15 @@ func (m *Manifest) Validate() error {
 		// SafeRelPath rejects empty, absolute (including "/"-rooted paths
 		// that filepath.IsAbs misses on Windows), and ".."-escaping paths.
 		if err := SafeRelPath(fmt.Sprintf("bin script path for command %q", cmd), scriptPath); err != nil {
+			return err
+		}
+	}
+	// `root` is the base every other package path is resolved against, so an
+	// absolute or ".."-escaping value reaches outside the package everywhere at
+	// once. importRoot, include, profile and the bin paths above are all checked;
+	// root was the one that was not (PR #87 review).
+	if m.Root != "" {
+		if err := SafeRelPath("root", m.Root); err != nil {
 			return err
 		}
 	}
