@@ -3,7 +3,6 @@ package installer
 import (
 	"testing"
 
-	"github.com/4js-mikefolcher/fglpkg/internal/genero"
 	"github.com/4js-mikefolcher/fglpkg/internal/lockfile"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 )
@@ -14,14 +13,13 @@ import (
 // current directory — while a default install still writes it.
 //
 // An empty manifest resolves to an empty plan, so this exercises the resolve
-// path with no registry or downloads; it needs only genero.Detect(), which is
-// skipped when Genero is not installed. Removing the SkipLock guards in
-// installer.go makes the SkipLock sub-test fail.
+// path with no registry or downloads. It pins FGLPKG_GENERO_VERSION (Detect's
+// explicit override) so it runs on CI, where no Genero is installed, rather than
+// skipping. Removing the SkipLock guards in installer.go makes the SkipLock
+// sub-test fail.
 func TestInstallAllWithOptionsSkipLock(t *testing.T) {
-	if _, err := genero.Detect(); err != nil {
-		t.Skipf("Genero not detected: %v", err)
-	}
-	m := manifest.New("app", "1.0.0", "", "") // no dependencies -> empty plan, no network
+	t.Setenv("FGLPKG_GENERO_VERSION", "6.00.01") // runs without Genero on PATH
+	m := manifest.New("app", "1.0.0", "", "")    // no dependencies -> empty plan, no network
 
 	t.Run("default install writes a lock", func(t *testing.T) {
 		i := New(t.TempDir(), "", "", "")
