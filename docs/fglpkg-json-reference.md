@@ -367,9 +367,17 @@ Constraints and behavior:
   rebase any file.
 - Defaults to `"."` (no rebasing).
 - **On publish, the shipped manifest is rewritten to describe the post-strip
-  layout**: `root` is rebased to its path relative to `importRoot`, and both
-  `importRoot` and `include` are dropped (they have already been applied to the
-  staged archive). This is why consumers rarely see these keys.
+  layout**: `root` is rebased to its path relative to `importRoot` *when it can
+  be* — only when `root` sits under `importRoot` — and both `importRoot` and
+  `include` are dropped (they have already been applied to the staged archive).
+  This is why consumers rarely see these keys.
+- `bin` and `profile` paths are rewritten alongside it, each derived from where
+  its file actually landed in the archive, so the shipped manifest stays
+  self-consistent in **both** nesting orders. In the `root: "."` /
+  `importRoot: "lib"` shape `root` cannot be rebased (the result would escape),
+  so it is left as `"."` and the `bin` path loses its `lib/` prefix instead.
+  Without that, a shipped `bin` pointed at a file the archive did not contain
+  and the package failed to install.
 
 #### `include` — array of string
 Extra project files to fold into the **top of the archive root** (i.e. the top
