@@ -4447,8 +4447,13 @@ func cmdRunList() error {
 	projectCmds := map[string]bool{}
 	if isProjectDir() {
 		wd, _ := os.Getwd()
+		// isProjectDir() is also true for a bare .fglpkg/ with no manifest (e.g.
+		// ~/.fglpkg in $HOME), so a *missing* manifest is normal and silent; only an
+		// unreadable or malformed one is worth a warning.
 		if m, err := manifest.Load("."); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: cannot read project %s: %v\n", manifest.Filename, err)
+			if !errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "warning: cannot read project %s: %v\n", manifest.Filename, err)
+			}
 		} else {
 			addBins(m, "project")
 			for cmd := range m.Bin {
@@ -4493,20 +4498,15 @@ func rootOrDot(root string) string {
 }
 
 // projectBinScriptPath resolves a project bin's script under the package root —
-// the same base `pack` stages from — and rejects an unsafe path (absolute, or
-// one that escapes the package via "..") the way manifest validation does for
-// publish, so `run` never executes a script `pack` would refuse to ship.
+// the same base `pack` stages from — after rejecting an unsafe path (empty,
+// absolute, "/"-rooted, or ".."-escaping) with the manifest package's own rule,
+// so `run` never executes a script `pack`/`publish` would refuse to ship and the
+// two can't drift apart.
 func projectBinScriptPath(wd, root, scriptRel string) (string, error) {
-	if scriptRel == "" || filepath.IsAbs(scriptRel) {
-		return "", fmt.Errorf("unsafe script path %q", scriptRel)
+	if err := manifest.SafeRelPath("bin script path", scriptRel); err != nil {
+		return "", err
 	}
-	base := filepath.Join(wd, rootOrDot(root))
-	full := filepath.Join(base, scriptRel)
-	rel, relErr := filepath.Rel(base, full)
-	if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("unsafe script path %q (escapes the package)", scriptRel)
-	}
-	return full, nil
+	return filepath.Join(wd, rootOrDot(root), scriptRel), nil
 }
 
 // findBinCommand resolves a bin command by name. The current project's own
@@ -4521,8 +4521,12 @@ func findBinCommand(commandName string) (scriptPath, pkgName, source string, err
 	// manifest is a source of commands.
 	if isProjectDir() {
 		wd, _ := os.Getwd()
+		// A missing manifest is normal for a bare .fglpkg/ (e.g. ~/.fglpkg in $HOME);
+		// only surface an unreadable or malformed one.
 		if m, loadErr := manifest.Load("."); loadErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: cannot read project %s: %v\n", manifest.Filename, loadErr)
+			if !errors.Is(loadErr, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "warning: cannot read project %s: %v\n", manifest.Filename, loadErr)
+			}
 		} else if scriptRel, ok := m.Bin[commandName]; ok {
 			full, pathErr := projectBinScriptPath(wd, m.Root, scriptRel)
 			if pathErr != nil {

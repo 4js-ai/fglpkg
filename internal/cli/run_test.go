@@ -1,11 +1,32 @@
 package cli
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// captureStderr runs fn with os.Stderr redirected to a pipe and returns what was
+// written (mirrors captureStdout in info_test.go).
+func captureStderr(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+	orig := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	errCh := make(chan error, 1)
+	go func() { errCh <- fn() }()
+	fnErr := <-errCh
+	_ = w.Close()
+	os.Stderr = orig
+	out, _ := io.ReadAll(r)
+	_ = r.Close()
+	return string(out), fnErr
+}
 
 // isolateGlobalStore points the global package root at an empty temp dir so
 // run/list don't pick up the developer's real global packages.
@@ -147,15 +168,70 @@ func TestFindBinCommand_HonorsRoot(t *testing.T) {
 }
 
 // TestFindBinCommand_RejectsUnsafeBinPath: a bin script path that escapes the
-// package is rejected (parity with pack/publish validation).
+// package is rejected (parity with pack/publish validation). The escaping target
+// actually exists, so a dropped escape check would resolve+run it — the test
+// asserts the specific "escape" error, not merely that some error occurred.
 func TestFindBinCommand_RejectsUnsafeBinPath(t *testing.T) {
-	dir := t.TempDir()
+	base := t.TempDir()
+	dir := filepath.Join(base, "proj")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir proj: %v", err)
+	}
 	writeRawManifest(t, dir, `{"name":"myproj","version":"1.0.0","bin":{"greet":"../greet.sh"}}`+"\n")
+	writeScript(t, filepath.Join(base, "greet.sh")) // the escaping target really exists
 	isolateGlobalStore(t)
 	chdirTest(t, dir)
 
-	if _, _, _, err := findBinCommand("greet"); err == nil {
-		t.Fatal("expected an error for an unsafe (escaping) bin script path")
+	_, _, _, err := findBinCommand("greet")
+	if err == nil || !strings.Contains(err.Error(), "escape") {
+		t.Fatalf("expected an unsafe-path (escape) error, got: %v", err)
+	}
+}
+
+// TestRun_NoWarnWhenNoManifest: isProjectDir() is true for a bare .fglpkg/ with
+// no manifest (e.g. ~/.fglpkg in $HOME), and a missing manifest must not warn —
+// otherwise every `run` from home prints a spurious warning (GIS-566 review).
+func TestRun_NoWarnWhenNoManifest(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".fglpkg"), 0755); err != nil {
+		t.Fatalf("mkdir .fglpkg: %v", err)
+	}
+	isolateGlobalStore(t)
+	chdirTest(t, dir)
+
+	// run --list (its "No commands available" goes to real stdout — harmless).
+	stderr, err := captureStderr(t, cmdRunList)
+	if err != nil {
+		t.Fatalf("cmdRunList: %v", err)
+	}
+	if strings.Contains(stderr, "cannot read project") {
+		t.Fatalf("a missing manifest must not warn on run --list, got stderr:\n%s", stderr)
+	}
+
+	// run <cmd> (findBinCommand returns a not-found error; we only check stderr).
+	stderr, _ = captureStderr(t, func() error {
+		_, _, _, e := findBinCommand("nosuchtool")
+		return e
+	})
+	if strings.Contains(stderr, "cannot read project") {
+		t.Fatalf("a missing manifest must not warn on run <cmd>, got stderr:\n%s", stderr)
+	}
+}
+
+// TestCmdRunList_WarnsOnMalformedManifest: an unreadable/invalid manifest is
+// still surfaced (the guard suppresses only a *missing* file).
+func TestCmdRunList_WarnsOnMalformedManifest(t *testing.T) {
+	dir := t.TempDir()
+	writeRawManifest(t, dir, `{"name":"x","version":"1.0.0",}`+"\n") // trailing comma -> parse error
+	isolateGlobalStore(t)
+	chdirTest(t, dir)
+
+	stderr, err := captureStderr(t, cmdRunList)
+	if err != nil {
+		t.Fatalf("cmdRunList: %v", err)
+	}
+	if !strings.Contains(stderr, "cannot read project") {
+		t.Fatalf("a malformed manifest should warn, got stderr:\n%s", stderr)
 	}
 }
 

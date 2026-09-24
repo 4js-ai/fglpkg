@@ -872,14 +872,14 @@ func (m *Manifest) Validate() error {
 		if strings.ContainsAny(cmd, "/\\") {
 			return fmt.Errorf("bin command name %q must not contain path separators", cmd)
 		}
-		// safeRelPath rejects empty, absolute (including "/"-rooted paths
+		// SafeRelPath rejects empty, absolute (including "/"-rooted paths
 		// that filepath.IsAbs misses on Windows), and ".."-escaping paths.
-		if err := safeRelPath(fmt.Sprintf("bin script path for command %q", cmd), scriptPath); err != nil {
+		if err := SafeRelPath(fmt.Sprintf("bin script path for command %q", cmd), scriptPath); err != nil {
 			return err
 		}
 	}
 	if m.ImportRoot != "" {
-		if err := safeRelPath("importRoot", m.ImportRoot); err != nil {
+		if err := SafeRelPath("importRoot", m.ImportRoot); err != nil {
 			return err
 		}
 		if m.Root != "" {
@@ -895,12 +895,12 @@ func (m *Manifest) Validate() error {
 		}
 	}
 	for i, inc := range m.Include {
-		if err := safeRelPath(fmt.Sprintf("include[%d]", i), inc); err != nil {
+		if err := SafeRelPath(fmt.Sprintf("include[%d]", i), inc); err != nil {
 			return err
 		}
 	}
 	for i, p := range m.Profile {
-		if err := safeRelPath(fmt.Sprintf("profile[%d]", i), p); err != nil {
+		if err := SafeRelPath(fmt.Sprintf("profile[%d]", i), p); err != nil {
 			return err
 		}
 	}
@@ -1045,10 +1045,10 @@ func validateHookOp(op HookOperation) error {
 		if op.Path != "" {
 			return fmt.Errorf(`copy-files: "path" is not valid (use "from"/"to")`)
 		}
-		if err := safeRelPath("from", op.From); err != nil {
+		if err := SafeRelPath("from", op.From); err != nil {
 			return err
 		}
-		if err := safeRelPath("to", op.To); err != nil {
+		if err := SafeRelPath("to", op.To); err != nil {
 			return err
 		}
 	case HookOpMkdir:
@@ -1058,7 +1058,7 @@ func validateHookOp(op HookOperation) error {
 		if op.From != "" || op.To != "" {
 			return fmt.Errorf(`mkdir: only "path" is valid (got "from"/"to")`)
 		}
-		if err := safeRelPath("path", op.Path); err != nil {
+		if err := SafeRelPath("path", op.Path); err != nil {
 			return err
 		}
 	default:
@@ -1076,10 +1076,10 @@ func cleanRelPath(p string) string {
 	return filepath.ToSlash(filepath.Clean(p))
 }
 
-// safeRelPath rejects absolute paths and any path that escapes its base
+// SafeRelPath rejects absolute paths and any path that escapes its base
 // via ".." segments. Forward slashes are normalised so manifests work the
 // same on Windows and Unix.
-func safeRelPath(field, p string) error {
+func SafeRelPath(field, p string) error {
 	if p == "" {
 		return fmt.Errorf("%s must not be empty", field)
 	}
