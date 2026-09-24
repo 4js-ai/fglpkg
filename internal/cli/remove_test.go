@@ -135,3 +135,57 @@ func TestCmdRemove_HookFailureNoFalseSuccess(t *testing.T) {
 		t.Fatalf("an aborted remove must not rewrite the manifest\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }
+
+// TestCmdRemove_OutsideProjectWithoutGlobalExplainsScope: outside a project
+// there is no manifest to remove from, and the bare "failed to load fglpkg.json"
+// told the user nothing about the only thing `remove` can mean there (GIS-567).
+// Deleting from a store shared by every project must not be inferred from an
+// empty directory either, so the message names the flag instead.
+func TestCmdRemove_OutsideProjectWithoutGlobalExplainsScope(t *testing.T) {
+	dir := t.TempDir() // no fglpkg.json, no .fglpkg/
+	isolateGlobalStore(t)
+	chdirTest(t, dir)
+
+	err := cmdRemove([]string{"fglunit"})
+	if err == nil {
+		t.Fatal("expected an error outside a project")
+	}
+	if strings.Contains(err.Error(), "failed to load") {
+		t.Fatalf("the manifest load error must not surface here, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "--global") {
+		t.Fatalf("the error should point at the global scope, got: %v", err)
+	}
+}
+
+// TestCmdRemove_GlobalOutsideProjectDoesNotTouchCwd: the global path must not
+// read or write a project manifest — the whole point of GIS-567.
+func TestCmdRemove_GlobalOutsideProjectDoesNotTouchCwd(t *testing.T) {
+	store := t.TempDir()
+	t.Setenv("FGLPKG_GLOBAL_DIR", store)
+	pkgDir := filepath.Join(store, "packages", "fglunit")
+	if err := os.MkdirAll(pkgDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "fglpkg.json"), []byte(`{"name":"fglunit","version":"1.0.0"}`+"\n"), 0644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	wd := t.TempDir()
+	chdirTest(t, wd)
+
+	if err := cmdRemove([]string{"fglunit", "--global"}); err != nil {
+		t.Fatalf("cmdRemove --global: %v", err)
+	}
+	if _, err := os.Stat(pkgDir); err == nil {
+		t.Fatal("the package should be gone from the global store")
+	}
+	// Nothing was created in the current directory.
+	entries, err := os.ReadDir(wd)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("a global remove must leave the cwd untouched, found %d entries", len(entries))
+	}
+}

@@ -626,6 +626,22 @@ What happens on disk depends on the install context (see [Local vs Global](#loca
 
 Removing the **last** dependency empties the graph, so `fglpkg-lock.json` is deleted rather than left behind as an empty file.
 
+#### Uninstalling a global tool
+
+Everything above is about a *project's* dependencies. **Outside a project**, there is no manifest to edit, and `fglpkg remove <pkg> --global` instead uninstalls the package from the shared global store — the way back out of `fglpkg install <pkg> --global`:
+
+```bash
+fglpkg remove fglunit --global     # from anywhere; nothing is written to the current directory
+```
+
+The store keeps no manifest or lock of its own, so what is installed — and what depends on what — is recovered by scanning the bundled `fglpkg.json` of each installed package. The removal:
+
+- deletes the named package, and prunes any JAR or web-component bundle that no remaining package still declares;
+- **warns** if another installed package still depends on what you removed (the store has no lock that would catch it later);
+- **reports, but does not delete,** packages that were pulled in as dependencies of what you removed and are now referenced by nothing. The store cannot tell a package installed as a dependency from one you installed in its own right, so it names them and leaves the choice to you.
+
+A package that isn't in the store is reported as such — never a ✓. Because deleting from a store shared by every project shouldn't be inferred from an empty directory, `--global` is required: a bare `fglpkg remove <pkg>` outside a project tells you so rather than guessing.
+
 If the registry can't be reached to re-resolve, `remove` still updates the manifest, prints a warning, and leaves the lock untouched — run `fglpkg install` once you're back online to reconcile.
 
 `remove` is a convenience, not the only supported path: it is equivalent to deleting the dependency from `fglpkg.json` and running `fglpkg install`, which reconciles the lock and prunes disk the same way (see [Editing fglpkg.json by Hand](#editing-fglpkgjson-by-hand)). What `remove` adds is the `preuninstall` hook and the "which scope was it in" message.

@@ -114,6 +114,14 @@ Drops the package from fglpkg.json, re-resolves the remaining graph, and
 rewrites fglpkg-lock.json. For a local (.fglpkg/) install it also prunes packages
 and Java JARs the graph no longer needs. Global (~/.fglpkg/) artifacts are
 shared across projects and are left on disk.
+
+OUTSIDE A PROJECT there is no fglpkg.json to edit, so --global instead
+uninstalls the package from the shared global store — the counterpart of
+'fglpkg install <package> --global'. It deletes the named package and prunes
+what no remaining package declares, warns if something installed still depends
+on it, and reports (without deleting) packages left unreferenced. --global is
+required there: removing from a store shared by every project is never inferred
+from an empty directory.
 `,
 	},
 	{
