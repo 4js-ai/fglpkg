@@ -550,15 +550,17 @@ A freshly created manifest looks like this (with `repository` filled in from the
 
 fglpkg automatically detects whether to install packages locally or globally:
 
-- **Inside a project** (directory has `.fglpkg/` or `fglpkg.json`): packages install to `.fglpkg/` in the project directory
-- **Outside a project**: packages install to `~/.fglpkg/` (global)
+- **Inside a project** (directory has `.fglpkg/` or `fglpkg.json`): packages install to `.fglpkg/` in the project directory.
+- **Outside a project**: `fglpkg install <pkg>` initialises the current directory as a project and installs locally to `.fglpkg/`. (A bare `fglpkg install`, with nothing to add, needs an existing `fglpkg.json`.)
 
 You can override this with flags:
 
 ```bash
-fglpkg install --local     # force local .fglpkg/
-fglpkg install --global    # force global ~/.fglpkg/
+fglpkg install <pkg> --local     # force local .fglpkg/ (initialises a project here if needed)
+fglpkg install <pkg> --global    # force the shared global store (default ~/.fglpkg/, relocatable via FGLPKG_GLOBAL_DIR)
 ```
+
+**`--global` outside a project** installs the package (and its dependencies) into the shared global store and writes **nothing** to the current directory — no `fglpkg.json`, no `fglpkg-lock.json`, no `.fglpkg/`. The global store keeps no manifest or lock of its own; it is tracked by scanning what is installed (see `fglpkg list --global`). Inside a project, `--global` still records the dependency in the project's `fglpkg.json` while installing to the shared store. If you pass both `--local` and `--global`, `--local` wins.
 
 These flags work on `install`, `remove`, `update`, `list`, and `env`.
 
