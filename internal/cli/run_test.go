@@ -335,3 +335,31 @@ func TestFindBinCommand_InstalledRejectsUnsafeBinPath(t *testing.T) {
 		t.Fatalf("the package should be skipped, leaving a plain not-found error, got: %v", err)
 	}
 }
+
+// TestFindBinCommand_InstalledRejectsUnsafeRoot: the run-side twin of the
+// installer test — an installed manifest whose `root` escapes the package must
+// not resolve to a file outside it, even though its `bin` path is itself
+// harmless (PR #87 review). The escaping target exists and is executable, so a
+// dropped check would resolve and run it.
+func TestFindBinCommand_InstalledRejectsUnsafeRoot(t *testing.T) {
+	dir := t.TempDir()
+	writeRawManifest(t, dir, `{"name":"myproj","version":"1.0.0"}`+"\n")
+	inst := filepath.Join(dir, ".fglpkg", "packages", "demo-pkg")
+	if err := os.MkdirAll(inst, 0755); err != nil {
+		t.Fatalf("mkdir installed pkg: %v", err)
+	}
+	// root escapes back to the consumer's project directory; the bin path itself
+	// is an innocent "victim.sh".
+	writeRawManifest(t, inst, `{"name":"demo-pkg","version":"1.0.0","root":"../../..","bin":{"greet":"victim.sh"}}`+"\n")
+	writeScript(t, filepath.Join(dir, "victim.sh")) // exists, and is executable
+	isolateGlobalStore(t)
+	chdirTest(t, dir)
+
+	script, _, _, err := findBinCommand("greet")
+	if err == nil {
+		t.Fatalf("an escaping root must not resolve, got script %q", script)
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("the package should be skipped, leaving a plain not-found error, got: %v", err)
+	}
+}

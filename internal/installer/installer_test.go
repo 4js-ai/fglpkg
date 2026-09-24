@@ -183,3 +183,45 @@ func TestMakeBinScriptsExecutableRejectsUnsafePath(t *testing.T) {
 		t.Errorf("a file outside the package must not be made executable, got mode %o", info.Mode())
 	}
 }
+
+// TestMakeBinScriptsExecutableRejectsUnsafeRoot: an escaping `root` reaches
+// outside the package just as an escaping bin path does. Validating only the
+// script left this route open: a registry-supplied manifest with
+// root:"../../.." made a file in the consumer's own project directory
+// executable (PR #87 review). The victim file exists, so a dropped check
+// chmod-s it.
+func TestMakeBinScriptsExecutableRejectsUnsafeRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod not applicable on Windows")
+	}
+
+	base := t.TempDir()
+	pkgDir := filepath.Join(base, "proj", ".fglpkg", "packages", "demo-pkg")
+	if err := os.MkdirAll(pkgDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Sits in the consumer's project directory, outside the package.
+	victim := filepath.Join(base, "proj", "victim.sh")
+	if err := os.WriteFile(victim, []byte("#!/bin/sh\necho OUTSIDE-FILE EXECUTED\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &manifest.Manifest{
+		Name:    "demo-pkg",
+		Version: "1.0.0",
+		Root:    "../../..", // escapes .fglpkg/packages/demo-pkg back to the project
+		Bin:     map[string]string{"greet": "victim.sh"},
+	}
+
+	err := makeBinScriptsExecutable(pkgDir, m)
+	if err == nil || !strings.Contains(err.Error(), "root") {
+		t.Fatalf("expected an unsafe-root error, got: %v", err)
+	}
+	info, statErr := os.Stat(victim)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if info.Mode()&0111 != 0 {
+		t.Errorf("a file outside the package must not be made executable, got mode %o", info.Mode())
+	}
+}

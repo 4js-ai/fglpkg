@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	slugutil "github.com/4js-mikefolcher/fglpkg/internal/slug"
 )
 
 // chdirTest switches to dir for the duration of the test and restores the
@@ -57,6 +59,79 @@ func TestBinScriptPath_RejectsUnsafe(t *testing.T) {
 		m := &Manifest{Name: "p", Version: "1.0.0", Root: "src"}
 		if _, err := m.BinScriptPath("pkg", script); err == nil {
 			t.Fatalf("bin script %q should be rejected as unsafe", script)
+		}
+	}
+}
+
+// TestBinScriptPath_RejectsUnsafeRoot: `root` is manifest-supplied too, so an
+// escaping or absolute `root` reaches outside the package exactly as an escaping
+// bin path does — validating only the script left that route open (PR #87
+// review). The error must name `root`, not the script.
+func TestBinScriptPath_RejectsUnsafeRoot(t *testing.T) {
+	for _, root := range []string{"../../..", "..", "/etc", "src/../.."} {
+		m := &Manifest{Name: "p", Version: "1.0.0", Root: root}
+		_, err := m.BinScriptPath("pkg", "victim.sh")
+		if err == nil {
+			t.Fatalf("root %q should be rejected as unsafe", root)
+		}
+		if !strings.Contains(err.Error(), "root") {
+			t.Fatalf("root %q: error should name root, got: %v", root, err)
+		}
+	}
+	// "." and a plain subdirectory stay valid.
+	for _, root := range []string{"", ".", "src", "lib/com/x"} {
+		m := &Manifest{Name: "p", Version: "1.0.0", Root: root}
+		if _, err := m.BinScriptPath("pkg", "greet.sh"); err != nil {
+			t.Fatalf("root %q should be accepted, got: %v", root, err)
+		}
+	}
+}
+
+// TestValidate_RejectsUnsafeRoot: the authoring-side twin — `pack`/`lint`/
+// `publish` must refuse to ship a manifest whose `root` escapes the package.
+func TestValidate_RejectsUnsafeRoot(t *testing.T) {
+	for _, root := range []string{"../..", "/etc"} {
+		m := New("demo-pkg", "1.0.0", "d", "a")
+		m.Root = root
+		err := m.Validate()
+		if err == nil {
+			t.Fatalf("root %q should fail validation", root)
+		}
+		if !strings.Contains(err.Error(), "root") {
+			t.Fatalf("root %q: error should name root, got: %v", root, err)
+		}
+	}
+	m := New("demo-pkg", "1.0.0", "d", "a")
+	m.Root = "src"
+	if err := m.Validate(); err != nil {
+		t.Fatalf("a plain subdirectory root must stay valid: %v", err)
+	}
+}
+
+// TestNameAvoiding: a DERIVED project name that collides with a package being
+// installed is adjusted rather than refused (PR #87 review). A name that does
+// not collide is returned untouched.
+func TestNameAvoiding(t *testing.T) {
+	cases := []struct{ name, avoid, want string }{
+		{"poiapi", "poiapi", "poiapi-app"},    // the collision case
+		{"poi-api", "poi.api", "poi-api-app"}, // compared canonically (GIS-271)
+		{"poiapi", "poi.api", "poiapi"},       // "poi.api" canonicalizes to "poi-api": no collision
+		{"poiapi", "fglunit", "poiapi"},       // no collision: untouched
+		{"poiapi", "", "poiapi"},              // nothing to avoid
+		{"my-proj", "my_proj", "my-proj-app"}, // separator variant still collides
+		{"poiapi-app", "poiapi-app", "poiapi-app-app"},
+		// A 64-char name cannot carry the suffix (Sanitize truncates it back to
+		// the same string), so it falls back rather than return a colliding name.
+		{strings.Repeat("a", 64), strings.Repeat("a", 64), FallbackPackageName},
+	}
+	for _, tc := range cases {
+		got := NameAvoiding(tc.name, tc.avoid)
+		if got != tc.want {
+			t.Errorf("NameAvoiding(%q, %q) = %q, want %q", tc.name, tc.avoid, got, tc.want)
+		}
+		// Whatever comes back must never collide with what it was told to avoid.
+		if tc.avoid != "" && slugutil.Canonical(got) == slugutil.Canonical(tc.avoid) {
+			t.Errorf("NameAvoiding(%q, %q) = %q, which still collides", tc.name, tc.avoid, got)
 		}
 	}
 }

@@ -76,3 +76,62 @@ _binroot_run_executes() {
   assert_contains "greet ran from the installed package"
 }
 it "run <cmd> executes a bin script under the package root" _binroot_run_executes
+
+# PR #87 review (T5): `root` is manifest-supplied too, so a registry package can
+# use it to reach outside its own install directory — the bin path itself looks
+# innocent. Serve a hand-built archive whose manifest sets root:"../../.." and
+# check that a file in the CONSUMER's project directory is neither made
+# executable nor runnable.
+_binroot_escaping_root_fixtures() {  # <dir>
+  local dir="$1"; mkdir -p "$dir"
+  local build; build="$(mktemp -d "$_SANDBOX_ROOT/escfx.XXXXXX")"
+  (
+    cd "$build"
+    # Hand-built: `pack` would reject this manifest, which is the point — the
+    # consumer must not trust what a registry serves.
+    cat > fglpkg.json <<'MANIFEST'
+{ "name":"demo.pkg","version":"1.0.0","description":"Escaping root","genero":">=3.20",
+  "license":"MIT","author":"fglpkg tests","root":"../../..","bin":{"greet":"victim.sh"} }
+MANIFEST
+    printf 'stub' > mod.42m
+    python3 -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1],'w'); z.write('fglpkg.json'); z.write('mod.42m'); z.close()" \
+      "$dir/demo-pkg-1.0.0-genero6.zip" || exit 1
+  ) || return 1
+  cat > "$dir/packages.json" <<'META'
+{
+  "packages": [
+    { "slug": "demo-pkg", "name": "demo.pkg", "description": "Escaping root", "genero": ">=3.20",
+      "owner": { "partner_id": "mock", "name": "fglpkg tests" },
+      "versions": [
+        { "version":"1.0.0", "genero":">=3.20", "author":"fglpkg tests", "license":"MIT",
+          "artifacts":[ { "variant":"genero6", "zip":"demo-pkg-1.0.0-genero6.zip" } ] }
+      ] }
+  ]
+}
+META
+}
+
+_binroot_escaping_root_is_refused() {
+  local fx; fx="$(mktemp -d "$_SANDBOX_ROOT/escroot.XXXXXX")"
+  _binroot_escaping_root_fixtures "$fx" || { _diag "could not build fixtures"; return 1; }
+  mock_registry_start "$fx"
+
+  # A file of the consumer's own, outside .fglpkg/packages/demo-pkg/.
+  cat > victim.sh <<'VICTIM'
+#!/bin/sh
+echo "OUTSIDE-FILE EXECUTED"
+VICTIM
+  chmod 644 victim.sh
+
+  run install demo.pkg@1.0.0
+  # Whether the install refuses or simply declines to touch the file, the
+  # invariant is the same: nothing outside the package becomes executable.
+  if [[ -x victim.sh ]]; then
+    _diag "a file outside the package was made executable by install"
+    return 1
+  fi
+
+  run run greet
+  assert_not_contains "OUTSIDE-FILE EXECUTED"
+}
+it "an installed package's escaping root cannot reach outside the package" _binroot_escaping_root_is_refused
