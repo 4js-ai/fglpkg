@@ -4336,12 +4336,16 @@ func cmdRun(args []string) error {
 		scriptArgs = args[1:]
 	}
 
-	scriptPath, pkgName, err := findBinCommand(commandName)
+	scriptPath, pkgName, source, err := findBinCommand(commandName)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("Running %q from package %s...\n", commandName, pkgName)
+	if source == "project" {
+		fmt.Printf("Running %q from the current project (%s)...\n", commandName, pkgName)
+	} else {
+		fmt.Printf("Running %q from package %s...\n", commandName, pkgName)
+	}
 
 	cmd, err := buildScriptCommand(scriptPath, scriptArgs)
 	if err != nil {
@@ -4351,7 +4355,17 @@ func cmdRun(args []string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	return cmd.Run()
+	if runErr := cmd.Run(); runErr != nil {
+		// A project script committed without the executable bit (e.g. a checkout
+		// with core.fileMode=false) fails with a raw permission error — installed
+		// scripts are chmod-ed by the installer, project scripts are not. Add a
+		// hint rather than surfacing the bare fork/exec error.
+		if errors.Is(runErr, os.ErrPermission) {
+			return fmt.Errorf("%w\n  the script may not be executable — try: chmod +x %s", runErr, scriptPath)
+		}
+		return runErr
+	}
+	return nil
 }
 
 // buildScriptCommand creates an exec.Cmd appropriate for the current OS.
@@ -4398,6 +4412,18 @@ func cmdRunList() error {
 	}
 	var entries []entry
 
+	// addBins appends one manifest's bin commands, sorted for deterministic output.
+	addBins := func(m *manifest.Manifest, source string) {
+		cmds := make([]string, 0, len(m.Bin))
+		for cmd := range m.Bin {
+			cmds = append(cmds, cmd)
+		}
+		sort.Strings(cmds)
+		for _, cmd := range cmds {
+			entries = append(entries, entry{command: cmd, pkgName: m.Name, source: source, script: m.Bin[cmd]})
+		}
+	}
+
 	scanPackagesDir := func(packagesDir, source string) {
 		dirEntries, err := os.ReadDir(packagesDir)
 		if err != nil {
@@ -4407,36 +4433,38 @@ func cmdRunList() error {
 			if !e.IsDir() {
 				continue
 			}
-			pkgDir := filepath.Join(packagesDir, e.Name())
-			m, err := manifest.Load(pkgDir)
+			m, err := manifest.Load(filepath.Join(packagesDir, e.Name()))
 			if err != nil {
 				continue
 			}
-			// Sort command names for deterministic output.
-			cmds := make([]string, 0, len(m.Bin))
-			for cmd := range m.Bin {
-				cmds = append(cmds, cmd)
-			}
-			sort.Strings(cmds)
-			for _, cmd := range cmds {
-				entries = append(entries, entry{
-					command: cmd,
-					pkgName: m.Name,
-					source:  source,
-					script:  m.Bin[cmd],
-				})
-			}
+			addBins(m, source)
 		}
 	}
 
+	// The current project's own bin commands come first and take precedence over
+	// an installed package of the same name (GIS-566). A load failure is surfaced
+	// rather than silently looking like "no commands".
+	projectCmds := map[string]bool{}
 	if isProjectDir() {
 		wd, _ := os.Getwd()
+		// isProjectDir() is also true for a bare .fglpkg/ with no manifest (e.g.
+		// ~/.fglpkg in $HOME), so a *missing* manifest is normal and silent; only an
+		// unreadable or malformed one is worth a warning.
+		if m, err := manifest.Load("."); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "warning: cannot read project %s: %v\n", manifest.Filename, err)
+			}
+		} else {
+			addBins(m, "project")
+			for cmd := range m.Bin {
+				projectCmds[cmd] = true
+			}
+		}
 		scanPackagesDir(filepath.Join(wd, ".fglpkg", "packages"), "local")
 	}
 	// Global bin commands live under the global PACKAGE root (GIS-367), not the
 	// config/credentials home.
-	globalRoot, err := fglpkgGlobalDir()
-	if err == nil {
+	if globalRoot, err := fglpkgGlobalDir(); err == nil {
 		scanPackagesDir(filepath.Join(globalRoot, "packages"), "global")
 	}
 
@@ -4450,15 +4478,67 @@ func cmdRunList() error {
 	fmt.Printf("  %-20s %-20s %-10s %s\n", "COMMAND", "PACKAGE", "SOURCE", "SCRIPT")
 	fmt.Printf("  %-20s %-20s %-10s %s\n", "-------", "-------", "------", "------")
 	for _, e := range entries {
-		fmt.Printf("  %-20s %-20s %-10s %s\n", e.command, e.pkgName, e.source, e.script)
+		line := fmt.Sprintf("  %-20s %-20s %-10s %s", e.command, e.pkgName, e.source, e.script)
+		// An installed command the project also defines never runs — flag it so
+		// the winner is visible.
+		if e.source != "project" && projectCmds[e.command] {
+			line += "   (shadowed by project)"
+		}
+		fmt.Println(line)
 	}
 	return nil
 }
 
-// findBinCommand scans installed packages (local first, then global) for
-// a bin command matching the given name. Returns the full path to the
-// script and the owning package name.
-func findBinCommand(commandName string) (scriptPath, pkgName string, err error) {
+// rootOrDot returns a manifest root, defaulting to "." when unset.
+func rootOrDot(root string) string {
+	if root == "" {
+		return "."
+	}
+	return root
+}
+
+// projectBinScriptPath resolves a project bin's script under the package root —
+// the same base `pack` stages from — after rejecting an unsafe path (empty,
+// absolute, "/"-rooted, or ".."-escaping) with the manifest package's own rule,
+// so `run` never executes a script `pack`/`publish` would refuse to ship and the
+// two can't drift apart.
+func projectBinScriptPath(wd, root, scriptRel string) (string, error) {
+	if err := manifest.SafeRelPath("bin script path", scriptRel); err != nil {
+		return "", err
+	}
+	return filepath.Join(wd, rootOrDot(root), scriptRel), nil
+}
+
+// findBinCommand resolves a bin command by name. The current project's own
+// fglpkg.json is checked first (project-first precedence, GIS-566): its script
+// is resolved under the package root, the same base `pack` uses. Installed
+// packages are searched next (the local and global stores); a command defined by
+// more than one installed package is an ambiguity error. Returns the script
+// path, the owning name, and the source ("project" or "installed").
+func findBinCommand(commandName string) (scriptPath, pkgName, source string, err error) {
+	// The current project's own bin takes precedence over installed packages. A
+	// load failure is surfaced rather than silently skipped, now that the project
+	// manifest is a source of commands.
+	if isProjectDir() {
+		wd, _ := os.Getwd()
+		// A missing manifest is normal for a bare .fglpkg/ (e.g. ~/.fglpkg in $HOME);
+		// only surface an unreadable or malformed one.
+		if m, loadErr := manifest.Load("."); loadErr != nil {
+			if !errors.Is(loadErr, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "warning: cannot read project %s: %v\n", manifest.Filename, loadErr)
+			}
+		} else if scriptRel, ok := m.Bin[commandName]; ok {
+			full, pathErr := projectBinScriptPath(wd, m.Root, scriptRel)
+			if pathErr != nil {
+				return "", "", "", fmt.Errorf("project bin %q: %w", commandName, pathErr)
+			}
+			if _, statErr := os.Stat(full); statErr != nil {
+				return "", "", "", fmt.Errorf("project declares bin %q but its script %s (under root %q) was not found", commandName, scriptRel, rootOrDot(m.Root))
+			}
+			return full, m.Name, "project", nil
+		}
+	}
+
 	type match struct {
 		scriptPath string
 		pkgName    string
@@ -4499,7 +4579,6 @@ func findBinCommand(commandName string) (scriptPath, pkgName string, err error) 
 		globalPkgs = filepath.Join(globalRoot, "packages")
 	}
 
-	// Scan local packages first (higher priority).
 	if isProjectDir() {
 		wd, _ := os.Getwd()
 		localPkgs := filepath.Join(wd, ".fglpkg", "packages")
@@ -4513,17 +4592,17 @@ func findBinCommand(commandName string) (scriptPath, pkgName string, err error) 
 	}
 
 	if len(matches) == 0 {
-		return "", "", fmt.Errorf("command %q not found in any installed package\nRun 'fglpkg run --list' to see available commands", commandName)
+		return "", "", "", fmt.Errorf("command %q not found in this project or any installed package\nRun 'fglpkg run --list' to see available commands", commandName)
 	}
 	if len(matches) > 1 {
 		var names []string
 		for _, m := range matches {
 			names = append(names, m.pkgName)
 		}
-		return "", "", fmt.Errorf("command %q is defined by multiple packages: %s\nRemove or rename conflicting packages to resolve", commandName, strings.Join(names, ", "))
+		return "", "", "", fmt.Errorf("command %q is defined by multiple packages: %s\nRemove or rename conflicting packages to resolve", commandName, strings.Join(names, ", "))
 	}
 
-	return matches[0].scriptPath, matches[0].pkgName, nil
+	return matches[0].scriptPath, matches[0].pkgName, "installed", nil
 }
 
 // ─── docs ────────────────────────────────────────────────────────────────────

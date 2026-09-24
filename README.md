@@ -470,7 +470,7 @@ fglpkg workspace info                    # Show workspace details
 
 # Scripts (bin)
 fglpkg run --list                        # List all available commands
-fglpkg run <command> [-- args...]        # Run a script from an installed package
+fglpkg run <command> [-- args...]        # Run a script from this project or an installed package
 
 # Documentation
 fglpkg docs <package>                    # List documentation files

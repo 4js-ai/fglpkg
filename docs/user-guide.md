@@ -1518,8 +1518,8 @@ $ fglpkg run db-migrate -- --up --env production
 
 ### How It Works
 
-- `fglpkg run` scans installed packages (local first, then global) to find the named command
-- If the same command name exists in multiple packages, an error is reported listing the conflicts
+- `fglpkg run` runs the **current project's own** `bin` first, then searches installed packages (the local and global stores) — so a project can run its own scripts, and a project bin takes precedence over an installed package of the same name (`run --list` marks the shadowed installed entry)
+- If the same command name exists in multiple *installed* packages, an error is reported listing the conflicts
 - On Unix, scripts are executed directly (relying on the shebang line, e.g., `#!/bin/bash`)
 - On Windows, scripts are executed via `cmd.exe` or the appropriate interpreter based on file extension
 
