@@ -4429,6 +4429,27 @@ func cmdRunList() error {
 		}
 	}
 
+	// The current project's own bin commands come first — a project can run its
+	// own scripts, and they take precedence over an installed package of the same
+	// name (GIS-566).
+	if isProjectDir() {
+		if m, err := manifest.Load("."); err == nil {
+			cmds := make([]string, 0, len(m.Bin))
+			for cmd := range m.Bin {
+				cmds = append(cmds, cmd)
+			}
+			sort.Strings(cmds)
+			for _, cmd := range cmds {
+				entries = append(entries, entry{
+					command: cmd,
+					pkgName: m.Name,
+					source:  "project",
+					script:  m.Bin[cmd],
+				})
+			}
+		}
+	}
+
 	if isProjectDir() {
 		wd, _ := os.Getwd()
 		scanPackagesDir(filepath.Join(wd, ".fglpkg", "packages"), "local")
@@ -4455,10 +4476,27 @@ func cmdRunList() error {
 	return nil
 }
 
-// findBinCommand scans installed packages (local first, then global) for
-// a bin command matching the given name. Returns the full path to the
-// script and the owning package name.
+// findBinCommand resolves a bin command by name, checking the current project's
+// own fglpkg.json first (project-first precedence, GIS-566), then installed
+// packages (local before global). Returns the full path to the script and the
+// owning package name.
 func findBinCommand(commandName string) (scriptPath, pkgName string, err error) {
+	// The current project's own bin takes precedence over installed packages: a
+	// project runs its own scripts first. The script path is relative to the
+	// project root (GIS-566).
+	if isProjectDir() {
+		wd, _ := os.Getwd()
+		if m, loadErr := manifest.Load("."); loadErr == nil {
+			if scriptRel, ok := m.Bin[commandName]; ok {
+				full := filepath.Join(wd, scriptRel)
+				if _, statErr := os.Stat(full); statErr != nil {
+					return "", "", fmt.Errorf("project declares bin %q but its script %s was not found", commandName, scriptRel)
+				}
+				return full, m.Name, nil
+			}
+		}
+	}
+
 	type match struct {
 		scriptPath string
 		pkgName    string
