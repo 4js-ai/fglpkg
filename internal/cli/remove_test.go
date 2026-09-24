@@ -141,10 +141,16 @@ func TestCmdRemove_HookFailureNoFalseSuccess(t *testing.T) {
 // told the user nothing about the only thing `remove` can mean there (GIS-567).
 // Deleting from a store shared by every project must not be inferred from an
 // empty directory either, so the message names the flag instead.
+// The store is deliberately NOT empty: with an empty one the mutated code path
+// (no --global requirement) still errors with "no packages matched … --global",
+// which satisfies both message assertions — so the safety property has to be
+// checked on the store itself, not on the message (PR #88 review).
 func TestCmdRemove_OutsideProjectWithoutGlobalExplainsScope(t *testing.T) {
-	dir := t.TempDir() // no fglpkg.json, no .fglpkg/
-	isolateGlobalStore(t)
-	chdirTest(t, dir)
+	store := t.TempDir()
+	t.Setenv("FGLPKG_GLOBAL_DIR", store)
+	pkgDir := writeStorePackage(t, store, "fglunit")
+
+	chdirTest(t, t.TempDir()) // no fglpkg.json, no .fglpkg/
 
 	err := cmdRemove([]string{"fglunit"})
 	if err == nil {
@@ -156,6 +162,25 @@ func TestCmdRemove_OutsideProjectWithoutGlobalExplainsScope(t *testing.T) {
 	if !strings.Contains(err.Error(), "--global") {
 		t.Fatalf("the error should point at the global scope, got: %v", err)
 	}
+	// The property this test exists for: a bare remove must leave the shared
+	// store alone, even though the package it named IS installed there.
+	if _, statErr := os.Stat(pkgDir); statErr != nil {
+		t.Fatal("a bare remove outside a project must not delete from the global store")
+	}
+}
+
+// writeStorePackage puts one installed package in a global store.
+func writeStorePackage(t *testing.T, store, name string) string {
+	t.Helper()
+	pkgDir := filepath.Join(store, "packages", name)
+	if err := os.MkdirAll(pkgDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	body := `{"name":"` + name + `","version":"1.0.0"}` + "\n"
+	if err := os.WriteFile(filepath.Join(pkgDir, "fglpkg.json"), []byte(body), 0644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	return pkgDir
 }
 
 // TestCmdRemove_GlobalOutsideProjectDoesNotTouchCwd: the global path must not
@@ -163,13 +188,7 @@ func TestCmdRemove_OutsideProjectWithoutGlobalExplainsScope(t *testing.T) {
 func TestCmdRemove_GlobalOutsideProjectDoesNotTouchCwd(t *testing.T) {
 	store := t.TempDir()
 	t.Setenv("FGLPKG_GLOBAL_DIR", store)
-	pkgDir := filepath.Join(store, "packages", "fglunit")
-	if err := os.MkdirAll(pkgDir, 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(pkgDir, "fglpkg.json"), []byte(`{"name":"fglunit","version":"1.0.0"}`+"\n"), 0644); err != nil {
-		t.Fatalf("write manifest: %v", err)
-	}
+	pkgDir := writeStorePackage(t, store, "fglunit")
 
 	wd := t.TempDir()
 	chdirTest(t, wd)

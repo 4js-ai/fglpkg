@@ -278,3 +278,216 @@ func TestRemoveFromStore_MatchesNonCanonicalStoreDir(t *testing.T) {
 	}
 	assertExists(t, pkgDir, false)
 }
+
+// writeStoreWebcomponent registers a webcomponent-bearing package in the store's
+// owners sidecar and writes the files it owns. A PURE webcomponent package has
+// no packages/<name> directory at all — its manifest is deliberately not
+// extracted — so the sidecar is the only record that it is installed.
+func writeStoreWebcomponent(t *testing.T, home, pkg string, files map[string]string) []string {
+	t.Helper()
+	wcDir := filepath.Join(home, "webcomponents")
+	var paths []string
+	for rel, body := range files {
+		p := filepath.Join(wcDir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(p), err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+		paths = append(paths, p)
+	}
+	o, err := loadWCOwners(wcDir)
+	if err != nil {
+		t.Fatalf("loadWCOwners: %v", err)
+	}
+	rels := make([]string, 0, len(files))
+	for rel := range files {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+	o.Packages[pkg] = rels
+	if err := saveWCOwners(wcDir, o); err != nil {
+		t.Fatalf("saveWCOwners: %v", err)
+	}
+	return paths
+}
+
+// TestRemoveFromStore_KeepsUnrelatedWebcomponents: a webcomponent package has no
+// packages/<name> directory, so a keep-set built from packages/ contains none of
+// them — and every globally installed web component was pruned on ANY removal
+// (PR #88 review, W1).
+func TestRemoveFromStore_KeepsUnrelatedWebcomponents(t *testing.T) {
+	home := t.TempDir()
+	writeStorePkg(t, home, "demo-pkg", `{"name":"demo.pkg","version":"1.0.0"}`)
+	wcFiles := writeStoreWebcomponent(t, home, "chart-widget", map[string]string{
+		"ChartWidget/ChartWidget.html": "<html>",
+		"ChartWidget/chart.js":         "//js",
+	})
+
+	res, err := New(home, "", "", "").RemoveFromStore([]string{"demo.pkg"})
+	if err != nil {
+		t.Fatalf("RemoveFromStore: %v", err)
+	}
+	for _, p := range res.Pruned {
+		if strings.Contains(p, "webcomponent") {
+			t.Fatalf("an unrelated web component must not be pruned, got %v", res.Pruned)
+		}
+	}
+	for _, f := range wcFiles {
+		assertExists(t, f, true)
+	}
+}
+
+// TestRemoveFromStore_RemovesWebcomponentByName: a pure webcomponent package is
+// installed — its files and its owners entry are there — so it must be
+// removable by name. Scanning only packages/ made it invisible (W2).
+func TestRemoveFromStore_RemovesWebcomponentByName(t *testing.T) {
+	home := t.TempDir()
+	keptPkg := writeStorePkg(t, home, "demo-pkg", `{"name":"demo.pkg","version":"1.0.0"}`)
+	wcFiles := writeStoreWebcomponent(t, home, "chart-widget", map[string]string{
+		"ChartWidget/ChartWidget.html": "<html>",
+	})
+
+	res, err := New(home, "", "", "").RemoveFromStore([]string{"chart-widget"})
+	if err != nil {
+		t.Fatalf("RemoveFromStore: %v", err)
+	}
+	if len(res.NotFound) != 0 {
+		t.Fatalf("an installed web component must not be reported missing, got %v", res.NotFound)
+	}
+	if len(res.Removed) != 1 || res.Removed[0] != "chart-widget" {
+		t.Fatalf("expected chart-widget to be removed, got %v", res.Removed)
+	}
+	for _, f := range wcFiles {
+		assertExists(t, f, false)
+	}
+	assertExists(t, keptPkg, true) // the unrelated BDL package is untouched
+}
+
+// TestRemoveFromStore_RemovesMixedPackageBundles: a package with BOTH a BDL
+// directory and webcomponent bundles loses both.
+func TestRemoveFromStore_RemovesMixedPackageBundles(t *testing.T) {
+	home := t.TempDir()
+	pkgDir := writeStorePkg(t, home, "mixed-pkg", `{"name":"mixed.pkg","version":"1.0.0"}`)
+	wcFiles := writeStoreWebcomponent(t, home, "mixed-pkg", map[string]string{
+		"MixedWidget/MixedWidget.html": "<html>",
+	})
+
+	if _, err := New(home, "", "", "").RemoveFromStore([]string{"mixed.pkg"}); err != nil {
+		t.Fatalf("RemoveFromStore: %v", err)
+	}
+	assertExists(t, pkgDir, false)
+	for _, f := range wcFiles {
+		assertExists(t, f, false)
+	}
+}
+
+// TestRemoveFromStore_KeepsJarNoInstalledPackageDeclares: the global store also
+// holds JARs installed FOR A PROJECT (`install --global` from inside one records
+// them in the project's manifest, which the store never sees). Sweeping
+// everything "unreferenced" deleted those and broke the project's classpath
+// (PR #88 review, J1) — the acceptance criterion GIS-567 words as "does not
+// touch any project".
+func TestRemoveFromStore_KeepsJarNoInstalledPackageDeclares(t *testing.T) {
+	home := t.TempDir()
+	writeStorePkg(t, home, "demo-pkg",
+		`{"name":"demo.pkg","version":"1.0.0","dependencies":{"java":[{"groupId":"org.x","artifactId":"only-demo","version":"1.0"}]}}`)
+	projectJar := writeStoreJar(t, home, "gson-2.10.1.jar") // a project's, not any installed package's
+	ownJar := writeStoreJar(t, home, "only-demo-1.0.jar")
+
+	res, err := New(home, "", "", "").RemoveFromStore([]string{"demo.pkg"})
+	if err != nil {
+		t.Fatalf("RemoveFromStore: %v", err)
+	}
+	assertExists(t, ownJar, false)    // the removed package's own JAR goes
+	assertExists(t, projectJar, true) // somebody else's stays
+	for _, p := range res.Pruned {
+		if strings.Contains(p, "gson") {
+			t.Fatalf("a JAR no installed package declares must not be pruned, got %v", res.Pruned)
+		}
+	}
+}
+
+// TestRemoveFromStore_KeepsJarWhenAKeptManifestIsUnreadable: a remaining package
+// whose manifest cannot be read has unknown JAR requirements, so a candidate
+// that looks unreferenced only because of that gap is kept and reported. A
+// leftover JAR costs disk; a deleted one breaks a package that is still there.
+func TestRemoveFromStore_KeepsJarWhenAKeptManifestIsUnreadable(t *testing.T) {
+	home := t.TempDir()
+	writeStorePkg(t, home, "demo-pkg",
+		`{"name":"demo.pkg","version":"1.0.0","dependencies":{"java":[{"groupId":"org.x","artifactId":"shared","version":"2.0"}]}}`)
+	writeStorePkg(t, home, "broken", `{not json`) // still installed; requirements unknown
+	shared := writeStoreJar(t, home, "shared-2.0.jar")
+
+	res, err := New(home, "", "", "").RemoveFromStore([]string{"demo.pkg"})
+	if err != nil {
+		t.Fatalf("RemoveFromStore: %v", err)
+	}
+	assertExists(t, shared, true)
+	if len(res.KeptJars) != 1 || res.KeptJars[0] != "shared-2.0.jar" {
+		t.Fatalf("the withheld JAR should be reported, got %v", res.KeptJars)
+	}
+	if len(res.Pruned) != 0 {
+		t.Fatalf("nothing should have been pruned, got %v", res.Pruned)
+	}
+}
+
+// TestRemoveFromStore_NonCanonicalDirGraphLinesUp: dependency names in a
+// manifest are canonicalized, so a legacy store directory that is not itself
+// canonical must still line up in the graph — otherwise its dependents and
+// orphans silently go unreported (PR #88 review nit).
+func TestRemoveFromStore_NonCanonicalDirGraphLinesUp(t *testing.T) {
+	home := t.TempDir()
+	// "Demo_Pkg" canonicalizes to "demo-pkg", which is how tool declares it.
+	writeStorePkg(t, home, "Demo_Pkg", `{"name":"Demo_Pkg","version":"1.0.0"}`)
+	writeStorePkg(t, home, "tool", `{"name":"tool","version":"1.0.0","dependencies":{"fgl":{"demo.pkg":"^1.0.0"}}}`)
+
+	// Removing the non-canonical package must warn that tool still needs it.
+	res, err := New(home, "", "", "").RemoveFromStore([]string{"demo-pkg"})
+	if err != nil {
+		t.Fatalf("RemoveFromStore: %v", err)
+	}
+	if deps := res.StillRequiredBy["Demo_Pkg"]; len(deps) != 1 || deps[0] != "tool" {
+		t.Fatalf("expected tool reported as a remaining dependent of Demo_Pkg, got %v", res.StillRequiredBy)
+	}
+
+	// And the reverse: removing tool must report the non-canonical package as an
+	// orphan it pulled in.
+	home2 := t.TempDir()
+	writeStorePkg(t, home2, "Demo_Pkg", `{"name":"Demo_Pkg","version":"1.0.0"}`)
+	writeStorePkg(t, home2, "tool", `{"name":"tool","version":"1.0.0","dependencies":{"fgl":{"demo.pkg":"^1.0.0"}}}`)
+	res2, err := New(home2, "", "", "").RemoveFromStore([]string{"tool"})
+	if err != nil {
+		t.Fatalf("RemoveFromStore: %v", err)
+	}
+	if len(res2.Orphaned) != 1 || res2.Orphaned[0] != "Demo_Pkg" {
+		t.Fatalf("expected Demo_Pkg reported as orphaned, got %v", res2.Orphaned)
+	}
+}
+
+// TestRemoveFromStore_KeepsWebcomponentWithNonCanonicalOwner: the webcomponent
+// keep-set must be keyed by the owners sidecar's OWN package names, not by the
+// canonical key the scan uses internally. With a non-canonical owner the two
+// differ, and a canonical keep-set silently prunes a web component that should
+// survive.
+func TestRemoveFromStore_KeepsWebcomponentWithNonCanonicalOwner(t *testing.T) {
+	home := t.TempDir()
+	writeStorePkg(t, home, "demo-pkg", `{"name":"demo.pkg","version":"1.0.0"}`)
+	wcFiles := writeStoreWebcomponent(t, home, "Chart_Widget", map[string]string{
+		"ChartWidget/ChartWidget.html": "<html>",
+	})
+
+	res, err := New(home, "", "", "").RemoveFromStore([]string{"demo.pkg"})
+	if err != nil {
+		t.Fatalf("RemoveFromStore: %v", err)
+	}
+	for _, p := range res.Pruned {
+		if strings.Contains(p, "webcomponent") {
+			t.Fatalf("an unrelated web component must survive whatever its owner name looks like, got %v", res.Pruned)
+		}
+	}
+	for _, f := range wcFiles {
+		assertExists(t, f, true)
+	}
+}

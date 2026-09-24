@@ -634,11 +634,14 @@ Everything above is about a *project's* dependencies. **Outside a project**, the
 fglpkg remove fglunit --global     # from anywhere; nothing is written to the current directory
 ```
 
-The store keeps no manifest or lock of its own, so what is installed — and what depends on what — is recovered by scanning the bundled `fglpkg.json` of each installed package. The removal:
+The store keeps no manifest or lock of its own, so what is installed — and what depends on what — is recovered by scanning: the bundled `fglpkg.json` of each installed package, plus the ownership record for web components (which install only into `webcomponents/` and so have no package directory of their own). Everything the removal deletes is something the named package owns:
 
-- deletes the named package, and prunes any JAR or web-component bundle that no remaining package still declares;
-- **warns** if another installed package still depends on what you removed (the store has no lock that would catch it later);
-- **reports, but does not delete,** packages that were pulled in as dependencies of what you removed and are now referenced by nothing. The store cannot tell a package installed as a dependency from one you installed in its own right, so it names them and leaves the choice to you.
+- the named package goes, along with its web-component bundles and any JAR **it declared** that no remaining package declares;
+- anything else in the store stays. A shared store also holds artifacts put there for a *project* — `fglpkg install --global` run inside a project records the dependency in that project's `fglpkg.json` and stores the JARs here — and those are invisible from inside the store. "No installed package declares this" does not mean "nothing needs it";
+- it **warns** if another installed package still depends on what you removed (the store has no lock that would catch it later);
+- it **reports, but does not delete,** packages that were pulled in as dependencies of what you removed and are now referenced by nothing. The store cannot tell a package installed as a dependency from one you installed in its own right, so it names them and leaves the choice to you.
+
+Web components can be removed by name like any other package, even though `fglpkg list --global` does not list them.
 
 A package that isn't in the store is reported as such — never a ✓. Because deleting from a store shared by every project shouldn't be inferred from an empty directory, `--global` is required: a bare `fglpkg remove <pkg>` outside a project tells you so rather than guessing.
 

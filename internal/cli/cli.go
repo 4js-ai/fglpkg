@@ -1221,7 +1221,8 @@ func removeFromGlobalStore(globalHome string, pkgArgs []string) error {
 	}
 	if len(res.Removed) == 0 {
 		return fmt.Errorf("no packages matched in the global store (%s); nothing was removed\n"+
-			"Run 'fglpkg list --global' to see what is installed there", globalHome)
+			"Run 'fglpkg list --global' to see the packages installed there "+
+			"(web components are not listed, but can still be removed by name)", globalHome)
 	}
 
 	for _, name := range res.Removed {
@@ -1236,6 +1237,13 @@ func removeFromGlobalStore(globalHome string, pkgArgs []string) error {
 		if dependents := res.StillRequiredBy[name]; len(dependents) > 0 {
 			fmt.Printf("  warning: %s is still required by %s in the global store\n", name, strings.Join(dependents, ", "))
 		}
+	}
+	if len(res.KeptJars) > 0 {
+		// The sweep held back because another installed package's manifest could
+		// not be read, so its JAR requirements are unknown. Say so rather than
+		// leaving the user to wonder why a JAR stayed.
+		fmt.Printf("  Note: kept %s — another installed package has an unreadable %s, so it cannot be shown to be unused\n",
+			strings.Join(res.KeptJars, ", "), manifest.Filename)
 	}
 	if len(res.Orphaned) > 0 {
 		// Not deleted: the store cannot tell a package installed as a dependency
