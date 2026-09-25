@@ -1107,6 +1107,26 @@ func cmdRemove(args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// Outside a project there is no manifest to remove a dependency FROM, so the
+	// only thing `remove` can mean is uninstalling from the shared global store —
+	// the counterpart of `install <pkg> --global` from anywhere (GIS-565), which
+	// until now had no way back out (GIS-567). Keyed exactly like
+	// globalToolInstall, so `--global` INSIDE a project keeps its existing
+	// meaning: drop the dependency from this project's manifest, leave the shared
+	// store alone.
+	if !isLocal && !isProjectDir() {
+		if !forceGlobal {
+			// Deleting from a store shared by every project is not something to
+			// infer from an empty directory — the user may simply be in the wrong
+			// one. Ask for the flag that says so.
+			return fmt.Errorf("no %s in the current directory, so there is no project to remove %s from\n"+
+				"To uninstall from the shared global store, name the scope explicitly:\n  fglpkg remove %s --global",
+				manifest.Filename, strings.Join(pkgArgs, " "), strings.Join(pkgArgs, " "))
+		}
+		return removeFromGlobalStore(home, pkgArgs)
+	}
+
 	m, err := manifest.Load(".")
 	if err != nil {
 		return fmt.Errorf("failed to load %s: %w", manifest.Filename, err)
@@ -1176,6 +1196,60 @@ func cmdRemove(args []string) error {
 	}
 	for _, p := range pruned {
 		fmt.Printf("  pruned %s\n", p)
+	}
+	return nil
+}
+
+// removeFromGlobalStore uninstalls packages from the shared global store, the
+// way `install <pkg> --global` put them there (GIS-567). No project manifest is
+// read or written: the store is tracked by scanning, so the installer recovers
+// both what is installed and what depends on what from the bundled manifests.
+//
+// A bare installer is enough — nothing is downloaded — and it is built on the
+// global home, so every path it touches is inside the store.
+func removeFromGlobalStore(globalHome string, pkgArgs []string) error {
+	inst := installer.New(globalHome, "", "", "")
+	res, err := inst.RemoveFromStore(pkgArgs)
+	if err != nil {
+		return err
+	}
+
+	// A name that was never installed is a warning, never a ✓ — mistyping a
+	// package must not read as success (GIS-564).
+	for _, name := range res.NotFound {
+		fmt.Printf("warning: %q is not installed in the global store; nothing to remove\n", name)
+	}
+	if len(res.Removed) == 0 {
+		return fmt.Errorf("no packages matched in the global store (%s); nothing was removed\n"+
+			"Run 'fglpkg list --global' to see the packages installed there "+
+			"(web components are not listed, but can still be removed by name)", globalHome)
+	}
+
+	for _, name := range res.Removed {
+		fmt.Printf("✓ Removed %s from the global store\n", name)
+	}
+	for _, p := range res.Pruned {
+		fmt.Printf("  pruned %s\n", p)
+	}
+	// Leaving a dependent unsatisfied is the user's call, but it must not be
+	// silent — the store has no lock that would catch it later.
+	for _, name := range res.Removed {
+		if dependents := res.StillRequiredBy[name]; len(dependents) > 0 {
+			fmt.Printf("  warning: %s is still required by %s in the global store\n", name, strings.Join(dependents, ", "))
+		}
+	}
+	if len(res.KeptJars) > 0 {
+		// The sweep held back because another installed package's manifest could
+		// not be read, so its JAR requirements are unknown. Say so rather than
+		// leaving the user to wonder why a JAR stayed.
+		fmt.Printf("  Note: kept %s — another installed package has an unreadable %s, so it cannot be shown to be unused\n",
+			strings.Join(res.KeptJars, ", "), manifest.Filename)
+	}
+	if len(res.Orphaned) > 0 {
+		// Not deleted: the store cannot tell a package installed as a dependency
+		// from one installed in its own right (see RemoveFromStore).
+		fmt.Printf("  Note: %s no longer required by anything installed; remove with 'fglpkg remove %s --global'\n",
+			strings.Join(res.Orphaned, ", "), strings.Join(res.Orphaned, " "))
 	}
 	return nil
 }
