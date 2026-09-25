@@ -562,6 +562,8 @@ fglpkg install <pkg> --global    # force the shared global store (default ~/.fgl
 
 **`--global` outside a project** installs the package (and its dependencies) into the shared global store and writes **nothing** to the current directory — no `fglpkg.json`, no `fglpkg-lock.json`, no `.fglpkg/`. The global store keeps no manifest or lock of its own; it is tracked by scanning what is installed (see `fglpkg list --global`). Inside a project, `--global` still records the dependency in the project's `fglpkg.json` while installing to the shared store. If you pass both `--local` and `--global`, `--local` wins.
 
+A directory counts as a project when it holds an `fglpkg.json` or a local `.fglpkg/` install directory. Your **home directory is not** a project, even though it holds `~/.fglpkg` — that is fglpkg's own home (config, credentials, and by default the global store), not a local install directory. Global commands run from `$HOME` therefore behave as they do anywhere else outside a project.
+
 These flags work on `install`, `remove`, `update`, `list`, and `env`.
 
 When using local installs, add `.fglpkg/` to your `.gitignore`.

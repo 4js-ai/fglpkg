@@ -931,12 +931,61 @@ func installImpliesNewProject(f installFlags, currentDirIsProject bool) bool {
 
 // isProjectDir returns true if the current directory looks like a project
 // (has a .fglpkg/ directory or a fglpkg.json file).
+// isProjectDir reports whether the current directory is an fglpkg project.
+//
+// `.fglpkg/` names two unrelated things: a project's local install directory,
+// and (as ~/.fglpkg) the fglpkg home holding config and credentials. A bare
+// marker cannot tell them apart, so $HOME counted as a project and every global
+// command silently fell back to project behaviour there — `install --global`
+// wrote fglpkg.json and fglpkg-lock.json into $HOME, and `remove --global` only
+// edited that accidental manifest while leaving the store untouched (GIS-571).
+// $HOME is probably the most common place to run a global command, so GIS-565
+// and GIS-567 were both inert exactly where they mattered most.
+//
+// The directory marker therefore counts only when it is NOT one of fglpkg's own
+// directories. A manifest is unambiguous and still decides on its own, which is
+// what keeps a genuine project detected even when FGLPKG_GLOBAL_DIR is pointed
+// at that project's own .fglpkg/ — the one case where a directory legitimately
+// is both.
+//
+// Keyed here rather than at each call site so install, remove and run are all
+// covered by the same rule.
 func isProjectDir() bool {
-	if _, err := os.Stat(".fglpkg"); err == nil {
+	if fi, err := os.Stat(".fglpkg"); err == nil && !isFglpkgOwnDir(fi) {
 		return true
 	}
 	if _, err := os.Stat(manifest.Filename); err == nil {
 		return true
+	}
+	return false
+}
+
+// isFglpkgOwnDir reports whether fi is one of fglpkg's OWN directories rather
+// than a project's local install directory.
+//
+// Identity is decided by os.SameFile, not by comparing path strings: $HOME and
+// the working directory routinely differ by a symlink (on macOS /tmp is
+// /private/tmp, and home directories are often symlinked) or by case (macOS and
+// Windows are case-insensitive), and either difference would defeat a textual
+// match and leave the bug in place for the very users who hit it.
+//
+// $FGLDIR/fglpkg — the third entry in fglpkgGlobalDir()'s precedence chain — is
+// deliberately not consulted. Its base name is "fglpkg", so it can never be the
+// "./.fglpkg" being tested; and calling fglpkgGlobalDir() from here would emit
+// that function's FGLDIR-relocation note from commands which never resolve the
+// global store at all.
+func isFglpkgOwnDir(fi os.FileInfo) bool {
+	candidates := []string{strings.TrimSpace(os.Getenv("FGLPKG_GLOBAL_DIR"))}
+	if home, err := fglpkgHome(); err == nil {
+		candidates = append(candidates, home)
+	}
+	for _, dir := range candidates {
+		if dir == "" {
+			continue
+		}
+		if ofi, err := os.Stat(dir); err == nil && os.SameFile(fi, ofi) {
+			return true
+		}
 	}
 	return false
 }
