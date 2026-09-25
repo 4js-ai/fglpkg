@@ -2762,12 +2762,17 @@ func stagePackage(stageDir string, m *manifest.Manifest) (empty bool, err error)
 		includeSet[filepath.Clean(inc)] = true
 	}
 
+	// Where each bin script landed in the archive, filled in by the BDL walk and
+	// used to keep the shipped manifest's `bin` consistent with it (GIS-570).
+	var binArchivePaths map[string]string
+
 	// Mixed packages run BOTH walkers. A pure-WC manifest skips the BDL walk
 	// (HasBDLContent returns false); a pure-BDL manifest skips the webcomponent
 	// walk (HasWebcomponents returns false).
 	if m.HasBDLContent() || !m.HasWebcomponents() {
 		before := snapshot()
-		if err := stageBDLFiles(stageDir, m, ignore, staged, includeSet); err != nil {
+		binArchivePaths, err = stageBDLFiles(stageDir, m, ignore, staged, includeSet)
+		if err != nil {
 			return false, err
 		}
 		markAssets(before)
@@ -2815,6 +2820,12 @@ func stagePackage(stageDir string, m *manifest.Manifest) (empty bool, err error)
 	// "lib/profiles/x.4gp" in its manifest while the file sits at
 	// "profiles/x.4gp", and env's existence check would silently drop it.
 	pub.Profile = profilePaths
+	// Same reason as `profile` above, for `bin`: author-side paths are relative
+	// to `root`, and the archive prefix and `root` do not always move together
+	// (GIS-570).
+	if err := rebaseBinToArchive(pub, binArchivePaths); err != nil {
+		return false, err
+	}
 	if err := recordGeneroPackages(pub, staged, m.Programs); err != nil {
 		return false, err
 	}
@@ -2872,7 +2883,10 @@ func filesPatternMatch(pattern, base, relToRoot string, relToRootErr error) bool
 // manifest's `files` patterns (defaulting to *.42m/*.42f/*.sch) and declared
 // `bin` scripts, and stages each match at its path rebased under importRoot.
 // Files listed in `include` are skipped here — they are folded in separately.
-func stageBDLFiles(stageDir string, m *manifest.Manifest, ignore *ignoreSet, staged map[string]string, includeSet map[string]bool) error {
+// stageBDLFiles returns the archive path of each staged bin script, keyed by the
+// script path the manifest declares, so the caller can make the shipped
+// manifest agree with the archive (see rebaseBinToArchive).
+func stageBDLFiles(stageDir string, m *manifest.Manifest, ignore *ignoreSet, staged map[string]string, includeSet map[string]bool) (map[string]string, error) {
 	root := m.Root
 	if root == "" {
 		root = "."
@@ -2922,19 +2936,22 @@ func stageBDLFiles(stageDir string, m *manifest.Manifest, ignore *ignoreSet, sta
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("error walking root %q: %w", root, err)
+		return nil, fmt.Errorf("error walking root %q: %w", root, err)
 	}
 
 	// Bin scripts are always shipped, even if .fglpkgignore would exclude them
 	// — dropping a declared `bin` script would silently break the package.
+	// Each script's archive path is reported back so the shipped manifest can
+	// describe where the file actually landed (see rebaseBinToArchive).
+	binArchivePaths := map[string]string{}
 	for _, scriptPath := range m.BinFiles() {
 		fullPath := filepath.Join(root, scriptPath)
 		info, err := os.Stat(fullPath)
 		if err != nil {
-			return fmt.Errorf("bin script %q not found: %w", scriptPath, err)
+			return nil, fmt.Errorf("bin script %q not found: %w", scriptPath, err)
 		}
 		if info.IsDir() {
-			return fmt.Errorf("bin script %q is a directory, not a file", scriptPath)
+			return nil, fmt.Errorf("bin script %q is a directory, not a file", scriptPath)
 		}
 		relPath, relErr := filepath.Rel(".", fullPath)
 		if relErr != nil {
@@ -2942,12 +2959,63 @@ func stageBDLFiles(stageDir string, m *manifest.Manifest, ignore *ignoreSet, sta
 		}
 		archivePath, err := stagePathFor(m.ImportRoot, relPath, kindFile)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if err := stageFile(stageDir, archivePath, fullPath, staged); err != nil {
-			return err
+			return nil, err
 		}
+		binArchivePaths[scriptPath] = filepath.ToSlash(archivePath)
 	}
+	return binArchivePaths, nil
+}
+
+// rebaseBinToArchive rewrites the shipped manifest's `bin` paths so they stay
+// relative to the SHIPPED `root` — the base a consumer resolves them against.
+//
+// Author-side `bin` paths are relative to `root`, but staging strips
+// `importRoot`, and PublishCopy can only compensate by rewriting `root` when
+// `root` sits under `importRoot`. In the other legal layout — `importRoot`
+// inside `root`, e.g. root "." with importRoot "lib", which Validate allows —
+// the rebase would escape, so `root` is left alone and the shipped `bin` still
+// carried the author's `lib/` prefix while the file sat at the archive root.
+// Nothing could then resolve the script: the install failed outright on the
+// executable-bit pass (GIS-570).
+//
+// Deriving each path from where the file actually landed makes the shipped
+// manifest self-consistent in every layout. It is a no-op in the layouts that
+// already worked, because there `root` and the archive prefix move together.
+// This mirrors what pack already does for `profile`, which is rewritten to its
+// archive path for the same reason.
+func rebaseBinToArchive(pub *manifest.Manifest, binArchivePaths map[string]string) error {
+	if len(pub.Bin) == 0 || len(binArchivePaths) == 0 {
+		return nil
+	}
+	shippedRoot := pub.RootOrDot()
+	rebased := make(map[string]string, len(pub.Bin))
+	for cmd, scriptPath := range pub.Bin {
+		archivePath, ok := binArchivePaths[scriptPath]
+		if !ok {
+			// Not staged by the BDL walk (a pure-webcomponent package cannot
+			// declare a bin, so this should be unreachable) — leave it as the
+			// author wrote it rather than invent a path.
+			rebased[cmd] = scriptPath
+			continue
+		}
+		rel, err := filepath.Rel(shippedRoot, filepath.FromSlash(archivePath))
+		if err != nil {
+			return fmt.Errorf("cannot place bin script %q under root %q: %w", scriptPath, shippedRoot, err)
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == ".." || strings.HasPrefix(rel, "../") {
+			// The staged file lies outside the shipped root, so no consumer
+			// could resolve it. Fail the pack rather than ship a manifest that
+			// only breaks at install time.
+			return fmt.Errorf("bin script %q lands at %q in the archive, outside root %q — "+
+				"adjust root/importRoot so the script is inside the package root", scriptPath, archivePath, shippedRoot)
+		}
+		rebased[cmd] = rel
+	}
+	pub.Bin = rebased
 	return nil
 }
 

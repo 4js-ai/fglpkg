@@ -135,3 +135,61 @@ VICTIM
   assert_not_contains "OUTSIDE-FILE EXECUTED"
 }
 it "an installed package's escaping root cannot reach outside the package" _binroot_escaping_root_is_refused
+
+# GIS-570: `importRoot` may sit INSIDE `root` (root ".", importRoot "lib" — the
+# shape `fglpkg init` scaffolds). PublishCopy cannot rebase `root` there
+# (filepath.Rel("lib",".") escapes), so it leaves root alone while staging
+# strips the lib/ prefix from the file. The shipped manifest then pointed at
+# "lib/scripts/greet.sh" while the script sat at "scripts/greet.sh", and the
+# install failed on the executable-bit pass — same symptom as the root bug
+# above, different cause.
+_binroot_importroot_inside_root_fixtures() {  # <dir>
+  local dir="$1"; mkdir -p "$dir"
+  local build; build="$(mktemp -d "$_SANDBOX_ROOT/irfx.XXXXXX")"
+  (
+    cd "$build"
+    cat > fglpkg.json <<'EOF2'
+{ "name":"demo.pkg","version":"1.0.0","description":"importRoot inside root",
+  "genero":">=3.20","license":"MIT","author":"fglpkg tests",
+  "root":".","importRoot":"lib","files":["*.42m"],
+  "bin":{"greet":"lib/scripts/greet.sh"} }
+EOF2
+    mkdir -p lib/scripts
+    printf 'stub' > lib/mod.42m
+    cat > lib/scripts/greet.sh <<'EOF2'
+#!/bin/sh
+echo "greet ran from the stripped layout"
+EOF2
+    chmod +x lib/scripts/greet.sh
+    "$FGLPKG" pack -o "$dir/demo-pkg-1.0.0-genero6.zip" </dev/null >/dev/null 2>&1 || exit 1
+  ) || return 1
+  cat > "$dir/packages.json" <<'EOF2'
+{
+  "packages": [
+    { "slug": "demo-pkg", "name": "demo.pkg", "description": "importRoot inside root", "genero": ">=3.20",
+      "owner": { "partner_id": "mock", "name": "fglpkg tests" },
+      "versions": [
+        { "version":"1.0.0", "genero":">=3.20", "author":"fglpkg tests", "license":"MIT",
+          "artifacts":[ { "variant":"genero6", "zip":"demo-pkg-1.0.0-genero6.zip" } ] }
+      ] }
+  ]
+}
+EOF2
+}
+
+_binroot_importroot_inside_root() {
+  local fx; fx="$(mktemp -d "$_SANDBOX_ROOT/irroot.XXXXXX")"
+  _binroot_importroot_inside_root_fixtures "$fx" || { _diag "could not build fixtures"; return 1; }
+  mock_registry_start "$fx"
+
+  run install demo.pkg@1.0.0
+  assert_success
+  assert_not_contains "bin script permissions"
+  # The lib/ prefix is stripped in the archive, so the script lands at the root.
+  assert_file ".fglpkg/packages/demo-pkg/scripts/greet.sh"
+
+  run run greet
+  assert_success
+  assert_contains "greet ran from the stripped layout"
+}
+it "a bin resolves when importRoot sits inside root" _binroot_importroot_inside_root
