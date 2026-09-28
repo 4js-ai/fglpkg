@@ -25,12 +25,21 @@ var pinnedRoots = []Root{
 	// lives in the binary. Rotating it requires a new CLI release.
 	{KeyID: "fglpkg-release-root-1", PubB64: "ZXf5zT+FnkZyYsyEL4mO51cS0zi2q1FNoR4E7ZKN4TE="},
 
-	// Genero Intelligence package-signing root (GIS-244, verify-on-install).
-	// root-test-1 is the GI *test* registry
-	// (genero-intelligence-test.michael-folcher.workers.dev) root; the
-	// production registry root is added alongside it at customer-release time,
-	// so old+new roots can overlap across a rotation.
+	// Genero Intelligence package-signing roots (GIS-244, verify-on-install).
+	// Both registries are pinned so a client verifies against either without a
+	// rebuild: root-test-1 is the GI *test* registry
+	// (genero-intelligence-test.michael-folcher.workers.dev), root-prod-1 the
+	// production registry (service.generointelligence.ai). Keeping both listed
+	// is what lets old and new roots overlap across a rotation.
+	//
+	// root-prod-1 was minted offline on 2026-09-28 with
+	// `gen-signing-key.mjs init-root --rootid root-prod-1`; its private half has
+	// never touched a repo, CI, or the Worker. Until a release carrying this
+	// entry reaches customers, production must not publish its keys manifest —
+	// Manifest.Verify fails closed, so an unpinned root breaks verification for
+	// every client in the field.
 	{KeyID: "root-test-1", PubB64: "IT1y7PBb9/ZXkbIuWcAPRSANiez/A3yLe9z5ps+DoXk="},
+	{KeyID: "root-prod-1", PubB64: "IHTiMqz3Rx+FI9Y8wVOPO06YT7xmV+V/BqyqvG+/bpQ="},
 }
 
 // PinnedRoots returns the root trust anchors baked into this binary.
