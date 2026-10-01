@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/4js-mikefolcher/fglpkg/internal/config"
 	"github.com/4js-mikefolcher/fglpkg/internal/registry"
 	"github.com/4js-mikefolcher/fglpkg/internal/resolver"
 	"github.com/4js-mikefolcher/fglpkg/internal/semver"
@@ -118,3 +119,118 @@ func TestRepositorySetResolveNamesTheBuildsThatExist(t *testing.T) {
 		}
 	}
 }
+
+// ── RepositorySet.Resolve steps down when a provider refuses a version ───────
+
+// `install <pkg>` resolves "latest" through RepositorySet.Resolve, not the
+// dependency resolver. Artifactory reports no variants when it lists versions,
+// so nothing can be skipped before the per-version fetch — and when that fetch
+// first started refusing a wrong-major build, `install <pkg>` began failing
+// outright for a package whose newest release is built only for another Genero,
+// even though an older release has a build for this one (GIS-574).
+
+// stepDownProvider lists versions without variants and refuses the ones named
+// in noBuild, recording which versions had their info fetched.
+type stepDownProvider struct {
+	versionList []string
+	noBuild     map[string][]string // version → the variants it does publish
+	fetched     []string
+}
+
+func (p *stepDownProvider) Name() string { return "artifactory-fake" }
+
+func (p *stepDownProvider) FetchVersions(string) ([]resolver.CandidateVersion, error) {
+	out := make([]resolver.CandidateVersion, 0, len(p.versionList))
+	for _, v := range p.versionList {
+		out = append(out, resolver.CandidateVersion{Version: semver.MustParse(v)})
+	}
+	return out, nil
+}
+
+func (p *stepDownProvider) FetchInfo(name, version, major string) (*registry.PackageInfo, error) {
+	p.fetched = append(p.fetched, version)
+	if published, refused := p.noBuild[version]; refused {
+		return nil, &registry.NoBuildError{
+			Name: name, Version: version, GeneroMajor: major, Published: published,
+		}
+	}
+	return &registry.PackageInfo{Name: name, Version: version, Checksum: "deadbeef"}, nil
+}
+
+func (p *stepDownProvider) Search(string) ([]registry.SearchResult, error) { return nil, nil }
+
+func newStepDownSet(p Provider) *RepositorySet {
+	return NewRepositorySet([]Provider{p}, []config.Registry{{Name: p.Name(), Priority: 1}}, nil)
+}
+
+func TestRepositorySetResolveStepsDownToTheNextBest(t *testing.T) {
+	p := &stepDownProvider{
+		versionList: []string{"1.0.0", "1.0.1"},
+		noBuild:     map[string][]string{"1.0.1": {"genero6"}},
+	}
+
+	info, err := newStepDownSet(p).Resolve("probe", "latest", "4")
+	if err != nil {
+		t.Fatalf("Resolve must step down to 1.0.0, not fail: %v", err)
+	}
+	if info.Version != "1.0.0" {
+		t.Errorf("resolved probe@%s, want 1.0.0", info.Version)
+	}
+	if strings.Join(p.fetched, ",") != "1.0.1,1.0.0" {
+		t.Errorf("fetched %v, want [1.0.1 1.0.0]", p.fetched)
+	}
+}
+
+func TestRepositorySetResolveReportsWhenEveryVersionIsRefused(t *testing.T) {
+	p := &stepDownProvider{
+		versionList: []string{"1.0.0", "1.0.1"},
+		noBuild: map[string][]string{
+			"1.0.0": {"genero5", "genero6"},
+			"1.0.1": {"genero6"},
+		},
+	}
+
+	_, err := newStepDownSet(p).Resolve("probe", "latest", "4")
+	if err == nil {
+		t.Fatal("expected an error when every version is refused, got nil")
+	}
+	for _, want := range []string{
+		"has a build for Genero 4",
+		"1.0.1 has builds for Genero 6",
+		"1.0.0 has builds for Genero 5, 6",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+// A transport failure is not evidence about variants, so it must abort rather
+// than quietly resolving to an older version.
+func TestRepositorySetResolveDoesNotStepDownOnOtherErrors(t *testing.T) {
+	p := &failingProvider{}
+
+	if _, err := newStepDownSet(p).Resolve("probe", "latest", "4"); err == nil {
+		t.Fatal("a transport failure must abort Resolve, got nil")
+	} else if !strings.Contains(err.Error(), "registry unreachable") {
+		t.Errorf("error %q does not carry the underlying failure", err)
+	}
+	if p.calls != 1 {
+		t.Errorf("fetched %d times, want 1 — a transport error must not step down", p.calls)
+	}
+}
+
+type failingProvider struct{ calls int }
+
+func (p *failingProvider) Name() string { return "artifactory-fake" }
+func (p *failingProvider) FetchVersions(string) ([]resolver.CandidateVersion, error) {
+	return []resolver.CandidateVersion{
+		{Version: semver.MustParse("1.0.0")},
+		{Version: semver.MustParse("1.0.1")},
+	}, nil
+}
+func (p *failingProvider) FetchInfo(string, string, string) (*registry.PackageInfo, error) {
+	p.calls++
+	return nil, errors.New("registry unreachable")
+}
+func (p *failingProvider) Search(string) ([]registry.SearchResult, error) { return nil, nil }

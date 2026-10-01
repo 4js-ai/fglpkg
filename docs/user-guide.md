@@ -1130,7 +1130,7 @@ has a build for Genero 4 (1.2.0 has builds for Genero 5, 6)
 
 `fglpkg outdated` applies the same rule, so its **Wanted** and **Latest** columns only name versions `fglpkg update` could actually install on your Genero. `fglpkg info` still describes any version — its **Variants** line shows which Genero majors it has builds for.
 
-An Artifactory repository does not report variants when it lists versions, so version selection cannot skip a version there. Instead, if the version selected has no build for your Genero, the install fails and names the builds it does have, rather than installing a build for another Genero major.
+An Artifactory repository does not report variants when it lists versions, so a version there can only be checked once it is chosen. fglpkg therefore tries the newest version first and **steps down to the next one** when the chosen version turns out to have no build for your Genero, so you still get the newest release that can actually run. Only when no version has a build does the install fail, naming what each one does publish. Note that `fglpkg outdated` cannot apply the rule for an Artifactory package, since it reads the version list alone — its **Latest** column may name a version that `update` will step past.
 
 #### Lock file and Genero changes
 

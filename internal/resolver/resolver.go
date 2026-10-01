@@ -370,11 +370,20 @@ func (r *Resolver) ResolveWithOptions(root *manifest.Manifest, opts ResolveOptio
 				)
 			}
 
-			chosen, err := state.bestVersion(item.name, generoCompatible)
-			if err != nil {
+			chosen, info, refused, err := r.chooseAndFetch(state, item.name, generoCompatible)
+			if errors.Is(err, errNoVersionSatisfies) {
 				if item.scope == manifest.ScopeOptional {
 					state.skipOptional(item.name, fmt.Sprintf("no version satisfies constraints: %v", err))
 					continue
+				}
+				// Every version the constraints allowed was refused for this
+				// runtime, so this is a Genero problem rather than a clash
+				// between constraints, and must be reported as one.
+				if len(refused) > 0 {
+					return nil, fmt.Errorf(
+						"no version of %q is compatible with Genero %s (%s)",
+						item.name, r.generoVersion, strings.Join(refused, "; "),
+					)
 				}
 				state.addConflict(Conflict{
 					Package:     item.name,
@@ -383,8 +392,6 @@ func (r *Resolver) ResolveWithOptions(root *manifest.Manifest, opts ResolveOptio
 				})
 				continue
 			}
-
-			info, err := r.fetchInfo(item.name, chosen.String(), r.generoVersion.MajorString())
 			if err != nil {
 				if item.scope == manifest.ScopeOptional {
 					state.skipOptional(item.name, fmt.Sprintf("fetch info: %v", err))
@@ -564,6 +571,55 @@ func (r *Resolver) describeCandidates(candidates []CandidateVersion) string {
 	return " (" + strings.Join(parts, "; ") + ")"
 }
 
+// chooseAndFetch picks the best version satisfying the accumulated constraints
+// and fetches its metadata, stepping down to the next-best version whenever the
+// provider reports that the chosen one has no build for this Genero. It returns
+// the chosen version, its metadata, and a description of every version refused
+// along the way.
+//
+// For GI this never retries: filterByGenero has already dropped those versions,
+// because the version listing carries the variants. Artifactory reports no
+// variants when it lists versions, so the per-version fetch is its only signal
+// — and without stepping down, a genero6-only latest release makes `install`,
+// a `^1.0.0` dependency and `update` all fail outright even though an older
+// version does publish a build for this runtime (GIS-574).
+//
+// The extra round trips happen only when a version is actually refused.
+func (r *Resolver) chooseAndFetch(s *state, name string, compatible []semver.Version) (semver.Version, *registry.PackageInfo, []string, error) {
+	remaining := make([]semver.Version, len(compatible))
+	copy(remaining, compatible)
+
+	var rejected []string
+	for {
+		chosen, err := s.bestVersion(name, remaining)
+		if err != nil {
+			return semver.Version{}, nil, rejected, err
+		}
+		info, err := r.fetchInfo(name, chosen.String(), r.generoVersion.MajorString())
+		if err == nil {
+			return chosen, info, rejected, nil
+		}
+		var noBuild *registry.NoBuildError
+		if !errors.As(err, &noBuild) {
+			// Carry the version back so the caller's message can name it.
+			return chosen, nil, rejected, err
+		}
+		rejected = append(rejected, registry.DescribeBuilds(chosen.String(), noBuild.Published))
+		remaining = withoutVersion(remaining, chosen)
+	}
+}
+
+// withoutVersion returns vs with v removed, leaving the input untouched.
+func withoutVersion(vs []semver.Version, v semver.Version) []semver.Version {
+	out := make([]semver.Version, 0, len(vs))
+	for _, candidate := range vs {
+		if candidate.String() != v.String() {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
 // excludedMatchesNote explains a constraint conflict that the Genero filter
 // caused rather than the constraints themselves: it names the versions that
 // do satisfy every constraint on name but were excluded for this runtime, and
@@ -715,10 +771,16 @@ func (s *state) bestVersion(name string, candidates []semver.Version) (semver.Ve
 	}
 
 	if best == nil {
-		return semver.Version{}, fmt.Errorf("no version satisfies all constraints")
+		return semver.Version{}, errNoVersionSatisfies
 	}
 	return *best, nil
 }
+
+// errNoVersionSatisfies is returned by bestVersion when no candidate matches
+// every accumulated constraint. It is a sentinel so chooseAndFetch's caller can
+// tell "the constraints exclude everything" from "fetching metadata failed",
+// which need very different messages.
+var errNoVersionSatisfies = errors.New("no version satisfies all constraints")
 
 func (s *state) checkExistingResolution(name, newConstraint, requiredBy string) error {
 	entry := s.resolved[name]

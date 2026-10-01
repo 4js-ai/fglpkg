@@ -207,15 +207,43 @@ func (rs *RepositorySet) Resolve(name, constraint, generoMajor string) (*registr
 	if err != nil {
 		return nil, fmt.Errorf("invalid version constraint %q: %w", constraint, err)
 	}
-	best, err := c.Latest(candidates)
-	if err != nil {
-		if len(skipped) > 0 {
-			return nil, fmt.Errorf("no version of %q satisfying %q has a build for Genero %s (%s)",
-				name, constraint, generoMajor, strings.Join(skipped, "; "))
+	// Step down to the next-best version when the provider reports the chosen
+	// one has no build for this Genero. Artifactory lists no variants, so the
+	// loop above skipped nothing and the per-version fetch is the only signal;
+	// without this, a genero6-only latest release makes `install <pkg>` fail
+	// outright even though an older version has a build for this runtime
+	// (GIS-574). GI never reaches the retry — its versions were filtered above.
+	for {
+		best, err := c.Latest(candidates)
+		if err != nil {
+			if len(skipped) > 0 {
+				return nil, fmt.Errorf("no version of %q satisfying %q has a build for Genero %s (%s)",
+					name, constraint, generoMajor, strings.Join(skipped, "; "))
+			}
+			return nil, fmt.Errorf("no version of %q satisfies constraint %q", name, constraint)
 		}
-		return nil, fmt.Errorf("no version of %q satisfies constraint %q", name, constraint)
+		info, err := d.provider.FetchInfo(name, best.String(), generoMajor)
+		if err == nil {
+			return info, nil
+		}
+		var noBuild *registry.NoBuildError
+		if !errors.As(err, &noBuild) {
+			return nil, err
+		}
+		skipped = append(skipped, registry.DescribeBuilds(best.String(), noBuild.Published))
+		candidates = removeVersion(candidates, best)
 	}
-	return d.provider.FetchInfo(name, best.String(), generoMajor)
+}
+
+// removeVersion returns vs with v removed, leaving the input untouched.
+func removeVersion(vs []semver.Version, v semver.Version) []semver.Version {
+	out := make([]semver.Version, 0, len(vs))
+	for _, candidate := range vs {
+		if candidate.String() != v.String() {
+			out = append(out, candidate)
+		}
+	}
+	return out
 }
 
 // configuredNames returns the provider names in priority order, for use in
