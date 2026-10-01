@@ -160,11 +160,21 @@ type constraintSource struct {
 	requiredBy string
 }
 
-// CandidateVersion pairs a parsed semver version with its Genero constraint.
+// CandidateVersion pairs a parsed semver version with its Genero constraint
+// and the artifact variants published for it.
 // Exported so test packages can construct fake VersionFetcher responses.
 type CandidateVersion struct {
 	Version          semver.Version
 	GeneroConstraint string
+
+	// Variants lists the artifact variant tags this version publishes
+	// ("genero4", "genero6", "webcomponent", …). It is the ground truth for
+	// Genero compatibility — a version with no build for the running major
+	// cannot be installed however loose its declared constraint is — and most
+	// publishers declare no constraint at all, so this is usually the only
+	// signal available. Empty means the provider does not report variants
+	// (Artifactory, older registries), which is treated as "unknown, allow".
+	Variants []string
 }
 
 // VersionFetcher fetches available versions and their Genero constraints.
@@ -346,8 +356,9 @@ func (r *Resolver) ResolveWithOptions(root *manifest.Manifest, opts ResolveOptio
 					continue
 				}
 				return nil, fmt.Errorf(
-					"no version of %q is compatible with Genero %s",
+					"no version of %q is compatible with Genero %s%s",
 					item.name, r.generoVersion,
+					describeCandidates(candidates),
 				)
 			}
 
@@ -485,8 +496,20 @@ func (r *Resolver) enqueueRootBucket(deps manifest.Dependencies, scope manifest.
 	}
 }
 
-// filterByGenero removes candidate versions whose GeneroConstraint is not
-// satisfied by the detected Genero runtime version.
+// filterByGenero removes candidate versions that cannot run on the detected
+// Genero runtime, on either of two independent grounds:
+//
+//  1. the version's declared GeneroConstraint excludes it; or
+//  2. the version publishes artifact variants but none for this major.
+//
+// The second check matters because the first is usually vacuous: most
+// publishers declare no "genero" constraint, and Version.Satisfies("") is
+// unconditionally true, so without it every version of such a package looks
+// compatible with every runtime. Resolution then picks the newest and the
+// registry client hands back whatever build it has (GIS-574).
+//
+// A version reporting no variants at all is kept — Artifactory and older
+// registries do not report them, and "unknown" must not mean "incompatible".
 func (r *Resolver) filterByGenero(pkgName string, candidates []CandidateVersion) ([]semver.Version, error) {
 	out := make([]semver.Version, 0, len(candidates))
 	for _, c := range candidates {
@@ -496,11 +519,35 @@ func (r *Resolver) filterByGenero(pkgName string, candidates []CandidateVersion)
 				pkgName, c.Version, c.GeneroConstraint, err)
 			continue
 		}
-		if ok {
-			out = append(out, c.Version)
+		if !ok {
+			continue
 		}
+		if !registry.VariantsSupport(c.Variants, r.generoVersion.MajorString()) {
+			continue
+		}
+		out = append(out, c.Version)
 	}
 	return out, nil
+}
+
+// describeCandidates explains what each rejected version does support, for the
+// error raised when nothing resolves. Without it the message says only that no
+// version is compatible, leaving the user no way to tell whether to pin an
+// older version, upgrade Genero, or ask the publisher for a build.
+func describeCandidates(candidates []CandidateVersion) string {
+	parts := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		switch {
+		case len(c.Variants) > 0:
+			parts = append(parts, fmt.Sprintf("%s has builds for %s", c.Version, registry.DescribeMajors(c.Variants)))
+		case c.GeneroConstraint != "":
+			parts = append(parts, fmt.Sprintf("%s requires Genero %s", c.Version, c.GeneroConstraint))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, "; ") + ")"
 }
 
 // ─── ConflictList ─────────────────────────────────────────────────────────────
@@ -757,6 +804,7 @@ func registryVersions(name string) ([]CandidateVersion, error) {
 		out = append(out, CandidateVersion{
 			Version:          v,
 			GeneroConstraint: ve.GeneroConstraint,
+			Variants:         ve.Variants,
 		})
 	}
 	return out, nil

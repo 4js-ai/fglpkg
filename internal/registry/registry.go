@@ -254,8 +254,10 @@ func FetchInfo(name, version string) (*PackageInfo, error) {
 }
 
 // FetchInfoForGenero retrieves package metadata, picking the artifact whose
-// variant matches generoMajor (e.g. "6" → "genero6"). Empty generoMajor or
-// no matching variant falls back to "default", then to the first artifact.
+// variant matches generoMajor (e.g. "6" → "genero6"), falling back to
+// "default". A named generoMajor with no matching variant is an error; an empty
+// generoMajor falls back to the first artifact, for metadata-only callers.
+// See pickArtifact.
 func FetchInfoForGenero(name, version, generoMajor string) (*PackageInfo, error) {
 	d, err := fetchPackageDetail(name)
 	if err != nil {
@@ -273,6 +275,10 @@ func FetchInfoForGenero(name, version, generoMajor string) (*PackageInfo, error)
 	}
 	art := pickArtifact(v.Artifacts, generoMajor)
 	if art == nil {
+		if generoMajor != "" && len(v.Artifacts) > 0 {
+			return nil, fmt.Errorf("%s@%s has no build for Genero %s (published: %s)",
+				name, version, generoMajor, describeVariants(v.Artifacts))
+		}
 		return nil, fmt.Errorf("no artifact available for %s@%s", name, version)
 	}
 	author := v.Author
@@ -352,10 +358,19 @@ func Resolve(name, constraint, generoMajor string) (*PackageInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	candidates := make([]semver.Version, 0, len(vl.Versions))
-	for _, vs := range vl.Versions {
-		v, err := semver.Parse(vs)
+	// Skip versions that publish no build for this Genero major, so `install
+	// <pkg>` lands on the newest version that can actually run here rather than
+	// the newest that exists (GIS-574). Iterating VersionEntries rather than
+	// Versions is what makes the variants available.
+	candidates := make([]semver.Version, 0, len(vl.VersionEntries))
+	var skipped []VersionEntry
+	for _, ve := range vl.VersionEntries {
+		v, err := semver.Parse(ve.Version)
 		if err != nil {
+			continue
+		}
+		if generoMajor != "" && !VariantsSupport(ve.Variants, generoMajor) {
+			skipped = append(skipped, ve)
 			continue
 		}
 		candidates = append(candidates, v)
@@ -366,6 +381,12 @@ func Resolve(name, constraint, generoMajor string) (*PackageInfo, error) {
 	}
 	best, err := c.Latest(candidates)
 	if err != nil {
+		// Distinguish "nothing matches your constraint" from "nothing is built
+		// for your Genero", which are very different things to act on.
+		if len(skipped) > 0 {
+			return nil, fmt.Errorf("no version of %q satisfying %q has a build for Genero %s (%s)",
+				name, constraint, generoMajor, describeSkipped(skipped))
+		}
 		return nil, fmt.Errorf("no version of %q satisfies constraint %q", name, constraint)
 	}
 	return FetchInfoForGenero(name, best.String(), generoMajor)
@@ -861,11 +882,23 @@ func fetchPackageDetail(slug string) (*apiPackageDetail, error) {
 //  1. "webcomponent" — kind-discriminating variant, matches any genero version
 //  2. exact "genero<N>" match
 //  3. "default"
-//  4. first listed
+//  4. first listed — only when the caller named no major
 //
 // The webcomponent check is first because a webcomponent-only version has
 // exactly one artifact (the "webcomponent" one), and the BDL fallbacks
 // would otherwise miss it.
+//
+// Step 4 is deliberately NOT reached when generoMajor is set. Returning an
+// arbitrary artifact there is how a Genero 4 install silently received a
+// genero6 build (GIS-574): the caller asked for a specific major, none was
+// published, and handing back whatever happened to be first produced a package
+// that cannot run. A caller that named a major gets nil instead, so the
+// remaining paths fail loudly rather than installing the wrong bytes.
+//
+// An empty generoMajor keeps the old lenient behaviour on purpose: `info` and
+// `outdated` reach here through FetchInfo to read metadata only (description,
+// deprecation), never to install, and must still work for a package that
+// publishes no variant for the running runtime.
 func pickArtifact(arts []apiArtifact, generoMajor string) *apiArtifact {
 	if len(arts) == 0 {
 		return nil
@@ -888,7 +921,81 @@ func pickArtifact(arts []apiArtifact, generoMajor string) *apiArtifact {
 			return &arts[i]
 		}
 	}
+	if generoMajor != "" {
+		return nil
+	}
 	return &arts[0]
+}
+
+// VariantsSupport reports whether a published variant set can serve the given
+// Genero major. It is the single definition of that rule, shared by every path
+// that chooses a version: the dependency resolver, registry.Resolve and the
+// multi-provider RepositorySet.Resolve (GIS-574).
+//
+// An empty set means the provider reports no variants — Artifactory and older
+// registries do not — which is "unknown" and therefore allowed, because
+// treating it as incompatible would make those packages unresolvable.
+// "webcomponent" matches every major: those packages ship browser assets, not
+// p-code. "default" is the legacy single-build layout and likewise serves any
+// major.
+func VariantsSupport(variants []string, major string) bool {
+	if len(variants) == 0 {
+		return true
+	}
+	want := "genero" + major
+	for _, v := range variants {
+		if v == want || v == "webcomponent" || v == "default" {
+			return true
+		}
+	}
+	return false
+}
+
+// describeSkipped names the versions that were passed over for publishing no
+// build for the running Genero, and what each does publish — e.g.
+// `1.0.1 has builds for Genero 6`.
+func describeSkipped(skipped []VersionEntry) string {
+	parts := make([]string, 0, len(skipped))
+	for _, ve := range skipped {
+		parts = append(parts, fmt.Sprintf("%s has builds for %s",
+			ve.Version, DescribeMajors(ve.Variants)))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// DescribeMajors renders variant tags as the Genero majors they serve, e.g.
+// ["genero4","genero6"] → "Genero 4, 6". Tags naming a kind rather than a major
+// ("webcomponent", "default") are listed verbatim. Exported so the dependency
+// resolver phrases the same situation the same way.
+func DescribeMajors(variants []string) string {
+	majors := make([]string, 0, len(variants))
+	other := make([]string, 0, len(variants))
+	for _, v := range variants {
+		if m := strings.TrimPrefix(v, "genero"); m != v && m != "" {
+			majors = append(majors, m)
+			continue
+		}
+		other = append(other, v)
+	}
+	switch {
+	case len(majors) > 0 && len(other) > 0:
+		return "Genero " + strings.Join(majors, ", ") + ", " + strings.Join(other, ", ")
+	case len(majors) > 0:
+		return "Genero " + strings.Join(majors, ", ")
+	default:
+		return strings.Join(other, ", ")
+	}
+}
+
+// describeVariants lists an artifact set's variant tags in registry order, for
+// an error message that names what a version does publish ("genero5, genero6")
+// when it has nothing for the running runtime.
+func describeVariants(arts []apiArtifact) string {
+	tags := make([]string, 0, len(arts))
+	for _, a := range arts {
+		tags = append(tags, a.Variant)
+	}
+	return strings.Join(tags, ", ")
 }
 
 // ─── Internal: HTTP ──────────────────────────────────────────────────────────

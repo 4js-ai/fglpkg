@@ -1110,6 +1110,26 @@ Resolving dependency graph (Genero 4.01.12)...
 ✓ poiapi@1.0.0
 ```
 
+**Which variants a version publishes also decides which version you get.** A package does not have to ship every variant for every release — an author may publish a new version built only for the newest Genero. Version selection therefore skips any version with no build for your Genero, and picks the newest one that has it:
+
+```
+fglunit 1.0.1  → genero6 only
+fglunit 1.0.0  → genero4, genero5, genero6
+```
+
+On Genero 6, `fglunit ^1.0.0` resolves to `1.0.1`; on Genero 4 or 5 it resolves to `1.0.0`, because `1.0.1` has nothing to install. This is independent of the optional `genero` constraint a package may declare — the two are checked separately, and most packages declare no constraint at all.
+
+If no version has a build for your Genero, the error names what each version does publish, so you can tell whether to upgrade Genero or ask the author for a build:
+
+```
+$ fglpkg install odatalib
+Resolving odatalib@latest (Genero 4.01.12)...
+failed to resolve odatalib@latest: no version of "odatalib" satisfying "latest"
+has a build for Genero 4 (1.2.0 has builds for Genero 5, 6)
+```
+
+Packages from a repository that does not report variants (an Artifactory repo, for instance) are not filtered this way — nothing is known about their builds, so nothing is excluded.
+
 #### Lock file and Genero changes
 
 The lock file records which Genero major version was used during resolution. If you switch to a different Genero major version, run `fglpkg update` to re-resolve and select the correct variants. Plain `fglpkg install` only **warns** about the mismatch and keeps the locked variants — it does not re-resolve for a Genero change.
