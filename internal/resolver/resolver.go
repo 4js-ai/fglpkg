@@ -144,6 +144,11 @@ func strongerScope(a, b manifest.Scope) manifest.Scope {
 type Conflict struct {
 	Package     string
 	Constraints []constraintSource
+
+	// Note, when set, explains that versions satisfying the constraints exist
+	// but cannot run on the detected Genero. Without it a pin to such a
+	// version reads as a constraint clash, though the version plainly exists.
+	Note string
 }
 
 func (c Conflict) Error() string {
@@ -151,6 +156,9 @@ func (c Conflict) Error() string {
 	fmt.Fprintf(&b, "version conflict for %q:\n", c.Package)
 	for _, cs := range c.Constraints {
 		fmt.Fprintf(&b, "  %s requires %q\n", cs.requiredBy, cs.constraint)
+	}
+	if c.Note != "" {
+		fmt.Fprintf(&b, "  %s\n", c.Note)
 	}
 	return b.String()
 }
@@ -358,7 +366,7 @@ func (r *Resolver) ResolveWithOptions(root *manifest.Manifest, opts ResolveOptio
 				return nil, fmt.Errorf(
 					"no version of %q is compatible with Genero %s%s",
 					item.name, r.generoVersion,
-					describeCandidates(candidates),
+					r.describeCandidates(candidates),
 				)
 			}
 
@@ -371,6 +379,7 @@ func (r *Resolver) ResolveWithOptions(root *manifest.Manifest, opts ResolveOptio
 				state.addConflict(Conflict{
 					Package:     item.name,
 					Constraints: state.constraints[item.name],
+					Note:        r.excludedMatchesNote(state, item.name, candidates, generoCompatible),
 				})
 				continue
 			}
@@ -530,24 +539,54 @@ func (r *Resolver) filterByGenero(pkgName string, candidates []CandidateVersion)
 	return out, nil
 }
 
-// describeCandidates explains what each rejected version does support, for the
-// error raised when nothing resolves. Without it the message says only that no
-// version is compatible, leaving the user no way to tell whether to pin an
+// describeCandidates explains why each rejected version cannot run here, for
+// the error raised when nothing resolves. Without it the message says only that
+// no version is compatible, leaving the user no way to tell whether to pin an
 // older version, upgrade Genero, or ask the publisher for a build.
-func describeCandidates(candidates []CandidateVersion) string {
+//
+// A declared constraint that excludes this runtime is named in preference to
+// the builds: such a version may well publish a build for this major, and
+// listing that build as the explanation would contradict the error it explains.
+func (r *Resolver) describeCandidates(candidates []CandidateVersion) string {
 	parts := make([]string, 0, len(candidates))
 	for _, c := range candidates {
-		switch {
-		case len(c.Variants) > 0:
-			parts = append(parts, fmt.Sprintf("%s has builds for %s", c.Version, registry.DescribeMajors(c.Variants)))
-		case c.GeneroConstraint != "":
+		if ok, err := r.generoVersion.Satisfies(c.GeneroConstraint); err == nil && !ok {
 			parts = append(parts, fmt.Sprintf("%s requires Genero %s", c.Version, c.GeneroConstraint))
+			continue
+		}
+		if len(c.Variants) > 0 {
+			parts = append(parts, registry.DescribeBuilds(c.Version.String(), c.Variants))
 		}
 	}
 	if len(parts) == 0 {
 		return ""
 	}
 	return " (" + strings.Join(parts, "; ") + ")"
+}
+
+// excludedMatchesNote explains a constraint conflict that the Genero filter
+// caused rather than the constraints themselves: it names the versions that
+// do satisfy every constraint on name but were excluded for this runtime, and
+// returns "" when there are none (a genuine constraint clash).
+func (r *Resolver) excludedMatchesNote(s *state, name string, candidates []CandidateVersion, compatible []semver.Version) string {
+	kept := make(map[string]bool, len(compatible))
+	for _, v := range compatible {
+		kept[v.String()] = true
+	}
+	var excluded []CandidateVersion
+	for _, c := range candidates {
+		if kept[c.Version.String()] {
+			continue
+		}
+		if _, err := s.bestVersion(name, []semver.Version{c.Version}); err == nil {
+			excluded = append(excluded, c)
+		}
+	}
+	if len(excluded) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("no matching version can be used on Genero %s%s",
+		r.generoVersion, r.describeCandidates(excluded))
 }
 
 // ─── ConflictList ─────────────────────────────────────────────────────────────

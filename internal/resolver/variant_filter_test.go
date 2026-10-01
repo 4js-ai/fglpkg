@@ -154,7 +154,53 @@ func TestDeclaredConstraintStillRejectsAMatchingVariant(t *testing.T) {
 		Variants:         []string{"genero4", "genero6"},
 	}}}
 
-	if _, err := db.resolve(t, genero.MustParse("4.01.12"), "strict"); err == nil {
+	_, err := db.resolve(t, genero.MustParse("4.01.12"), "strict")
+	if err == nil {
 		t.Fatal("a declared constraint excluding Genero 4 must still reject the version")
+	}
+	// The constraint is the reason, so it is what the message must name.
+	// Listing the builds instead — "1.0.0 has builds for Genero 4, 6" — would
+	// contradict "not compatible with Genero 4" in the same sentence.
+	if !strings.Contains(err.Error(), "1.0.0 requires Genero >=6.00") {
+		t.Errorf("error %q does not name the excluding constraint", err)
+	}
+	if strings.Contains(err.Error(), "has builds for") {
+		t.Errorf("error %q explains a constraint rejection by its builds", err)
+	}
+}
+
+// Pinning a version that exists but has no build here is not a clash between
+// constraints, so the conflict must say why that version cannot be used —
+// otherwise `<root> requires "1.0.1"` reads as nonsense next to a registry that
+// plainly lists 1.0.1.
+func TestPinToAVersionWithNoBuildExplainsTheConflict(t *testing.T) {
+	root := manifest.New("myapp", "1.0.0", "", "")
+	root.AddFGLDependency("fglunit", "1.0.1")
+	_, err := resolver.NewWithFetchers(genero.MustParse("4.01.12"), fglunitDB.versions, fglunitDB.info).Resolve(root)
+	if err == nil {
+		t.Fatal("expected a conflict pinning fglunit@1.0.1 on Genero 4, got nil")
+	}
+	for _, want := range []string{
+		`version conflict for "fglunit"`,
+		"no matching version can be used on Genero 4.01.12",
+		"1.0.1 has builds for Genero 6",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+// A genuine constraint clash — nothing satisfies the constraint on any Genero —
+// gets no Genero note, which would send the user looking in the wrong place.
+func TestConstraintClashCarriesNoGeneroNote(t *testing.T) {
+	root := manifest.New("myapp", "1.0.0", "", "")
+	root.AddFGLDependency("fglunit", "^2.0.0")
+	_, err := resolver.NewWithFetchers(genero.MustParse("4.01.12"), fglunitDB.versions, fglunitDB.info).Resolve(root)
+	if err == nil {
+		t.Fatal("expected a conflict for fglunit ^2.0.0, got nil")
+	}
+	if strings.Contains(err.Error(), "Genero") {
+		t.Errorf("error %q blames Genero for a plain constraint clash", err)
 	}
 }

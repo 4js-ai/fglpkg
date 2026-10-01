@@ -1128,11 +1128,15 @@ failed to resolve odatalib@latest: no version of "odatalib" satisfying "latest"
 has a build for Genero 4 (1.2.0 has builds for Genero 5, 6)
 ```
 
-Packages from a repository that does not report variants (an Artifactory repo, for instance) are not filtered this way — nothing is known about their builds, so nothing is excluded.
+`fglpkg outdated` applies the same rule, so its **Wanted** and **Latest** columns only name versions `fglpkg update` could actually install on your Genero. `fglpkg info` still describes any version — its **Variants** line shows which Genero majors it has builds for.
+
+An Artifactory repository does not report variants when it lists versions, so version selection cannot skip a version there. Instead, if the version selected has no build for your Genero, the install fails and names the builds it does have, rather than installing a build for another Genero major.
 
 #### Lock file and Genero changes
 
 The lock file records which Genero major version was used during resolution. If you switch to a different Genero major version, run `fglpkg update` to re-resolve and select the correct variants. Plain `fglpkg install` only **warns** about the mismatch and keeps the locked variants — it does not re-resolve for a Genero change.
+
+**Lock files written by fglpkg 4.2.8 or earlier on Genero 4 or 5** may lock a version that has no build for that Genero — for example `fglunit@1.0.1`, whose only build is `genero6`. Plain `fglpkg install` keeps installing that build from the lock file, and `fglpkg audit signatures` reports `signature does not match` for it, even though the artifact is genuine. Run `fglpkg update` once to re-resolve to a version that has a build for your Genero, then commit the updated lock file.
 
 ### Genero Version Constraints
 

@@ -29,6 +29,23 @@ import (
 // with errors.Is(err, registry.ErrNotFound).
 var ErrNotFound = errors.New("package not found in registry")
 
+// NoBuildError reports that a version exists but publishes no build for the
+// requested Genero major (GIS-574). Every provider returns it from FetchInfo
+// for that case, so a caller that only reads metadata — `info` — can detect it
+// with errors.As and retry without a major, while an installing caller
+// surfaces it as-is.
+type NoBuildError struct {
+	Name        string
+	Version     string
+	GeneroMajor string
+	Published   []string // the variant tags the version does publish
+}
+
+func (e *NoBuildError) Error() string {
+	return fmt.Sprintf("%s@%s has no build for Genero %s (published: %s)",
+		e.Name, e.Version, e.GeneroMajor, strings.Join(e.Published, ", "))
+}
+
 // ErrUnauthorized / ErrForbidden / ErrBadRequest let publisher-side
 // callers map a write's HTTP status to an actionable message. They are
 // wrapped (%w) so callers detect them with errors.Is. ErrUnauthorized is a
@@ -276,8 +293,8 @@ func FetchInfoForGenero(name, version, generoMajor string) (*PackageInfo, error)
 	art := pickArtifact(v.Artifacts, generoMajor)
 	if art == nil {
 		if generoMajor != "" && len(v.Artifacts) > 0 {
-			return nil, fmt.Errorf("%s@%s has no build for Genero %s (published: %s)",
-				name, version, generoMajor, describeVariants(v.Artifacts))
+			return nil, &NoBuildError{Name: name, Version: version, GeneroMajor: generoMajor,
+				Published: artifactVariants(v.Artifacts)}
 		}
 		return nil, fmt.Errorf("no artifact available for %s@%s", name, version)
 	}
@@ -929,8 +946,9 @@ func pickArtifact(arts []apiArtifact, generoMajor string) *apiArtifact {
 
 // VariantsSupport reports whether a published variant set can serve the given
 // Genero major. It is the single definition of that rule, shared by every path
-// that chooses a version: the dependency resolver, registry.Resolve and the
-// multi-provider RepositorySet.Resolve (GIS-574).
+// that chooses a version: the dependency resolver, registry.Resolve, the
+// multi-provider RepositorySet.Resolve, and `outdated`'s wanted/latest columns
+// (GIS-574).
 //
 // An empty set means the provider reports no variants — Artifactory and older
 // registries do not — which is "unknown" and therefore allowed, because
@@ -957,17 +975,23 @@ func VariantsSupport(variants []string, major string) bool {
 func describeSkipped(skipped []VersionEntry) string {
 	parts := make([]string, 0, len(skipped))
 	for _, ve := range skipped {
-		parts = append(parts, fmt.Sprintf("%s has builds for %s",
-			ve.Version, DescribeMajors(ve.Variants)))
+		parts = append(parts, DescribeBuilds(ve.Version, ve.Variants))
 	}
 	return strings.Join(parts, "; ")
 }
 
-// DescribeMajors renders variant tags as the Genero majors they serve, e.g.
+// DescribeBuilds phrases what one version publishes, e.g.
+// `1.0.1 has builds for Genero 6`. Exported so every path that rejects a
+// version for its builds — this package, the dependency resolver and
+// RepositorySet.Resolve — words it the same way.
+func DescribeBuilds(version string, variants []string) string {
+	return fmt.Sprintf("%s has builds for %s", version, describeMajors(variants))
+}
+
+// describeMajors renders variant tags as the Genero majors they serve, e.g.
 // ["genero4","genero6"] → "Genero 4, 6". Tags naming a kind rather than a major
-// ("webcomponent", "default") are listed verbatim. Exported so the dependency
-// resolver phrases the same situation the same way.
-func DescribeMajors(variants []string) string {
+// ("webcomponent", "default") are listed verbatim.
+func describeMajors(variants []string) string {
 	majors := make([]string, 0, len(variants))
 	other := make([]string, 0, len(variants))
 	for _, v := range variants {
@@ -987,15 +1011,15 @@ func DescribeMajors(variants []string) string {
 	}
 }
 
-// describeVariants lists an artifact set's variant tags in registry order, for
-// an error message that names what a version does publish ("genero5, genero6")
-// when it has nothing for the running runtime.
-func describeVariants(arts []apiArtifact) string {
+// artifactVariants lists an artifact set's variant tags in registry order, for
+// a NoBuildError that names what a version does publish when it has nothing
+// for the running runtime.
+func artifactVariants(arts []apiArtifact) []string {
 	tags := make([]string, 0, len(arts))
 	for _, a := range arts {
 		tags = append(tags, a.Variant)
 	}
-	return strings.Join(tags, ", ")
+	return tags
 }
 
 // ─── Internal: HTTP ──────────────────────────────────────────────────────────

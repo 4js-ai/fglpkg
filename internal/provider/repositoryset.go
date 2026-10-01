@@ -192,12 +192,13 @@ func (rs *RepositorySet) Resolve(name, constraint, generoMajor string) (*registr
 	}
 	// Mirror registry.Resolve: a version with no build for this Genero major
 	// cannot be installed, so it must not be a candidate for "latest"
-	// (GIS-574). Artifactory reports no variants and is unaffected.
+	// (GIS-574). Artifactory reports no variants, so nothing is skipped here;
+	// its FetchInfo refuses a version with no build for this major instead.
 	candidates := make([]semver.Version, 0, len(d.versions))
-	skipped := 0
+	var skipped []string
 	for _, cv := range d.versions {
 		if generoMajor != "" && !registry.VariantsSupport(cv.Variants, generoMajor) {
-			skipped++
+			skipped = append(skipped, registry.DescribeBuilds(cv.Version.String(), cv.Variants))
 			continue
 		}
 		candidates = append(candidates, cv.Version)
@@ -208,9 +209,9 @@ func (rs *RepositorySet) Resolve(name, constraint, generoMajor string) (*registr
 	}
 	best, err := c.Latest(candidates)
 	if err != nil {
-		if skipped > 0 {
-			return nil, fmt.Errorf("no version of %q satisfying %q has a build for Genero %s",
-				name, constraint, generoMajor)
+		if len(skipped) > 0 {
+			return nil, fmt.Errorf("no version of %q satisfying %q has a build for Genero %s (%s)",
+				name, constraint, generoMajor, strings.Join(skipped, "; "))
 		}
 		return nil, fmt.Errorf("no version of %q satisfies constraint %q", name, constraint)
 	}

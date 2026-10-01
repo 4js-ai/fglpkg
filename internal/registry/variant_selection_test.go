@@ -1,6 +1,7 @@
 package registry_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -17,7 +18,7 @@ import (
 // nothing for the running runtime.
 
 // genero6Only is fglunit 1.0.1's shape: one build, no "default", no constraint.
-func genero6Only(t *testing.T) string {
+func genero6Only(t *testing.T) {
 	t.Helper()
 	ts := newPackagesServer(t, map[string]any{
 		"slug": "fglunit",
@@ -29,7 +30,6 @@ func genero6Only(t *testing.T) string {
 	}, nil)
 	t.Cleanup(ts.Close)
 	t.Setenv("FGLPKG_REGISTRY", ts.URL)
-	return ts.URL
 }
 
 func TestFetchInfoForGeneroRejectsAMajorWithNoBuild(t *testing.T) {
@@ -44,6 +44,12 @@ func TestFetchInfoForGeneroRejectsAMajorWithNoBuild(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}
+	}
+	// Typed, so a metadata-only caller (`info`) can tell it apart from a
+	// transport failure and retry without a major.
+	var nb *registry.NoBuildError
+	if !errors.As(err, &nb) {
+		t.Errorf("error %q is not a *registry.NoBuildError", err)
 	}
 }
 

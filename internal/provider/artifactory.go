@@ -158,6 +158,10 @@ func (a *ArtifactoryProvider) FetchInfo(name, version, generoMajor string) (*reg
 	}
 	variant := pickVariant(tags, generoMajor)
 	if variant == "" {
+		if generoMajor != "" && len(tags) > 0 {
+			return nil, fmt.Errorf("artifactory %s: %w", a.reg.Name, &registry.NoBuildError{
+				Name: name, Version: version, GeneroMajor: generoMajor, Published: tags})
+		}
 		return nil, fmt.Errorf("artifactory %s: no installable variant for %s@%s (found: %s)",
 			a.reg.Name, name, version, strings.Join(tags, ", "))
 	}
@@ -260,7 +264,11 @@ func variantTag(pkg, version, zipName string) (string, bool) {
 }
 
 // pickVariant mirrors registry.pickArtifact's preference order:
-// webcomponent -> genero{major} -> default -> first.
+// webcomponent -> genero{major} -> default -> first, where "first" is reached
+// only when the caller named no major. A caller that named one gets "" rather
+// than another major's build (GIS-574): Artifactory reports no variants at
+// version-listing time, so resolution cannot skip such a version, and this is
+// the last point at which installing the wrong bytes can be refused.
 func pickVariant(tags []string, generoMajor string) string {
 	for _, t := range tags {
 		if t == "webcomponent" {
@@ -280,7 +288,7 @@ func pickVariant(tags []string, generoMajor string) string {
 			return t
 		}
 	}
-	if len(tags) > 0 {
+	if generoMajor == "" && len(tags) > 0 {
 		return tags[0]
 	}
 	return ""
