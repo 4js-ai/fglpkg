@@ -322,3 +322,102 @@ func TestNonNoBuildFetchErrorStillFails(t *testing.T) {
 		t.Errorf("fetched %d times, want 1 — a transport error must not step down", calls)
 	}
 }
+
+// ── Version-selection failures are not fetch failures ────────────────────────
+
+// bestVersion has two failure modes: no candidate matches the constraints, and
+// a constraint that will not parse. Only the first was a sentinel, so an
+// unparseable constraint fell through to the metadata-fetch branch and was
+// reported as `failed to fetch info for b@0.0.0` — naming a fetch that never
+// happened, against a zero version. Worse, it aborted resolution on the spot
+// instead of recording a conflict and resolving the rest of the graph.
+
+// badConstraintDB gives "a" a dependency on "b" with an unparseable constraint.
+type badConstraintDB struct{ scope string }
+
+func (db badConstraintDB) versions(string) ([]resolver.CandidateVersion, error) {
+	return []resolver.CandidateVersion{{Version: semver.MustParse("1.0.0")}}, nil
+}
+
+func (db badConstraintDB) info(name, version, _ string) (*registry.PackageInfo, error) {
+	info := &registry.PackageInfo{Name: name, Version: version, Checksum: "deadbeef"}
+	if name == "a" {
+		info.FGLDeps = map[string]string{"b": ">>>not-a-constraint"}
+	}
+	return info, nil
+}
+
+func TestInvalidConstraintIsAConflictNotAFetchFailure(t *testing.T) {
+	db := badConstraintDB{}
+	root := manifest.New("myapp", "1.0.0", "", "")
+	root.AddFGLDependency("a", "^1.0.0")
+
+	_, err := resolver.NewWithFetchers(genero.MustParse("4.01.12"), db.versions, db.info).Resolve(root)
+	if err == nil {
+		t.Fatal("expected an error for an unparseable constraint, got nil")
+	}
+	// A fetch that never happened must not be blamed, least of all at @0.0.0.
+	if strings.Contains(err.Error(), "failed to fetch info") || strings.Contains(err.Error(), "@0.0.0") {
+		t.Errorf("error %q reports a version-selection failure as a fetch failure", err)
+	}
+	var cl *resolver.ConflictList
+	if !errors.As(err, &cl) {
+		t.Errorf("error %q is not a *resolver.ConflictList", err)
+	}
+	// The invalid constraint is still named — that is the actionable detail.
+	if !strings.Contains(err.Error(), ">>>not-a-constraint") {
+		t.Errorf("error %q does not name the invalid constraint", err)
+	}
+}
+
+// The same, as an optional dependency: skipped rather than fatal, and not
+// mislabelled as a fetch problem.
+func TestInvalidConstraintOnAnOptionalDepIsNotLabelledAFetch(t *testing.T) {
+	db := badConstraintDB{}
+	root := manifest.New("myapp", "1.0.0", "", "")
+	root.AddFGLDependencyScoped("opt", ">>>not-a-constraint", manifest.ScopeOptional)
+
+	plan, err := resolver.NewWithFetchers(genero.MustParse("4.01.12"), db.versions, db.info).
+		ResolveWithOptions(root, resolver.ResolveOptions{IncludeOptional: true})
+	if err != nil {
+		t.Fatalf("an optional dependency must be skipped, not fatal: %v", err)
+	}
+	if len(plan.OptionalSkipped) != 1 {
+		t.Fatalf("OptionalSkipped = %v, want 1 entry", plan.OptionalSkipped)
+	}
+	if reason := plan.OptionalSkipped[0]; strings.Contains(reason, "fetch info") {
+		t.Errorf("skip reason %q blames a fetch that never happened", reason)
+	}
+}
+
+// An optional dependency whose every version is refused for this Genero must
+// say so. The scope check used to run before the refused-builds check, so the
+// reason collapsed to the generic "no version satisfies all constraints" and
+// the one fact that explains the skip was dropped.
+func TestOptionalDepKeepsTheGeneroReasonWhenAllVersionsAreRefused(t *testing.T) {
+	db := &noVariantDB{
+		versionList: []string{"1.0.0", "1.0.1"},
+		noBuild: map[string][]string{
+			"1.0.0": {"genero6"},
+			"1.0.1": {"genero6"},
+		},
+	}
+	root := manifest.New("myapp", "1.0.0", "", "")
+	root.AddFGLDependencyScoped("opt", "^1.0.0", manifest.ScopeOptional)
+
+	plan, err := resolver.NewWithFetchers(genero.MustParse("4.01.12"), db.versions, db.info).
+		ResolveWithOptions(root, resolver.ResolveOptions{IncludeOptional: true})
+	if err != nil {
+		t.Fatalf("an optional dependency must be skipped, not fatal: %v", err)
+	}
+	if len(plan.OptionalSkipped) != 1 {
+		t.Fatalf("OptionalSkipped = %v, want 1 entry", plan.OptionalSkipped)
+	}
+	reason := plan.OptionalSkipped[0]
+	if !strings.Contains(reason, "has builds for Genero 6") {
+		t.Errorf("skip reason %q does not say why — the refused builds are the explanation", reason)
+	}
+	if strings.Contains(reason, "no version satisfies all constraints") {
+		t.Errorf("skip reason %q is the generic constraint message, not the Genero one", reason)
+	}
+}

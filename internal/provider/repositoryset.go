@@ -231,19 +231,8 @@ func (rs *RepositorySet) Resolve(name, constraint, generoMajor string) (*registr
 			return nil, err
 		}
 		skipped = append(skipped, registry.DescribeBuilds(best.String(), noBuild.Published))
-		candidates = removeVersion(candidates, best)
+		candidates = semver.Without(candidates, best)
 	}
-}
-
-// removeVersion returns vs with v removed, leaving the input untouched.
-func removeVersion(vs []semver.Version, v semver.Version) []semver.Version {
-	out := make([]semver.Version, 0, len(vs))
-	for _, candidate := range vs {
-		if candidate.String() != v.String() {
-			out = append(out, candidate)
-		}
-	}
-	return out
 }
 
 // configuredNames returns the provider names in priority order, for use in

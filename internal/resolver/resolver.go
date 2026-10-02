@@ -371,19 +371,27 @@ func (r *Resolver) ResolveWithOptions(root *manifest.Manifest, opts ResolveOptio
 			}
 
 			chosen, info, refused, err := r.chooseAndFetch(state, item.name, generoCompatible)
-			if errors.Is(err, errNoVersionSatisfies) {
-				if item.scope == manifest.ScopeOptional {
-					state.skipOptional(item.name, fmt.Sprintf("no version satisfies constraints: %v", err))
-					continue
-				}
+			if isVersionSelectionError(err) {
 				// Every version the constraints allowed was refused for this
-				// runtime, so this is a Genero problem rather than a clash
-				// between constraints, and must be reported as one.
+				// runtime: a Genero problem rather than a clash between
+				// constraints, and reported as one in both scopes — an optional
+				// dependency skipped with only "no version satisfies all
+				// constraints" hides the one fact that explains it.
 				if len(refused) > 0 {
+					if item.scope == manifest.ScopeOptional {
+						state.skipOptional(item.name, fmt.Sprintf(
+							"no version compatible with Genero %s (%s)",
+							r.generoVersion, strings.Join(refused, "; ")))
+						continue
+					}
 					return nil, fmt.Errorf(
 						"no version of %q is compatible with Genero %s (%s)",
 						item.name, r.generoVersion, strings.Join(refused, "; "),
 					)
+				}
+				if item.scope == manifest.ScopeOptional {
+					state.skipOptional(item.name, fmt.Sprintf("no version satisfies constraints: %v", err))
+					continue
 				}
 				state.addConflict(Conflict{
 					Package:     item.name,
@@ -605,19 +613,8 @@ func (r *Resolver) chooseAndFetch(s *state, name string, compatible []semver.Ver
 			return chosen, nil, rejected, err
 		}
 		rejected = append(rejected, registry.DescribeBuilds(chosen.String(), noBuild.Published))
-		remaining = withoutVersion(remaining, chosen)
+		remaining = semver.Without(remaining, chosen)
 	}
-}
-
-// withoutVersion returns vs with v removed, leaving the input untouched.
-func withoutVersion(vs []semver.Version, v semver.Version) []semver.Version {
-	out := make([]semver.Version, 0, len(vs))
-	for _, candidate := range vs {
-		if candidate.String() != v.String() {
-			out = append(out, candidate)
-		}
-	}
-	return out
 }
 
 // excludedMatchesNote explains a constraint conflict that the Genero filter
@@ -749,8 +746,8 @@ func (s *state) bestVersion(name string, candidates []semver.Version) (semver.Ve
 	for _, cs := range s.constraints[name] {
 		c, err := semver.ParseConstraint(cs.constraint)
 		if err != nil {
-			return semver.Version{}, fmt.Errorf("invalid constraint %q from %s: %w",
-				cs.constraint, cs.requiredBy, err)
+			return semver.Version{}, fmt.Errorf("%w %q from %s: %v",
+				errInvalidConstraint, cs.constraint, cs.requiredBy, err)
 		}
 		parsed = append(parsed, c)
 	}
@@ -776,11 +773,23 @@ func (s *state) bestVersion(name string, candidates []semver.Version) (semver.Ve
 	return *best, nil
 }
 
-// errNoVersionSatisfies is returned by bestVersion when no candidate matches
-// every accumulated constraint. It is a sentinel so chooseAndFetch's caller can
-// tell "the constraints exclude everything" from "fetching metadata failed",
-// which need very different messages.
-var errNoVersionSatisfies = errors.New("no version satisfies all constraints")
+// errNoVersionSatisfies and errInvalidConstraint are bestVersion's two failure
+// modes. Both are sentinels so chooseAndFetch's caller can tell a version
+// *selection* failure from a metadata *fetch* failure: the first belongs on the
+// conflict path, which records the problem and carries on resolving the rest of
+// the graph, while the second aborts. Without the distinction an unparseable
+// constraint surfaced as "failed to fetch info for b@0.0.0" — a fetch that
+// never happened, against a zero version.
+var (
+	errNoVersionSatisfies = errors.New("no version satisfies all constraints")
+	errInvalidConstraint  = errors.New("invalid constraint")
+)
+
+// isVersionSelectionError reports whether err came from choosing a version
+// rather than from fetching its metadata.
+func isVersionSelectionError(err error) bool {
+	return errors.Is(err, errNoVersionSatisfies) || errors.Is(err, errInvalidConstraint)
+}
 
 func (s *state) checkExistingResolution(name, newConstraint, requiredBy string) error {
 	entry := s.resolved[name]
