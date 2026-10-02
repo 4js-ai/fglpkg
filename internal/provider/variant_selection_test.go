@@ -71,10 +71,12 @@ func TestPickVariant(t *testing.T) {
 	}
 }
 
-// variantProvider reports per-version variants, which fakeProvider does not.
+// variantProvider reports the two per-version compatibility signals that
+// fakeProvider does not: the published variants and the declared constraint.
 type variantProvider struct {
 	fakeProvider
-	variants map[string][]string // version → variant tags
+	variants    map[string][]string // version → variant tags
+	constraints map[string]string   // version → declared "genero" constraint
 }
 
 func (p *variantProvider) FetchVersions(name string) ([]resolver.CandidateVersion, error) {
@@ -83,7 +85,11 @@ func (p *variantProvider) FetchVersions(name string) ([]resolver.CandidateVersio
 	}
 	out := make([]resolver.CandidateVersion, 0, len(p.versions[name]))
 	for _, s := range p.versions[name] {
-		out = append(out, resolver.CandidateVersion{Version: semver.MustParse(s), Variants: p.variants[s]})
+		out = append(out, resolver.CandidateVersion{
+			Version:          semver.MustParse(s),
+			Variants:         p.variants[s],
+			GeneroConstraint: p.constraints[s],
+		})
 	}
 	return out, nil
 }
@@ -240,4 +246,57 @@ func (p *failingProvider) Search(string) ([]registry.SearchResult, error) { retu
 func gvOf(major string) *genero.Version {
 	v := genero.MustParse(major + ".00.01")
 	return &v
+}
+
+// ── Both compatibility signals on the multi-provider install-by-name path ────
+
+// These mirror TestResolveHonoursTheDeclaredGeneroConstraint and
+// TestResolveBlamesTheConstraintWhenNoVersionMatchesIt in internal/registry.
+// RepositorySet.Resolve is the path every `install <pkg>` takes as soon as a
+// second registry is configured, so the two must not drift: both now go through
+// registry.Runnable, and these pin that they agree (GIS-574).
+
+// A version publishing a build for this major is still unusable if its declared
+// constraint excludes the runtime. Checking only the variants let `install fx`
+// pick such a version — and the exact pin is written to fglpkg.json before the
+// graph install, so the bad pin outlived the failure that followed.
+func TestRepositorySetResolveHonoursTheDeclaredGeneroConstraint(t *testing.T) {
+	gi := &variantProvider{
+		fakeProvider: fakeProvider{name: "gi", versions: map[string][]string{"fx": {"1.0.0", "1.2.0"}}},
+		variants:     map[string][]string{"1.0.0": {"genero4"}, "1.2.0": {"genero4", "genero6"}},
+		constraints:  map[string]string{"1.2.0": ">=6.00"},
+	}
+	rs := NewRepositorySet([]Provider{gi}, descriptors(), nil)
+
+	info, err := rs.Resolve("fx", "^1.0.0", gvOf("4"))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	// 1.2.0 ships a genero4 build but declares it needs Genero 6.
+	if info.Version != "1.0.0" {
+		t.Errorf("resolved fx@%s, want 1.0.0 — 1.2.0 declares >=6.00", info.Version)
+	}
+}
+
+// Versions dropped for Genero must not be reported when they never satisfied
+// the constraint either, or a plain "no such version" reads as a Genero fault
+// and sends the user looking in the wrong place.
+func TestRepositorySetResolveBlamesTheConstraintWhenNoVersionMatchesIt(t *testing.T) {
+	gi := &variantProvider{
+		fakeProvider: fakeProvider{name: "gi", versions: map[string][]string{"fx": {"1.0.0", "2.0.0"}}},
+		variants:     map[string][]string{"1.0.0": {"genero4"}, "2.0.0": {"genero6"}},
+	}
+	rs := NewRepositorySet([]Provider{gi}, descriptors(), nil)
+
+	_, err := rs.Resolve("fx", "^3.0.0", gvOf("4"))
+	if err == nil {
+		t.Fatal("expected an error for ^3.0.0 with no 3.x published, got nil")
+	}
+	if !strings.Contains(err.Error(), `no version of "fx" satisfies constraint "^3.0.0"`) {
+		t.Errorf("error %q should blame the constraint", err)
+	}
+	// 2.0.0 was dropped for Genero, but it never matched ^3.0.0 either.
+	if strings.Contains(err.Error(), "can run on Genero") || strings.Contains(err.Error(), "2.0.0") {
+		t.Errorf("error %q blames Genero for a constraint mismatch", err)
+	}
 }

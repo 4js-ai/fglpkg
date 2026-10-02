@@ -421,3 +421,71 @@ func TestOptionalDepKeepsTheGeneroReasonWhenAllVersionsAreRefused(t *testing.T) 
 		t.Errorf("skip reason %q is the generic constraint message, not the Genero one", reason)
 	}
 }
+
+// ── Every dropped version is explained, and explained by its actual cause ────
+
+// filterByGenero and describeCandidates both go through registry.Runnable, so
+// the message cannot describe a different rule from the one that did the
+// dropping. Deriving the reason separately left two gaps.
+
+// A version that reports an empty variant list publishes no builds at all, so
+// it is dropped — but the old message only described versions that listed
+// builds, leaving this one rejected with no reason given.
+func TestVersionWithNoBuildsIsExplained(t *testing.T) {
+	db := variantDB{"fx": {
+		{Version: semver.MustParse("1.0.0"), Variants: []string{}},
+	}}
+
+	_, err := db.resolve(t, genero.MustParse("4.01.12"), "fx")
+	if err == nil {
+		t.Fatal("a version publishing no builds must not resolve, got nil")
+	}
+	if !strings.Contains(err.Error(), "1.0.0 publishes no builds") {
+		t.Errorf("error %q does not explain why 1.0.0 was dropped", err)
+	}
+}
+
+// A version dropped for an unparseable constraint used to be explained by its
+// builds, which may include this very major — contradicting the error.
+func TestInvalidDeclaredConstraintIsExplainedAsSuch(t *testing.T) {
+	db := variantDB{"fx": {
+		{Version: semver.MustParse("1.0.0"), GeneroConstraint: ">>bad", Variants: []string{"genero4"}},
+	}}
+
+	_, err := db.resolve(t, genero.MustParse("4.01.12"), "fx")
+	if err == nil {
+		t.Fatal("a version with an unparseable constraint must not resolve, got nil")
+	}
+	if !strings.Contains(err.Error(), `1.0.0 has an invalid genero constraint ">>bad"`) {
+		t.Errorf("error %q does not name the unparseable constraint", err)
+	}
+	// Its genero4 build is real, so citing it would contradict "not compatible
+	// with Genero 4.01.12" in the same sentence.
+	if strings.Contains(err.Error(), "has builds for") {
+		t.Errorf("error %q explains a constraint parse failure by the builds", err)
+	}
+}
+
+// Every version dropped must appear in the message — none may be silently
+// omitted, whatever the reason it was rejected for.
+func TestEveryDroppedVersionGetsAReason(t *testing.T) {
+	db := variantDB{"fx": {
+		{Version: semver.MustParse("1.0.0"), Variants: []string{"genero6"}},
+		{Version: semver.MustParse("1.1.0"), Variants: []string{}},
+		{Version: semver.MustParse("1.2.0"), GeneroConstraint: ">=6.00", Variants: []string{"genero4"}},
+	}}
+
+	_, err := db.resolve(t, genero.MustParse("4.01.12"), "fx")
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	for _, want := range []string{
+		"1.0.0 has builds for Genero 6",
+		"1.1.0 publishes no builds",
+		"1.2.0 requires Genero >=6.00",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}

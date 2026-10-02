@@ -534,19 +534,24 @@ func (r *Resolver) enqueueRootBucket(deps manifest.Dependencies, scope manifest.
 //
 // A version reporting no variants at all is kept — Artifactory and older
 // registries do not report them, and "unknown" must not mean "incompatible".
+// A version that reports an empty list is the opposite claim and is dropped.
+//
+// Both checks come from registry.Runnable, the same predicate the two
+// install-by-name paths use, so they cannot drift apart again (GIS-574); and
+// describeCandidates explains a rejection with that predicate's own reason, so
+// the message always matches what was actually dropped.
 func (r *Resolver) filterByGenero(pkgName string, candidates []CandidateVersion) ([]semver.Version, error) {
 	out := make([]semver.Version, 0, len(candidates))
 	for _, c := range candidates {
-		ok, err := r.generoVersion.Satisfies(c.GeneroConstraint)
-		if err != nil {
+		// An unparseable constraint is the author's mistake rather than an
+		// incompatibility, so it keeps its own warning on stderr; Runnable
+		// still rejects the version.
+		if _, err := r.generoVersion.Satisfies(c.GeneroConstraint); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: %s@%s has invalid genero constraint %q: %v — skipping\n",
 				pkgName, c.Version, c.GeneroConstraint, err)
 			continue
 		}
-		if !ok {
-			continue
-		}
-		if !registry.VariantsSupport(c.Variants, r.generoVersion.MajorString()) {
+		if ok, _ := registry.Runnable(&r.generoVersion, c.GeneroConstraint, c.Variants); !ok {
 			continue
 		}
 		out = append(out, c.Version)
@@ -559,18 +564,17 @@ func (r *Resolver) filterByGenero(pkgName string, candidates []CandidateVersion)
 // no version is compatible, leaving the user no way to tell whether to pin an
 // older version, upgrade Genero, or ask the publisher for a build.
 //
-// A declared constraint that excludes this runtime is named in preference to
-// the builds: such a version may well publish a build for this major, and
-// listing that build as the explanation would contradict the error it explains.
+// The reason comes from registry.Runnable, the predicate filterByGenero rejected
+// the version with, so every dropped version gets an explanation and the
+// explanation is the actual cause. Deriving it separately left gaps: a version
+// publishing no builds at all was dropped and then silently omitted here, and a
+// version dropped for an unparseable constraint was explained by its builds —
+// which may well include this major, contradicting the error it explains.
 func (r *Resolver) describeCandidates(candidates []CandidateVersion) string {
 	parts := make([]string, 0, len(candidates))
 	for _, c := range candidates {
-		if ok, err := r.generoVersion.Satisfies(c.GeneroConstraint); err == nil && !ok {
-			parts = append(parts, fmt.Sprintf("%s requires Genero %s", c.Version, c.GeneroConstraint))
-			continue
-		}
-		if len(c.Variants) > 0 {
-			parts = append(parts, registry.DescribeBuilds(c.Version.String(), c.Variants))
+		if ok, reason := registry.Runnable(&r.generoVersion, c.GeneroConstraint, c.Variants); !ok {
+			parts = append(parts, c.Version.String()+" "+reason)
 		}
 	}
 	if len(parts) == 0 {
