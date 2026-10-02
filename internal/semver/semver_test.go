@@ -1,6 +1,7 @@
 package semver_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/semver"
@@ -10,9 +11,9 @@ import (
 
 func TestParse(t *testing.T) {
 	cases := []struct {
-		input string
+		input               string
 		major, minor, patch uint64
-		pre   string
+		pre                 string
 	}{
 		{"1.2.3", 1, 2, 3, ""},
 		{"0.0.1", 0, 0, 1, ""},
@@ -59,9 +60,9 @@ func TestCompare(t *testing.T) {
 		{"2.0.0", "1.0.0", 1},
 		{"1.2.3", "1.2.4", -1},
 		{"1.3.0", "1.2.9", 1},
-		{"1.0.0-alpha", "1.0.0", -1},        // pre-release < release
-		{"1.0.0-alpha", "1.0.0-beta", -1},   // alpha < beta
-		{"1.0.0-1", "1.0.0-2", -1},           // numeric pre-release
+		{"1.0.0-alpha", "1.0.0", -1},      // pre-release < release
+		{"1.0.0-alpha", "1.0.0-beta", -1}, // alpha < beta
+		{"1.0.0-1", "1.0.0-2", -1},        // numeric pre-release
 		{"1.0.0-rc.1", "1.0.0-rc.2", -1},
 		{"1.0.0-alpha.1", "1.0.0-alpha.beta", -1}, // numeric < alpha
 		{"1.0.0-beta.11", "1.0.0-beta.2", 1},      // 11 > 2 numerically
@@ -239,5 +240,54 @@ func TestBarePartialStripsBuildMetadata(t *testing.T) {
 	}
 	if !c.Matches(semver.MustParse("1.2.3-beta")) {
 		t.Errorf("constraint %q should match 1.2.3-beta (build metadata must be ignored)", c)
+	}
+}
+
+// Without underpins the resolver's step-down loop, which drops a candidate and
+// retries. A Without that fails to remove its argument does not make that loop
+// fail — it makes it spin forever, so this is covered directly rather than only
+// through callers that would hang rather than report.
+func TestWithout(t *testing.T) {
+	vs := func(ss ...string) []semver.Version {
+		out := make([]semver.Version, 0, len(ss))
+		for _, s := range ss {
+			out = append(out, semver.MustParse(s))
+		}
+		return out
+	}
+	join := func(got []semver.Version) string {
+		parts := make([]string, 0, len(got))
+		for _, v := range got {
+			parts = append(parts, v.String())
+		}
+		return strings.Join(parts, ",")
+	}
+
+	for _, tc := range []struct {
+		name   string
+		in     []semver.Version
+		remove string
+		want   string
+	}{
+		{"removes the named version", vs("1.0.0", "1.0.1", "2.0.0"), "1.0.1", "1.0.0,2.0.0"},
+		{"removes the only version", vs("1.0.0"), "1.0.0", ""},
+		{"absent version is a no-op", vs("1.0.0", "2.0.0"), "3.0.0", "1.0.0,2.0.0"},
+		{"empty input stays empty", nil, "1.0.0", ""},
+		{"prerelease is distinct from its release", vs("1.0.0-rc.1", "1.0.0"), "1.0.0", "1.0.0-rc.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := join(semver.Without(tc.in, semver.MustParse(tc.remove))); got != tc.want {
+				t.Errorf("semver.Without(%v, %s) = %q, want %q", join(tc.in), tc.remove, got, tc.want)
+			}
+		})
+	}
+}
+
+// The input must not be aliased or mutated: the resolver keeps its own slice.
+func TestWithoutDoesNotMutateItsInput(t *testing.T) {
+	in := []semver.Version{semver.MustParse("1.0.0"), semver.MustParse("1.0.1")}
+	semver.Without(in, semver.MustParse("1.0.0"))
+	if len(in) != 2 || in[0].String() != "1.0.0" || in[1].String() != "1.0.1" {
+		t.Errorf("input was modified: %v", in)
 	}
 }

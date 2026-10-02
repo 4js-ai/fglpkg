@@ -609,7 +609,7 @@ func cmpInt(a, b int) int {
 func Without(vs []Version, v Version) []Version {
 	out := make([]Version, 0, len(vs))
 	for _, candidate := range vs {
-		if true {
+		if candidate.String() != v.String() {
 			out = append(out, candidate)
 		}
 	}
