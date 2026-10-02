@@ -301,6 +301,28 @@ type LockedJAR struct {
 
 // ─── Construction ─────────────────────────────────────────────────────────────
 
+// lockedGeneroMajor returns the Genero major to record for a resolved package:
+// the major of the artifact variant that was actually selected, not the major
+// of the running runtime. The two diverge when a version publishes no build for
+// the detected major, and the difference is not cosmetic — the installer,
+// `audit signatures` and the SBOM writer all read this field back and rebuild
+// the signed variant as "genero"+GeneroMajor. Recording the runtime's major
+// there verifies the signature against the wrong variant and reports a spurious
+// "signature does not match", which is indistinguishable from a tampered
+// artifact (GIS-574).
+//
+// Only "genero<N>" variants carry a major. "webcomponent" never reaches here —
+// FromPlan routes those to Webcomponents — and no publish path emits any other
+// variant for the GI registry, so anything unrecognised (an Artifactory
+// "default", or an empty variant from a provider that does not report one)
+// keeps the previous behaviour of recording the runtime's major.
+func lockedGeneroMajor(variant, runtimeMajor string) string {
+	if major := strings.TrimPrefix(variant, "genero"); major != variant && major != "" {
+		return major
+	}
+	return runtimeMajor
+}
+
 // FromPlan builds a LockFile from a resolved Plan and the root manifest.
 // Packages with variant "webcomponent" land in the Webcomponents array;
 // everything else lands in Packages. mavenBase is the resolved Maven mirror
@@ -339,7 +361,7 @@ func FromPlan(plan *resolver.Plan, root *manifest.Manifest, mavenBase string) *L
 			Version:        p.Version.String(),
 			DownloadURL:    p.DownloadURL,
 			Checksum:       p.Checksum,
-			GeneroMajor:    plan.GeneroVersion.MajorString(),
+			GeneroMajor:    lockedGeneroMajor(p.Variant, plan.GeneroVersion.MajorString()),
 			RequiredBy:     requiredBy,
 			Scope:          scopeLockString(p.Scope),
 			Registry:       normalizeSource(p.Source),

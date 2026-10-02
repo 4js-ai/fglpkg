@@ -688,7 +688,6 @@ func cmdInstall(args []string) error {
 	if err != nil {
 		return fmt.Errorf("cannot detect Genero version: %w", err)
 	}
-	generoMajor := gv.MajorString()
 
 	// Engage multi-provider routing for the add-package resolve when repositories
 	// beyond the built-in GI registry are configured; otherwise fall back to the
@@ -739,9 +738,9 @@ func cmdInstall(args []string) error {
 		fmt.Printf("Resolving %s@%s (Genero %s)...\n", name, version, gv)
 		var info *registry.PackageInfo
 		if rs != nil {
-			info, err = rs.Resolve(name, version, generoMajor)
+			info, err = rs.Resolve(name, version, &gv)
 		} else {
-			info, err = registry.Resolve(name, version, generoMajor)
+			info, err = registry.Resolve(name, version, &gv)
 		}
 		if err != nil {
 			// Prefer the registry this resolve was actually scoped to (an explicit

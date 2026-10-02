@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/config"
+	"github.com/4js-mikefolcher/fglpkg/internal/genero"
 	"github.com/4js-mikefolcher/fglpkg/internal/registry"
 	"github.com/4js-mikefolcher/fglpkg/internal/resolver"
 	"github.com/4js-mikefolcher/fglpkg/internal/semver"
@@ -185,24 +186,58 @@ func (rs *RepositorySet) Info(name, version, generoMajor string) (*registry.Pack
 // resolver's fetchers. It is the multi-provider analog of registry.Resolve,
 // used by `fglpkg install <pkg>` to add a package that may live in a secondary
 // repository (an Artifactory repo, not just GI).
-func (rs *RepositorySet) Resolve(name, constraint, generoMajor string) (*registry.PackageInfo, error) {
+func (rs *RepositorySet) Resolve(name, constraint string, gv *genero.Version) (*registry.PackageInfo, error) {
 	d, err := rs.route(name)
 	if err != nil {
 		return nil, err
-	}
-	candidates := make([]semver.Version, 0, len(d.versions))
-	for _, cv := range d.versions {
-		candidates = append(candidates, cv.Version)
 	}
 	c, err := semver.ParseConstraint(constraint)
 	if err != nil {
 		return nil, fmt.Errorf("invalid version constraint %q: %w", constraint, err)
 	}
-	best, err := c.Latest(candidates)
-	if err != nil {
-		return nil, fmt.Errorf("no version of %q satisfies constraint %q", name, constraint)
+	// Mirror registry.Resolve: a version that cannot run here must not be a
+	// candidate for "latest" (GIS-574). Artifactory reports no variants, so its
+	// versions are not skipped here; its FetchInfo refuses one with no build
+	// for this major instead, and the loop below steps down.
+	candidates := make([]semver.Version, 0, len(d.versions))
+	var skipped []string
+	for _, cv := range d.versions {
+		if ok, reason := registry.Runnable(gv, cv.GeneroConstraint, cv.Variants); !ok {
+			// Only versions the constraint would have accepted explain a Genero
+			// failure; the rest were never wanted.
+			if c.Matches(cv.Version) {
+				skipped = append(skipped, cv.Version.String()+" "+reason)
+			}
+			continue
+		}
+		candidates = append(candidates, cv.Version)
 	}
-	return d.provider.FetchInfo(name, best.String(), generoMajor)
+	// Step down to the next-best version when the provider reports the chosen
+	// one has no build for this Genero. Artifactory lists no variants, so the
+	// loop above skipped nothing and the per-version fetch is the only signal;
+	// without this, a genero6-only latest release makes `install <pkg>` fail
+	// outright even though an older version has a build for this runtime
+	// (GIS-574). GI never reaches the retry — its versions were filtered above.
+	for {
+		best, err := c.Latest(candidates)
+		if err != nil {
+			if len(skipped) > 0 {
+				return nil, fmt.Errorf("no version of %q satisfying %q can run on Genero %s (%s)",
+					name, constraint, gv, strings.Join(skipped, "; "))
+			}
+			return nil, fmt.Errorf("no version of %q satisfies constraint %q", name, constraint)
+		}
+		info, err := d.provider.FetchInfo(name, best.String(), registryMajor(gv))
+		if err == nil {
+			return info, nil
+		}
+		var noBuild *registry.NoBuildError
+		if !errors.As(err, &noBuild) {
+			return nil, err
+		}
+		skipped = append(skipped, registry.DescribeBuilds(best.String(), noBuild.Published))
+		candidates = semver.Without(candidates, best)
+	}
 }
 
 // configuredNames returns the provider names in priority order, for use in
@@ -385,3 +420,12 @@ type collisionErr struct{ msg string }
 
 func (e *collisionErr) Error() string { return e.msg }
 func (e *collisionErr) Unwrap() error { return resolver.ErrCollision }
+
+// registryMajor returns gv's major version string, or "" when the runtime is
+// unknown — the form the Provider interface takes.
+func registryMajor(gv *genero.Version) string {
+	if gv == nil {
+		return ""
+	}
+	return gv.MajorString()
+}

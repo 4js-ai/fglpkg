@@ -44,6 +44,7 @@ func (g *GeneroProvider) FetchVersions(name string) ([]resolver.CandidateVersion
 		out = append(out, resolver.CandidateVersion{
 			Version:          v,
 			GeneroConstraint: ve.GeneroConstraint,
+			Variants:         ve.Variants,
 		})
 	}
 	return out, nil

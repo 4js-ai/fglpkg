@@ -1110,9 +1110,33 @@ Resolving dependency graph (Genero 4.01.12)...
 ✓ poiapi@1.0.0
 ```
 
+**Which variants a version publishes also decides which version you get.** A package does not have to ship every variant for every release — an author may publish a new version built only for the newest Genero. Version selection therefore skips any version with no build for your Genero, and picks the newest one that has it:
+
+```
+fglunit 1.0.1  → genero6 only
+fglunit 1.0.0  → genero4, genero5, genero6
+```
+
+On Genero 6, `fglunit ^1.0.0` resolves to `1.0.1`; on Genero 4 or 5 it resolves to `1.0.0`, because `1.0.1` has nothing to install. This is independent of the optional `genero` constraint a package may declare — the two are checked separately, and most packages declare no constraint at all.
+
+If no version has a build for your Genero, the error names what each version does publish, so you can tell whether to upgrade Genero or ask the author for a build:
+
+```
+$ fglpkg install odatalib
+Resolving odatalib@latest (Genero 4.01.12)...
+failed to resolve odatalib@latest: no version of "odatalib" satisfying "latest"
+has a build for Genero 4 (1.2.0 has builds for Genero 5, 6)
+```
+
+`fglpkg outdated` applies the same rule, so its **Wanted** and **Latest** columns only name versions `fglpkg update` could actually install on your Genero. `fglpkg info` still describes any version — its **Variants** line shows which Genero majors it has builds for.
+
+An Artifactory repository does not report variants when it lists versions, so a version there can only be checked once it is chosen. fglpkg therefore tries the newest version first and **steps down to the next one** when the chosen version turns out to have no build for your Genero, so you still get the newest release that can actually run. Only when no version has a build does the install fail, naming what each one does publish. Note that `fglpkg outdated` cannot apply the rule for an Artifactory package, since it reads the version list alone — its **Latest** column may name a version that `update` will step past.
+
 #### Lock file and Genero changes
 
 The lock file records which Genero major version was used during resolution. If you switch to a different Genero major version, run `fglpkg update` to re-resolve and select the correct variants. Plain `fglpkg install` only **warns** about the mismatch and keeps the locked variants — it does not re-resolve for a Genero change.
+
+**Lock files written by fglpkg 4.2.8 or earlier on Genero 4 or 5** may lock a version that has no build for that Genero — for example `fglunit@1.0.1`, whose only build is `genero6`. Plain `fglpkg install` keeps installing that build from the lock file, and `fglpkg audit signatures` reports `signature does not match` for it, even though the artifact is genuine. Run `fglpkg update` once to re-resolve to a version that has a build for your Genero, then commit the updated lock file.
 
 ### Genero Version Constraints
 

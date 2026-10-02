@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/config"
+	"github.com/4js-mikefolcher/fglpkg/internal/genero"
 	"github.com/4js-mikefolcher/fglpkg/internal/lockfile"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 	"github.com/4js-mikefolcher/fglpkg/internal/provider"
@@ -102,6 +103,14 @@ func cmdOutdated(args []string) error {
 	}
 	noteConsumeDefault(rs, consumeDefault, fromDefault)
 
+	// Wanted/Latest must name versions `update` could actually move to, so they
+	// are filtered for the running Genero exactly as resolution is (GIS-574).
+	// Undetected Genero filters nothing, as before.
+	var gv *genero.Version
+	if detected, err := genero.Detect(); err == nil {
+		gv = &detected
+	}
+
 	names := make([]string, 0, len(m.Dependencies.FGL))
 	for n := range m.Dependencies.FGL {
 		names = append(names, n)
@@ -113,7 +122,7 @@ func cmdOutdated(args []string) error {
 
 	for _, name := range names {
 		sourceReg := outdatedSourceFor(m, name, locked, sources, consumeDefault, fromDefault)
-		row := buildOutdatedRow(rs, name, m.Dependencies.FGL[name], current[name], sourceReg)
+		row := buildOutdatedRow(rs, name, m.Dependencies.FGL[name], current[name], sourceReg, gv)
 		rows = append(rows, row)
 		if row.Status != "ok" {
 			outdatedCount++
@@ -160,7 +169,8 @@ func outdatedSourceFor(m *manifest.Manifest, name string, locked map[string]bool
 // its current/wanted/latest/status fields. When a multi-provider set is
 // configured (rs != nil) the package is checked against its locked source
 // repository (sourceReg; "" ⇒ the built-in GI registry) rather than always GI.
-func buildOutdatedRow(rs *provider.RepositorySet, name, constraint, currentVer, sourceReg string) outdatedRow {
+// gv, when non-nil, limits wanted/latest to versions that can run on it.
+func buildOutdatedRow(rs *provider.RepositorySet, name, constraint, currentVer, sourceReg string, gv *genero.Version) outdatedRow {
 	row := outdatedRow{
 		Name:       name,
 		Constraint: constraint,
@@ -176,9 +186,13 @@ func buildOutdatedRow(rs *provider.RepositorySet, name, constraint, currentVer, 
 		return row
 	}
 
-	candidates := parseVersionStrings(vl.Versions)
-	if len(candidates) == 0 {
+	if len(parseVersionStrings(vl.Versions)) == 0 {
 		row.Status = "no published versions"
+		return row
+	}
+	candidates := runnableVersions(vl, gv)
+	if len(candidates) == 0 {
+		row.Status = fmt.Sprintf("no version for Genero %s", gv)
 		return row
 	}
 
@@ -251,11 +265,44 @@ func outdatedVersionList(rs *provider.RepositorySet, name, sourceReg string) (*r
 	if err != nil {
 		return nil, err
 	}
-	vs := make([]string, 0, len(cvs))
+	vl := &registry.VersionList{Versions: make([]string, 0, len(cvs))}
 	for _, cv := range cvs {
-		vs = append(vs, cv.Version.String())
+		vl.Versions = append(vl.Versions, cv.Version.String())
+		vl.VersionEntries = append(vl.VersionEntries, registry.VersionEntry{
+			Version:          cv.Version.String(),
+			GeneroConstraint: cv.GeneroConstraint,
+			Variants:         cv.Variants,
+		})
 	}
-	return &registry.VersionList{Versions: vs}, nil
+	return vl, nil
+}
+
+// runnableVersions parses the published versions that can run on gv, applying
+// the resolver's two checks (filterByGenero): the version's declared genero
+// constraint, and whether it publishes a build for gv's major. Without them
+// `outdated` offers a version `update` will never select — on Genero 4, a
+// genero6-only 1.0.1 shows as "update available" indefinitely, and as a CI gate
+// the command never passes (GIS-574). A nil gv, or a list carrying no
+// per-version entries, filters nothing.
+func runnableVersions(vl *registry.VersionList, gv *genero.Version) []semver.Version {
+	if gv == nil || len(vl.VersionEntries) == 0 {
+		return parseVersionStrings(vl.Versions)
+	}
+	out := make([]semver.Version, 0, len(vl.VersionEntries))
+	for _, e := range vl.VersionEntries {
+		v, err := semver.Parse(e.Version)
+		if err != nil {
+			continue
+		}
+		if ok, err := gv.Satisfies(e.GeneroConstraint); err != nil || !ok {
+			continue
+		}
+		if !registry.VariantsSupport(e.Variants, gv.MajorString()) {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
 }
 
 func parseVersionStrings(vs []string) []semver.Version {

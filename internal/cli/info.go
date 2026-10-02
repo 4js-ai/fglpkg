@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -142,7 +143,16 @@ func infoFetch(rs *provider.RepositorySet, name, version string) (*registry.Pack
 	if gv, err := genero.Detect(); err == nil {
 		generoMajor = gv.MajorString()
 	}
-	return rs.Info(name, version, generoMajor)
+	info, err := rs.Info(name, version, generoMajor)
+	// `info` describes a package; it does not install one. A version with no
+	// build for this runtime is still worth describing — its Variants line says
+	// which majors it serves — so fall back to the major-less lookup the
+	// single-registry path always uses (GIS-574).
+	var noBuild *registry.NoBuildError
+	if errors.As(err, &noBuild) {
+		return rs.Info(name, version, "")
+	}
+	return info, err
 }
 
 // latestVersion picks the newest entry from a version list using the

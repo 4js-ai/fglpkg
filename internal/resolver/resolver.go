@@ -144,6 +144,11 @@ func strongerScope(a, b manifest.Scope) manifest.Scope {
 type Conflict struct {
 	Package     string
 	Constraints []constraintSource
+
+	// Note, when set, explains that versions satisfying the constraints exist
+	// but cannot run on the detected Genero. Without it a pin to such a
+	// version reads as a constraint clash, though the version plainly exists.
+	Note string
 }
 
 func (c Conflict) Error() string {
@@ -151,6 +156,9 @@ func (c Conflict) Error() string {
 	fmt.Fprintf(&b, "version conflict for %q:\n", c.Package)
 	for _, cs := range c.Constraints {
 		fmt.Fprintf(&b, "  %s requires %q\n", cs.requiredBy, cs.constraint)
+	}
+	if c.Note != "" {
+		fmt.Fprintf(&b, "  %s\n", c.Note)
 	}
 	return b.String()
 }
@@ -160,11 +168,21 @@ type constraintSource struct {
 	requiredBy string
 }
 
-// CandidateVersion pairs a parsed semver version with its Genero constraint.
+// CandidateVersion pairs a parsed semver version with its Genero constraint
+// and the artifact variants published for it.
 // Exported so test packages can construct fake VersionFetcher responses.
 type CandidateVersion struct {
 	Version          semver.Version
 	GeneroConstraint string
+
+	// Variants lists the artifact variant tags this version publishes
+	// ("genero4", "genero6", "webcomponent", …). It is the ground truth for
+	// Genero compatibility — a version with no build for the running major
+	// cannot be installed however loose its declared constraint is — and most
+	// publishers declare no constraint at all, so this is usually the only
+	// signal available. Empty means the provider does not report variants
+	// (Artifactory, older registries), which is treated as "unknown, allow".
+	Variants []string
 }
 
 // VersionFetcher fetches available versions and their Genero constraints.
@@ -346,13 +364,31 @@ func (r *Resolver) ResolveWithOptions(root *manifest.Manifest, opts ResolveOptio
 					continue
 				}
 				return nil, fmt.Errorf(
-					"no version of %q is compatible with Genero %s",
+					"no version of %q is compatible with Genero %s%s",
 					item.name, r.generoVersion,
+					r.describeCandidates(candidates),
 				)
 			}
 
-			chosen, err := state.bestVersion(item.name, generoCompatible)
-			if err != nil {
+			chosen, info, refused, err := r.chooseAndFetch(state, item.name, generoCompatible)
+			if isVersionSelectionError(err) {
+				// Every version the constraints allowed was refused for this
+				// runtime: a Genero problem rather than a clash between
+				// constraints, and reported as one in both scopes — an optional
+				// dependency skipped with only "no version satisfies all
+				// constraints" hides the one fact that explains it.
+				if len(refused) > 0 {
+					if item.scope == manifest.ScopeOptional {
+						state.skipOptional(item.name, fmt.Sprintf(
+							"no version compatible with Genero %s (%s)",
+							r.generoVersion, strings.Join(refused, "; ")))
+						continue
+					}
+					return nil, fmt.Errorf(
+						"no version of %q is compatible with Genero %s (%s)",
+						item.name, r.generoVersion, strings.Join(refused, "; "),
+					)
+				}
 				if item.scope == manifest.ScopeOptional {
 					state.skipOptional(item.name, fmt.Sprintf("no version satisfies constraints: %v", err))
 					continue
@@ -360,11 +396,10 @@ func (r *Resolver) ResolveWithOptions(root *manifest.Manifest, opts ResolveOptio
 				state.addConflict(Conflict{
 					Package:     item.name,
 					Constraints: state.constraints[item.name],
+					Note:        r.excludedMatchesNote(state, item.name, candidates, generoCompatible),
 				})
 				continue
 			}
-
-			info, err := r.fetchInfo(item.name, chosen.String(), r.generoVersion.MajorString())
 			if err != nil {
 				if item.scope == manifest.ScopeOptional {
 					state.skipOptional(item.name, fmt.Sprintf("fetch info: %v", err))
@@ -485,22 +520,130 @@ func (r *Resolver) enqueueRootBucket(deps manifest.Dependencies, scope manifest.
 	}
 }
 
-// filterByGenero removes candidate versions whose GeneroConstraint is not
-// satisfied by the detected Genero runtime version.
+// filterByGenero removes candidate versions that cannot run on the detected
+// Genero runtime, on either of two independent grounds:
+//
+//  1. the version's declared GeneroConstraint excludes it; or
+//  2. the version publishes artifact variants but none for this major.
+//
+// The second check matters because the first is usually vacuous: most
+// publishers declare no "genero" constraint, and Version.Satisfies("") is
+// unconditionally true, so without it every version of such a package looks
+// compatible with every runtime. Resolution then picks the newest and the
+// registry client hands back whatever build it has (GIS-574).
+//
+// A version reporting no variants at all is kept — Artifactory and older
+// registries do not report them, and "unknown" must not mean "incompatible".
+// A version that reports an empty list is the opposite claim and is dropped.
+//
+// Both checks come from registry.Runnable, the same predicate the two
+// install-by-name paths use, so they cannot drift apart again (GIS-574); and
+// describeCandidates explains a rejection with that predicate's own reason, so
+// the message always matches what was actually dropped.
 func (r *Resolver) filterByGenero(pkgName string, candidates []CandidateVersion) ([]semver.Version, error) {
 	out := make([]semver.Version, 0, len(candidates))
 	for _, c := range candidates {
-		ok, err := r.generoVersion.Satisfies(c.GeneroConstraint)
-		if err != nil {
+		// An unparseable constraint is the author's mistake rather than an
+		// incompatibility, so it keeps its own warning on stderr; Runnable
+		// still rejects the version.
+		if _, err := r.generoVersion.Satisfies(c.GeneroConstraint); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: %s@%s has invalid genero constraint %q: %v — skipping\n",
 				pkgName, c.Version, c.GeneroConstraint, err)
 			continue
 		}
-		if ok {
-			out = append(out, c.Version)
+		if ok, _ := registry.Runnable(&r.generoVersion, c.GeneroConstraint, c.Variants); !ok {
+			continue
 		}
+		out = append(out, c.Version)
 	}
 	return out, nil
+}
+
+// describeCandidates explains why each rejected version cannot run here, for
+// the error raised when nothing resolves. Without it the message says only that
+// no version is compatible, leaving the user no way to tell whether to pin an
+// older version, upgrade Genero, or ask the publisher for a build.
+//
+// The reason comes from registry.Runnable, the predicate filterByGenero rejected
+// the version with, so every dropped version gets an explanation and the
+// explanation is the actual cause. Deriving it separately left gaps: a version
+// publishing no builds at all was dropped and then silently omitted here, and a
+// version dropped for an unparseable constraint was explained by its builds —
+// which may well include this major, contradicting the error it explains.
+func (r *Resolver) describeCandidates(candidates []CandidateVersion) string {
+	parts := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		if ok, reason := registry.Runnable(&r.generoVersion, c.GeneroConstraint, c.Variants); !ok {
+			parts = append(parts, c.Version.String()+" "+reason)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, "; ") + ")"
+}
+
+// chooseAndFetch picks the best version satisfying the accumulated constraints
+// and fetches its metadata, stepping down to the next-best version whenever the
+// provider reports that the chosen one has no build for this Genero. It returns
+// the chosen version, its metadata, and a description of every version refused
+// along the way.
+//
+// For GI this never retries: filterByGenero has already dropped those versions,
+// because the version listing carries the variants. Artifactory reports no
+// variants when it lists versions, so the per-version fetch is its only signal
+// — and without stepping down, a genero6-only latest release makes `install`,
+// a `^1.0.0` dependency and `update` all fail outright even though an older
+// version does publish a build for this runtime (GIS-574).
+//
+// The extra round trips happen only when a version is actually refused.
+func (r *Resolver) chooseAndFetch(s *state, name string, compatible []semver.Version) (semver.Version, *registry.PackageInfo, []string, error) {
+	remaining := make([]semver.Version, len(compatible))
+	copy(remaining, compatible)
+
+	var rejected []string
+	for {
+		chosen, err := s.bestVersion(name, remaining)
+		if err != nil {
+			return semver.Version{}, nil, rejected, err
+		}
+		info, err := r.fetchInfo(name, chosen.String(), r.generoVersion.MajorString())
+		if err == nil {
+			return chosen, info, rejected, nil
+		}
+		var noBuild *registry.NoBuildError
+		if !errors.As(err, &noBuild) {
+			// Carry the version back so the caller's message can name it.
+			return chosen, nil, rejected, err
+		}
+		rejected = append(rejected, registry.DescribeBuilds(chosen.String(), noBuild.Published))
+		remaining = semver.Without(remaining, chosen)
+	}
+}
+
+// excludedMatchesNote explains a constraint conflict that the Genero filter
+// caused rather than the constraints themselves: it names the versions that
+// do satisfy every constraint on name but were excluded for this runtime, and
+// returns "" when there are none (a genuine constraint clash).
+func (r *Resolver) excludedMatchesNote(s *state, name string, candidates []CandidateVersion, compatible []semver.Version) string {
+	kept := make(map[string]bool, len(compatible))
+	for _, v := range compatible {
+		kept[v.String()] = true
+	}
+	var excluded []CandidateVersion
+	for _, c := range candidates {
+		if kept[c.Version.String()] {
+			continue
+		}
+		if _, err := s.bestVersion(name, []semver.Version{c.Version}); err == nil {
+			excluded = append(excluded, c)
+		}
+	}
+	if len(excluded) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("no matching version can be used on Genero %s%s",
+		r.generoVersion, r.describeCandidates(excluded))
 }
 
 // ─── ConflictList ─────────────────────────────────────────────────────────────
@@ -607,8 +750,8 @@ func (s *state) bestVersion(name string, candidates []semver.Version) (semver.Ve
 	for _, cs := range s.constraints[name] {
 		c, err := semver.ParseConstraint(cs.constraint)
 		if err != nil {
-			return semver.Version{}, fmt.Errorf("invalid constraint %q from %s: %w",
-				cs.constraint, cs.requiredBy, err)
+			return semver.Version{}, fmt.Errorf("%w %q from %s: %v",
+				errInvalidConstraint, cs.constraint, cs.requiredBy, err)
 		}
 		parsed = append(parsed, c)
 	}
@@ -629,9 +772,27 @@ func (s *state) bestVersion(name string, candidates []semver.Version) (semver.Ve
 	}
 
 	if best == nil {
-		return semver.Version{}, fmt.Errorf("no version satisfies all constraints")
+		return semver.Version{}, errNoVersionSatisfies
 	}
 	return *best, nil
+}
+
+// errNoVersionSatisfies and errInvalidConstraint are bestVersion's two failure
+// modes. Both are sentinels so chooseAndFetch's caller can tell a version
+// *selection* failure from a metadata *fetch* failure: the first belongs on the
+// conflict path, which records the problem and carries on resolving the rest of
+// the graph, while the second aborts. Without the distinction an unparseable
+// constraint surfaced as "failed to fetch info for b@0.0.0" — a fetch that
+// never happened, against a zero version.
+var (
+	errNoVersionSatisfies = errors.New("no version satisfies all constraints")
+	errInvalidConstraint  = errors.New("invalid constraint")
+)
+
+// isVersionSelectionError reports whether err came from choosing a version
+// rather than from fetching its metadata.
+func isVersionSelectionError(err error) bool {
+	return errors.Is(err, errNoVersionSatisfies) || errors.Is(err, errInvalidConstraint)
 }
 
 func (s *state) checkExistingResolution(name, newConstraint, requiredBy string) error {
@@ -757,6 +918,7 @@ func registryVersions(name string) ([]CandidateVersion, error) {
 		out = append(out, CandidateVersion{
 			Version:          v,
 			GeneroConstraint: ve.GeneroConstraint,
+			Variants:         ve.Variants,
 		})
 	}
 	return out, nil

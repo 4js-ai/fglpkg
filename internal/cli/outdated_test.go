@@ -87,7 +87,7 @@ func TestBuildOutdatedRowStatuses(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			row := buildOutdatedRow(nil, "demo", tc.constraint, tc.current, "")
+			row := buildOutdatedRow(nil, "demo", tc.constraint, tc.current, "", nil)
 			if row.Status != tc.wantStatus {
 				t.Errorf("status = %q, want %q", row.Status, tc.wantStatus)
 			}
@@ -123,7 +123,7 @@ func TestBuildOutdatedRowDeprecationSingleFetch(t *testing.T) {
 	t.Cleanup(ts.Close)
 	t.Setenv("FGLPKG_REGISTRY", ts.URL)
 
-	row := buildOutdatedRow(nil, "demo", "^1.0.0", "1.0.0", "")
+	row := buildOutdatedRow(nil, "demo", "^1.0.0", "1.0.0", "", nil)
 	if !row.Deprecated || row.MovedTo != "demo-ng" {
 		t.Errorf("row Deprecated=%v MovedTo=%q, want true / demo-ng", row.Deprecated, row.MovedTo)
 	}
@@ -134,7 +134,7 @@ func TestBuildOutdatedRowDeprecationSingleFetch(t *testing.T) {
 
 func TestBuildOutdatedRowRegistryError(t *testing.T) {
 	t.Setenv("FGLPKG_REGISTRY", "http://127.0.0.1:1") // unreachable
-	row := buildOutdatedRow(nil, "demo", "^1.0.0", "1.0.0", "")
+	row := buildOutdatedRow(nil, "demo", "^1.0.0", "1.0.0", "", nil)
 	if row.Status != "registry error" {
 		t.Errorf("status = %q, want %q", row.Status, "registry error")
 	}
