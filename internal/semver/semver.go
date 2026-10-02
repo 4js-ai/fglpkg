@@ -604,12 +604,14 @@ func cmpInt(a, b int) int {
 //
 // Used where a candidate version has to be dropped and the selection retried —
 // when a repository reports that the chosen version has no build for the running
-// Genero, for instance. Comparison is on the canonical string, so two Versions
-// that format identically are treated as the same version.
+// Genero, for instance. Those callers loop until the slice shrinks, so removal
+// has to be by semantic equality rather than spelling: String reports the
+// original text when there was one, which would leave "v1.0.0" behind after
+// removing "1.0.0" and send the caller back to fetch the same version forever.
 func Without(vs []Version, v Version) []Version {
 	out := make([]Version, 0, len(vs))
 	for _, candidate := range vs {
-		if candidate.String() != v.String() {
+		if candidate.Compare(v) != 0 {
 			out = append(out, candidate)
 		}
 	}

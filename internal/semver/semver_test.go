@@ -274,6 +274,10 @@ func TestWithout(t *testing.T) {
 		{"absent version is a no-op", vs("1.0.0", "2.0.0"), "3.0.0", "1.0.0,2.0.0"},
 		{"empty input stays empty", nil, "1.0.0", ""},
 		{"prerelease is distinct from its release", vs("1.0.0-rc.1", "1.0.0"), "1.0.0", "1.0.0-rc.1"},
+		// Spelling must not matter: a caller that loops until the slice shrinks
+		// would otherwise refetch the same version forever.
+		{"v-prefixed spelling is the same version", vs("v1.0.0", "2.0.0"), "1.0.0", "2.0.0"},
+		{"removing a v-prefixed version matches the plain one", vs("1.0.0", "2.0.0"), "v1.0.0", "2.0.0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := join(semver.Without(tc.in, semver.MustParse(tc.remove))); got != tc.want {

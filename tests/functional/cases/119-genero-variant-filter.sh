@@ -151,7 +151,7 @@ _variant_multi_registry_error_names_builds() {
   _variant_with_secondary
   run install unitfx
   assert_failure
-  assert_contains "has a build for Genero 3"
+  assert_contains "can run on Genero 3"
   assert_contains "1.0.0 has builds for Genero 4, 5, 6"
 }
 it "a multi-registry install with no compatible build names the builds that exist" \

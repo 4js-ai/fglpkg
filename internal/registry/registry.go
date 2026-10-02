@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/4js-mikefolcher/fglpkg/internal/genero"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 	"github.com/4js-mikefolcher/fglpkg/internal/semver"
 	slugutil "github.com/4js-mikefolcher/fglpkg/internal/slug"
@@ -370,43 +371,48 @@ func AbsoluteDownloadURL(raw string) string {
 // Resolve fetches the best matching version of name for the given constraint.
 // constraint may be "latest", "*", or any semver constraint string (e.g.
 // "^1.2.0"). generoMajor selects the variant; "" picks the default.
-func Resolve(name, constraint, generoMajor string) (*PackageInfo, error) {
+func Resolve(name, constraint string, gv *genero.Version) (*PackageInfo, error) {
 	vl, err := FetchVersionList(name)
 	if err != nil {
 		return nil, err
-	}
-	// Skip versions that publish no build for this Genero major, so `install
-	// <pkg>` lands on the newest version that can actually run here rather than
-	// the newest that exists (GIS-574). Iterating VersionEntries rather than
-	// Versions is what makes the variants available.
-	candidates := make([]semver.Version, 0, len(vl.VersionEntries))
-	var skipped []VersionEntry
-	for _, ve := range vl.VersionEntries {
-		v, err := semver.Parse(ve.Version)
-		if err != nil {
-			continue
-		}
-		if generoMajor != "" && !VariantsSupport(ve.Variants, generoMajor) {
-			skipped = append(skipped, ve)
-			continue
-		}
-		candidates = append(candidates, v)
 	}
 	c, err := semver.ParseConstraint(constraint)
 	if err != nil {
 		return nil, fmt.Errorf("invalid version constraint %q: %w", constraint, err)
 	}
+	// Skip versions that cannot run here, so `install <pkg>` lands on the newest
+	// version that actually works rather than the newest that exists (GIS-574).
+	// Iterating VersionEntries rather than Versions is what makes the declared
+	// constraint and the variants available.
+	candidates := make([]semver.Version, 0, len(vl.VersionEntries))
+	var skipped []string
+	for _, ve := range vl.VersionEntries {
+		v, err := semver.Parse(ve.Version)
+		if err != nil {
+			continue
+		}
+		if ok, reason := Runnable(gv, ve.GeneroConstraint, ve.Variants); !ok {
+			// Only a version the constraint would otherwise have accepted
+			// explains a Genero failure. Recording the rest would blame Genero
+			// for `install fx@^3.0.0` when no 3.x was ever published.
+			if c.Matches(v) {
+				skipped = append(skipped, ve.Version+" "+reason)
+			}
+			continue
+		}
+		candidates = append(candidates, v)
+	}
 	best, err := c.Latest(candidates)
 	if err != nil {
-		// Distinguish "nothing matches your constraint" from "nothing is built
-		// for your Genero", which are very different things to act on.
+		// Distinguish "nothing matches your constraint" from "nothing can run
+		// here", which are very different things to act on.
 		if len(skipped) > 0 {
-			return nil, fmt.Errorf("no version of %q satisfying %q has a build for Genero %s (%s)",
-				name, constraint, generoMajor, describeSkipped(skipped))
+			return nil, fmt.Errorf("no version of %q satisfying %q can run on Genero %s (%s)",
+				name, constraint, gv, strings.Join(skipped, "; "))
 		}
 		return nil, fmt.Errorf("no version of %q satisfies constraint %q", name, constraint)
 	}
-	return FetchInfoForGenero(name, best.String(), generoMajor)
+	return FetchInfoForGenero(name, best.String(), majorOf(gv))
 }
 
 // Search queries the consumer registry for packages matching term.
@@ -944,21 +950,71 @@ func pickArtifact(arts []apiArtifact, generoMajor string) *apiArtifact {
 	return &arts[0]
 }
 
+// Runnable reports whether a published version can run on gv, and when it
+// cannot, a phrase naming the reason for the caller's error message.
+//
+// Genero compatibility has two independent signals and both are checked here:
+// the version's declared "genero" constraint, and the artifact variants it
+// publishes. They are independent — most publishers declare no constraint, and
+// a declared one says nothing about which builds exist — so checking either
+// alone lets a version through that cannot run. Keeping the pair in one
+// predicate is what stops the install-by-name paths drifting from the
+// dependency resolver, which is how `install <pkg>` came to honour the variants
+// but not the constraint (GIS-574).
+//
+// A nil gv means the runtime could not be detected: nothing is excluded.
+func Runnable(gv *genero.Version, declared string, variants []string) (bool, string) {
+	if gv == nil {
+		return true, ""
+	}
+	ok, err := gv.Satisfies(declared)
+	if err != nil {
+		return false, fmt.Sprintf("has an invalid genero constraint %q", declared)
+	}
+	if !ok {
+		return false, fmt.Sprintf("requires Genero %s", declared)
+	}
+	if !VariantsSupport(variants, gv.MajorString()) {
+		if len(variants) == 0 {
+			return false, "publishes no builds"
+		}
+		return false, "has builds for " + describeMajors(variants)
+	}
+	return true, ""
+}
+
+// majorOf returns gv's major version string, or "" when the runtime is unknown.
+func majorOf(gv *genero.Version) string {
+	if gv == nil {
+		return ""
+	}
+	return gv.MajorString()
+}
+
 // VariantsSupport reports whether a published variant set can serve the given
 // Genero major. It is the single definition of that rule, shared by every path
 // that chooses a version: the dependency resolver, registry.Resolve, the
 // multi-provider RepositorySet.Resolve, and `outdated`'s wanted/latest columns
 // (GIS-574).
 //
-// An empty set means the provider reports no variants — Artifactory and older
+// A nil set means the provider does not report variants — Artifactory and older
 // registries do not — which is "unknown" and therefore allowed, because
-// treating it as incompatible would make those packages unresolvable.
+// treating it as incompatible would make those packages unresolvable. A non-nil
+// but empty set is the opposite claim: the provider does report variants and
+// this version has none, so nothing can be installed from it. GI always builds
+// the slice (FetchVersionList), so a version whose upload failed or is partial
+// arrives empty-but-not-nil and is now skipped rather than chosen and then
+// failed at fetch time with "no artifact available" (GIS-574).
+//
 // "webcomponent" matches every major: those packages ship browser assets, not
 // p-code. "default" is the legacy single-build layout and likewise serves any
 // major.
 func VariantsSupport(variants []string, major string) bool {
-	if len(variants) == 0 {
+	if variants == nil {
 		return true
+	}
+	if len(variants) == 0 {
+		return false
 	}
 	want := "genero" + major
 	for _, v := range variants {
@@ -967,17 +1023,6 @@ func VariantsSupport(variants []string, major string) bool {
 		}
 	}
 	return false
-}
-
-// describeSkipped names the versions that were passed over for publishing no
-// build for the running Genero, and what each does publish — e.g.
-// `1.0.1 has builds for Genero 6`.
-func describeSkipped(skipped []VersionEntry) string {
-	parts := make([]string, 0, len(skipped))
-	for _, ve := range skipped {
-		parts = append(parts, DescribeBuilds(ve.Version, ve.Variants))
-	}
-	return strings.Join(parts, "; ")
 }
 
 // DescribeBuilds phrases what one version publishes, e.g.

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/config"
+	"github.com/4js-mikefolcher/fglpkg/internal/genero"
 	"github.com/4js-mikefolcher/fglpkg/internal/registry"
 	"github.com/4js-mikefolcher/fglpkg/internal/resolver"
 	"github.com/4js-mikefolcher/fglpkg/internal/semver"
@@ -97,7 +98,7 @@ func TestRepositorySetResolveNamesTheBuildsThatExist(t *testing.T) {
 	}
 	rs := NewRepositorySet([]Provider{gi}, descriptors(), nil)
 
-	info, err := rs.Resolve("unitfx", "latest", "4")
+	info, err := rs.Resolve("unitfx", "latest", gvOf("4"))
 	if err != nil {
 		t.Fatalf("Resolve on Genero 4: %v", err)
 	}
@@ -105,12 +106,12 @@ func TestRepositorySetResolveNamesTheBuildsThatExist(t *testing.T) {
 		t.Errorf("Genero 4 resolved unitfx@%s, want 1.0.0 (1.0.1 has no genero4 build)", info.Version)
 	}
 
-	_, err = rs.Resolve("unitfx", "latest", "3")
+	_, err = rs.Resolve("unitfx", "latest", gvOf("3"))
 	if err == nil {
 		t.Fatal("expected an error resolving on Genero 3, got nil")
 	}
 	for _, want := range []string{
-		"has a build for Genero 3",
+		"can run on Genero 3",
 		"1.0.0 has builds for Genero 4, 6",
 		"1.0.1 has builds for Genero 6",
 	} {
@@ -169,7 +170,7 @@ func TestRepositorySetResolveStepsDownToTheNextBest(t *testing.T) {
 		noBuild:     map[string][]string{"1.0.1": {"genero6"}},
 	}
 
-	info, err := newStepDownSet(p).Resolve("probe", "latest", "4")
+	info, err := newStepDownSet(p).Resolve("probe", "latest", gvOf("4"))
 	if err != nil {
 		t.Fatalf("Resolve must step down to 1.0.0, not fail: %v", err)
 	}
@@ -190,12 +191,12 @@ func TestRepositorySetResolveReportsWhenEveryVersionIsRefused(t *testing.T) {
 		},
 	}
 
-	_, err := newStepDownSet(p).Resolve("probe", "latest", "4")
+	_, err := newStepDownSet(p).Resolve("probe", "latest", gvOf("4"))
 	if err == nil {
 		t.Fatal("expected an error when every version is refused, got nil")
 	}
 	for _, want := range []string{
-		"has a build for Genero 4",
+		"can run on Genero 4",
 		"1.0.1 has builds for Genero 6",
 		"1.0.0 has builds for Genero 5, 6",
 	} {
@@ -210,7 +211,7 @@ func TestRepositorySetResolveReportsWhenEveryVersionIsRefused(t *testing.T) {
 func TestRepositorySetResolveDoesNotStepDownOnOtherErrors(t *testing.T) {
 	p := &failingProvider{}
 
-	if _, err := newStepDownSet(p).Resolve("probe", "latest", "4"); err == nil {
+	if _, err := newStepDownSet(p).Resolve("probe", "latest", gvOf("4")); err == nil {
 		t.Fatal("a transport failure must abort Resolve, got nil")
 	} else if !strings.Contains(err.Error(), "registry unreachable") {
 		t.Errorf("error %q does not carry the underlying failure", err)
@@ -234,3 +235,9 @@ func (p *failingProvider) FetchInfo(string, string, string) (*registry.PackageIn
 	return nil, errors.New("registry unreachable")
 }
 func (p *failingProvider) Search(string) ([]registry.SearchResult, error) { return nil, nil }
+
+// gvOf builds a *genero.Version from a bare major, for Resolve's signature.
+func gvOf(major string) *genero.Version {
+	v := genero.MustParse(major + ".00.01")
+	return &v
+}
