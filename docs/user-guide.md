@@ -2081,8 +2081,12 @@ Set `signing.enforce` in `~/.fglpkg/config.json` (or the `FGLPKG_SIGNING` enviro
 | Mode | Behaviour |
 |---|---|
 | `warn` *(default)* | A bad or missing signature warns but the install continues. |
-| `require` | A bad or missing signature aborts the install. |
+| `require` | A bad or missing signature aborts the install before anything is fetched. |
 | `off` | Signature verification is skipped entirely. |
+
+Under `require`, verification runs **before** the artifact is downloaded — the signature covers the `sha256`, so it can be checked from the registry metadata, and the usual checksum check then binds the downloaded bytes to the signature you already verified. A refused package therefore leaves nothing behind: no files under `.fglpkg/`, and no entry in `fglpkg-lock.json`.
+
+This matters for pipelines that retry. A package already installed is re-verified on every run under `require`, so being on disk is never taken as evidence that it was trusted — a second attempt cannot accept what the first one refused. (Under `warn` an already-installed package is not re-checked, since the warning was issued when it was installed; use `fglpkg audit signatures` to audit the store on demand.)
 
 `fglpkg install --no-verify-signature` skips verification for a single run (discouraged; for emergencies).
 
