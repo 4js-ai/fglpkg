@@ -320,10 +320,11 @@ func runnableVersions(vl *registry.VersionList, gv *genero.Version) []semver.Ver
 		if err != nil {
 			continue
 		}
-		if ok, err := gv.Satisfies(e.GeneroConstraint); err != nil || !ok {
-			continue
-		}
-		if !registry.VariantsSupport(e.Variants, gv.MajorString()) {
+		// One shared predicate with the resolver and the registry client, so
+		// `outdated` cannot offer a version `update` would refuse to select
+		// (GIS-577 #12). It checks both signals: the declared constraint and
+		// the published variants.
+		if ok, _ := registry.Runnable(gv, e.GeneroConstraint, e.Variants); !ok {
 			continue
 		}
 		out = append(out, v)
