@@ -12,6 +12,12 @@ suite "outdated sees installed web components (GIS-582)"
 
 _wcout_fixtures() {  # _wcout_fixtures <dir>
   local dir="$1"; mkdir -p "$dir"
+  # Start from the standard fixtures, so the registry also serves a BDL library
+  # (demo.pkg) and a project can mix one with a widget. wcfx is APPENDED to
+  # that packages.json rather than replacing it — overwriting left this suite
+  # unable to tell the two lock arrays apart.
+  mock_build_fixtures "$dir" || return 1
+
   local build; build="$(mktemp -d "$_SANDBOX_ROOT/wcoutb.XXXXXX")"
   (
     cd "$build"
@@ -26,24 +32,30 @@ EOF
     sed 's/"version":"1.0.0"/"version":"1.2.0"/' fglpkg.json > f2 && mv f2 fglpkg.json
     "$FGLPKG" pack -o "$dir/wcfx-1.2.0-webcomponent.zip" </dev/null >/dev/null 2>&1 || exit 1
   ) || return 1
-  cat > "$dir/packages.json" <<'EOF'
-{
-  "packages": [
-    {
-      "slug": "wcfx",
-      "name": "wcfx",
-      "description": "Web component fixture",
-      "owner": { "partner_id": "mock", "name": "fglpkg tests" },
-      "versions": [
-        { "version":"1.0.0", "author":"fglpkg tests", "license":"MIT",
-          "artifacts":[ { "variant":"webcomponent", "zip":"wcfx-1.0.0-webcomponent.zip" } ] },
-        { "version":"1.2.0", "author":"fglpkg tests", "license":"MIT",
-          "artifacts":[ { "variant":"webcomponent", "zip":"wcfx-1.2.0-webcomponent.zip" } ] }
-      ]
-    }
-  ]
-}
-EOF
+
+  # python3 is already a hard dependency of this harness (the mock registry is
+  # a python3 script), so merging with it adds nothing new to install.
+  python3 - "$dir/packages.json" <<'PY' || return 1
+import json, sys
+
+path = sys.argv[1]
+with open(path) as fh:
+    doc = json.load(fh)
+doc["packages"].append({
+    "slug": "wcfx",
+    "name": "wcfx",
+    "description": "Web component fixture",
+    "owner": {"partner_id": "mock", "name": "fglpkg tests"},
+    "versions": [
+        {"version": "1.0.0", "author": "fglpkg tests", "license": "MIT",
+         "artifacts": [{"variant": "webcomponent", "zip": "wcfx-1.0.0-webcomponent.zip"}]},
+        {"version": "1.2.0", "author": "fglpkg tests", "license": "MIT",
+         "artifacts": [{"variant": "webcomponent", "zip": "wcfx-1.2.0-webcomponent.zip"}]},
+    ],
+})
+with open(path, "w") as fh:
+    json.dump(doc, fh, indent=2)
+PY
 }
 
 _wcout_env() {
@@ -101,15 +113,30 @@ _wcout_json_has_current() {
 it "outdated --json reports a web component's installed version" \
   _wcout_json_has_current
 
-# A project mixing a BDL library and a widget must report both. The two live in
-# different lock arrays, so reading one and not the other is exactly the bug.
+# A project mixing a BDL library and a widget must report BOTH. The two live in
+# different lock arrays, so this is what catches a webcomponent pass that reads
+# its array but clobbers what the package pass already recorded — a mutation the
+# single-package cases above cannot see, because they have no BDL row to lose.
+#
+# Both are installed at their newest version, so every row is "ok" and the gate
+# exits 0. That makes the exit code itself the assertion: lose either row and it
+# becomes "missing / not installed" and a non-zero exit.
 _wcout_mixed_project() {
   _wcout_env || return 1
+  run install demo.pkg@1.1.0
+  assert_success || return 1
   run install wcfx@1.2.0
   assert_success || return 1
+  # The premise: one package in each lock array.
+  assert_file_contains "fglpkg-lock.json" '"packages"' || return 1
+  assert_file_contains "fglpkg-lock.json" '"webcomponents"' || return 1
+
   run outdated
   assert_success || return 1
+  assert_contains "demo-pkg" || return 1
   assert_contains "wcfx" || return 1
+  assert_not_contains "missing" || return 1
+  assert_not_contains "not installed" || return 1
 }
-it "outdated covers a web component alongside the rest of the project" \
+it "outdated reports a BDL library and a web component together" \
   _wcout_mixed_project
