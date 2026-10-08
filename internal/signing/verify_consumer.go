@@ -33,24 +33,32 @@ func (m *Manifest) KeyByID(keyid string) (Key, bool) {
 }
 
 // VerifyArtifact verifies an artifact's registry signature against the
-// manifest's working keys, performing the same three checks as the reference
-// verifier:
+// manifest's working keys, in this order:
 //
-//  1. the signature's keyid is present in the manifest (else ErrKeyUnknown);
-//  2. the artifact's upload time falls within that key's validity window
-//     (else ErrKeyExpired);
-//  3. the Ed25519 signature verifies against the reconstructed canonical
+//  1. the artifact's recorded upload time parses at all (else ErrBadUploadTime);
+//  2. the signature's keyid is present in the manifest (else ErrKeyUnknown);
+//  3. that upload time falls within the key's validity window — ErrKeyNotYetValid
+//     below validFrom, ErrKeyExpired above validTo. ErrKeyNotYetValid wraps
+//     ErrKeyExpired, so a caller that does not care about the side can match
+//     ErrKeyExpired alone;
+//  4. the Ed25519 signature verifies against the reconstructed canonical
 //     payload (else ErrSignatureMismatch).
+//
+// Note that the window is checked before the bytes, so a window error says
+// nothing about whether the artifact is intact — step 4 never ran. A caller that
+// needs to tell "attested outside the window" from "and also tampered with" must
+// re-check the signature itself (see KeyByID, which ignores the window).
 //
 // Backfill note: the registry signs backfilled historical artifacts with the
 // current working key but keeps uploaded_at at the artifact's original
-// created_at, which can predate the key's validFrom. Such artifacts fail the
-// window check and surface as ErrKeyExpired; under the default "warn"
-// enforcement that is a warning, not a hard failure.
+// created_at, which can predate the key's validFrom. Such artifacts surface as
+// ErrKeyNotYetValid; under the default "warn" enforcement that is a warning,
+// not a hard failure. The registry resolves it by re-issuing the keys manifest
+// with a window that covers them (GIS-576).
 func (m *Manifest) VerifyArtifact(f ArtifactFields, sig ArtifactSignature) error {
 	at, err := parseTimestamp(f.UploadedAt)
 	if err != nil {
-		return fmt.Errorf("%w: cannot parse upload time %q: %v", ErrKeyExpired, f.UploadedAt, err)
+		return fmt.Errorf("%w: %q: %v", ErrBadUploadTime, f.UploadedAt, err)
 	}
 	key, err := m.SelectKey(sig.KeyID, at)
 	if err != nil {

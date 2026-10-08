@@ -2137,6 +2137,18 @@ fglpkg audit signatures
 
 Re-verifies every package in `fglpkg-lock.json` against the current keys manifest, printing one line per package and exiting non-zero if any package is unsigned or fails to verify — suitable as a CI gate.
 
+Results are reported by kind, because they call for different responses:
+
+| Marker | Meaning | What to do |
+|---|---|---|
+| `✓` | the signature verifies | nothing |
+| `!` **key not yet valid** | the signature verifies, but the artifact was uploaded *before* the signing key's `validFrom` | a registry key-rollout matter, not a sign the artifact was altered — the registry operator re-issues the keys manifest |
+| `✗` **retired key** | the signature verifies, but the artifact was uploaded *after* the key's `validTo` | the condition `validTo` exists to catch; establish why a retired key was still signing before trusting the artifact |
+| `✗` **error** | the signature does not verify, its key is unknown, or the upload time is unreadable | treat as a tampering question |
+| `✗` **signature missing** | no signature recorded at all | the artifact predates signing, or was published by a registry that does not sign |
+
+Every one of these fails the audit and exits 1 — `fglpkg install` under `FGLPKG_SIGNING=require` refuses them all, and an audit that passed what `install` refuses would be worse than one that did not tell them apart. The summary line names the counts per kind.
+
 ## Software Bill of Materials (SBOM)
 
 `fglpkg sbom` emits a Software Bill of Materials for the current project, generated entirely from `fglpkg-lock.json` — it makes **no network calls**, so it works offline and in a sealed CI build. It needs a `fglpkg-lock.json`, so run `fglpkg install` first.

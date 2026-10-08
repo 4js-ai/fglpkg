@@ -25,7 +25,10 @@
 // one trust domain cannot forge the other.
 package signing
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 var (
 	// ErrManifestUnverified means keys.json did not verify against any pinned
@@ -40,6 +43,25 @@ var (
 	// ErrKeyExpired means the signing key exists but its validity window does
 	// not cover the moment the artifact was signed.
 	ErrKeyExpired = errors.New("signing: signing key is outside its validity window")
+
+	// ErrKeyNotYetValid is the lower-bound half of ErrKeyExpired: the artifact
+	// was uploaded BEFORE the key's validFrom. It wraps ErrKeyExpired, so
+	// errors.Is(err, ErrKeyExpired) still matches and callers that do not care
+	// about the distinction are unaffected.
+	//
+	// The two halves mean opposite things and the split exists so a caller can
+	// say which it has. Below validFrom is the backfill case (GIS-576): the
+	// registry attested to an artifact older than the key, which is a
+	// key-rollout problem for the registry operator. Above validTo means
+	// something signed with a RETIRED key — the condition validTo exists to
+	// catch — and must never be reported as the benign one.
+	ErrKeyNotYetValid = fmt.Errorf("%w (key not yet valid at that time)", ErrKeyExpired)
+
+	// ErrBadUploadTime means the artifact's recorded upload time could not be
+	// parsed, so no window comparison was possible. Deliberately NOT an
+	// ErrKeyExpired: nothing is known about the window either way, and
+	// reporting it as a window problem invites the wrong diagnosis.
+	ErrBadUploadTime = errors.New("signing: cannot parse the artifact's upload time")
 
 	// ErrSignatureMismatch means the Ed25519 signature did not verify against
 	// the resolved public key over the canonical payload.
