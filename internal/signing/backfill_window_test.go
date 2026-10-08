@@ -1,0 +1,139 @@
+package signing
+
+import (
+	"crypto/ed25519"
+	"encoding/base64"
+	"errors"
+	"testing"
+)
+
+// GIS-576. The registry signs backfilled historical artifacts with the current
+// working key but keeps uploaded_at at the artifact's original created_at, and
+// VerifyArtifact checks that timestamp against the key's window. prod-key-1 was
+// minted with validFrom = 2026-09-28T21:42:18.238Z, after most of the corpus had
+// been uploaded, so 11 of 20 production artifacts failed with ErrKeyExpired —
+// warning noise under the default "warn", and nothing installable under
+// "require".
+//
+// The agreed fix is server-side and needs no client change: re-issue the keys
+// manifest with validFrom widened to cover the corpus the key actually attests
+// to, keeping the same public key so existing signatures still verify
+// (scripts/gen-signing-key.mjs reissue, in the genero-intelligence repo).
+//
+// These tests pin the two client properties that fix depends on, neither of
+// which is obvious from the code:
+//
+//  1. A key window is honoured as written. Nothing requires validFrom to relate
+//     to the manifest's issuedAt, so a window that opens before the key was
+//     minted is accepted. Someone "hardening" the client by rejecting
+//     validFrom < issuedAt would silently undo the fix and put the registry
+//     back where it started.
+//
+//  2. Widening the window changes nothing about the signature itself. The
+//     window is not part of the signed payload, so the same signature verifies
+//     under both the old and new manifest. That is what makes re-issuing safe
+//     without touching a single artifact.
+
+// backfillFixture returns a signed artifact whose upload predates prod-key-1's
+// real validFrom, plus the key that signed it — poiapi 1.8.0 genero6, the oldest
+// of the 11 affected production artifacts.
+func backfillFixture(t *testing.T) (ArtifactFields, ArtifactSignature, string) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := ArtifactFields{
+		Name:       "poiapi",
+		Version:    "1.8.0",
+		Variant:    "genero6",
+		SHA256:     "b6e1",
+		Size:       87477,
+		UploadedAt: "2026-09-04T19:59:47.781Z",
+		Uploader:   "partner:fourjs",
+	}
+	payload, err := CanonicalArtifactPayload(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := ArtifactSignature{
+		KeyID: "prod-key-1",
+		Alg:   "ed25519",
+		Sig:   base64.StdEncoding.EncodeToString(ed25519.Sign(priv, payload)),
+	}
+	return f, sig, base64.StdEncoding.EncodeToString(pub)
+}
+
+func manifestWithWindow(pub, validFrom, validTo string) *Manifest {
+	return &Manifest{
+		IssuedAt: "2026-09-28T21:42:18.239Z",
+		Keys: []Key{{
+			KeyID: "prod-key-1", Alg: "ed25519", Pub: pub,
+			ValidFrom: validFrom, ValidTo: validTo,
+		}},
+	}
+}
+
+// The bug as it stands in production: a validly-signed artifact is refused
+// purely because it was uploaded before the key was minted.
+func TestBackfilledArtifactFailsTheMintedWindow(t *testing.T) {
+	f, sig, pub := backfillFixture(t)
+	m := manifestWithWindow(pub, "2026-09-28T21:42:18.238Z", "2027-09-28T21:42:18.238Z")
+
+	err := m.VerifyArtifact(f, sig)
+	if err == nil {
+		t.Fatal("expected the window check to refuse an artifact uploaded before validFrom")
+	}
+	if !errors.Is(err, ErrKeyExpired) {
+		t.Errorf("want ErrKeyExpired, got: %v", err)
+	}
+}
+
+// The fix: the same signature, the same key, a widened window — and it verifies.
+// Nothing about the artifact changed, which is the point: re-issuing the
+// manifest repairs the whole backfilled corpus without rewriting any of it.
+func TestWideningTheWindowAcceptsTheSameSignature(t *testing.T) {
+	f, sig, pub := backfillFixture(t)
+	m := manifestWithWindow(pub, "2026-09-01T00:00:00.000Z", "2027-09-28T21:42:18.238Z")
+
+	if err := m.VerifyArtifact(f, sig); err != nil {
+		t.Fatalf("a widened window must accept the artifact it now covers: %v", err)
+	}
+}
+
+// A window that opens before the manifest was issued is legitimate and must stay
+// so: it is how the registry states that a key attests to artifacts older than
+// itself. If this test starts failing, the server-side fix for GIS-576 has been
+// undone from the client side.
+func TestValidFromMayPrecedeIssuedAt(t *testing.T) {
+	_, _, pub := backfillFixture(t)
+	m := manifestWithWindow(pub, "2026-09-01T00:00:00.000Z", "2027-09-28T21:42:18.238Z")
+	if m.IssuedAt <= m.Keys[0].ValidFrom {
+		t.Fatalf("fixture is wrong: issuedAt %q should be after validFrom %q", m.IssuedAt, m.Keys[0].ValidFrom)
+	}
+
+	at, err := parseTimestamp("2026-09-04T19:59:47.781Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.SelectKey("prod-key-1", at); err != nil {
+		t.Errorf("a validFrom earlier than issuedAt must be honoured as written: %v", err)
+	}
+}
+
+// Widening is not a licence to accept anything: an artifact older than the
+// widened window is still refused. Without this, the two tests above would also
+// pass for a client that had stopped checking the lower bound altogether.
+func TestWideningStillRefusesWhatItDoesNotCover(t *testing.T) {
+	f, sig, pub := backfillFixture(t)
+	f.UploadedAt = "2026-08-01T00:00:00.000Z" // before the widened validFrom
+	m := manifestWithWindow(pub, "2026-09-01T00:00:00.000Z", "2027-09-28T21:42:18.238Z")
+
+	err := m.VerifyArtifact(f, sig)
+	if err == nil {
+		t.Fatal("an artifact outside even the widened window must still be refused")
+	}
+	if !errors.Is(err, ErrKeyExpired) {
+		t.Errorf("want ErrKeyExpired, got: %v", err)
+	}
+}
