@@ -14,9 +14,13 @@ suite "install --no-verify-signature (mock registry)"
 # Note the explicit `|| return 1` on each assertion. `it()` runs the test body in
 # a subshell inside an `if` condition, and bash suppresses errexit there — so a
 # bare failing assertion mid-body is ignored and the verdict comes from the last
-# command alone. That is exactly how this bug hid: verification happens AFTER
-# extraction and after fglpkg-lock.json is written, so the trailing "package is on
-# disk" assertions all passed while the install had actually failed.
+# command alone. That is exactly how this bug hid: verification then ran AFTER
+# extraction and after fglpkg-lock.json was written, so the trailing "package is
+# on disk" assertions all passed while the install had actually failed.
+#
+# That ordering was itself the bug in GIS-580 and is now reversed — nothing is
+# fetched until the signature is accepted, and a refused install leaves neither
+# files nor a lock behind (case 120). The `|| return 1` discipline still applies.
 
 # Baseline: require mode must reject the unsigned fixture, or the tests below
 # could pass for the wrong reason (nothing to override).

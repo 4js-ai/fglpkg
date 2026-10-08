@@ -300,6 +300,174 @@ func lockSignature(keyid, sig string) *registry.Signature {
 	return &registry.Signature{KeyID: keyid, Alg: "ed25519", Sig: sig}
 }
 
+// The three record builders below are the single source of each install
+// candidate's registry metadata. Signature verification and the download both
+// read the record a builder returns, so the sha256 that was verified is by
+// construction the sha256 the downloaded bytes are checked against — the bind
+// that lets verification run before the fetch (GIS-580).
+
+// lockedPackageInfo rebuilds the registry record for a locked BDL package.
+func lockedPackageInfo(pkg lockfile.LockedPackage) *registry.PackageInfo {
+	return &registry.PackageInfo{
+		Name:        pkg.Name,
+		Version:     pkg.Version,
+		DownloadURL: pkg.DownloadURL,
+		Checksum:    pkg.Checksum,
+		Size:        pkg.Size,
+		UploadedAt:  pkg.UploadedAt,
+		Uploader:    pkg.Uploader,
+		Signature:   lockSignature(pkg.SignatureKeyID, pkg.Signature),
+	}
+}
+
+// lockedPackageVariant is the artifact variant that was signed for a locked
+// BDL package: "genero<major>", or "" when the lock predates GeneroMajor —
+// such an entry cannot be verified until `fglpkg update` re-locks it, since
+// the signed payload names a real variant and "" will never match it.
+func lockedPackageVariant(pkg lockfile.LockedPackage) string {
+	if pkg.GeneroMajor == "" {
+		return ""
+	}
+	return "genero" + pkg.GeneroMajor
+}
+
+// lockedWebcomponentInfo rebuilds the registry record for a locked web
+// component.
+func lockedWebcomponentInfo(wc lockfile.LockedWebcomponent) *registry.PackageInfo {
+	return &registry.PackageInfo{
+		Name:        wc.Name,
+		Version:     wc.Version,
+		DownloadURL: wc.DownloadURL,
+		Checksum:    wc.Checksum,
+		Variant:     "webcomponent",
+		Size:        wc.Size,
+		UploadedAt:  wc.UploadedAt,
+		Uploader:    wc.Uploader,
+		Signature:   lockSignature(wc.SignatureKeyID, wc.Signature),
+	}
+}
+
+// planPackageInfo builds the registry record for a freshly resolved package.
+func planPackageInfo(pkg resolver.ResolvedPackage) *registry.PackageInfo {
+	return &registry.PackageInfo{
+		Name:        pkg.Name,
+		Version:     pkg.Version.String(),
+		DownloadURL: pkg.DownloadURL,
+		Checksum:    pkg.Checksum,
+		Variant:     pkg.Variant,
+		Size:        pkg.Size,
+		UploadedAt:  pkg.UploadedAt,
+		Uploader:    pkg.Uploader,
+		Signature:   pkg.Signature,
+	}
+}
+
+// verifyPlanSignatures checks every resolved package's Layer 1 signature under
+// the configured enforce mode, before the lock file is written and before
+// anything is fetched or extracted.
+//
+// A signature failure aborts the whole install even for an optional-scoped
+// package: an optional dependency may be skipped when it cannot be fetched,
+// but "I could not establish that this artifact is what the registry signed"
+// is a trust failure, not an availability one.
+func (i *Installer) verifyPlanSignatures(plan *resolver.Plan) error {
+	for _, pkg := range plan.Packages {
+		if err := i.verifySignature(planPackageInfo(pkg), pkg.Variant); err != nil {
+			return fmt.Errorf("failed to install %s: %w", pkg.Name, err)
+		}
+	}
+	return nil
+}
+
+// lockInstallSet is everything a replay would install, honouring
+// opts.Production.
+//
+// It is deliberately the ONLY place the replay's install set is selected: the
+// gate that verifies signatures and the pass that fetches and extracts both
+// read it, so they cannot disagree about what is being installed. Two copies of
+// this choice would let the gate check one set while installFromLock installs
+// another, and under "require" the difference would go in unverified. Same
+// reason the record builders above exist — the check and the action read one
+// value.
+func lockInstallSet(lf *lockfile.LockFile, opts Options) ([]lockfile.LockedPackage, []lockfile.LockedJAR, []lockfile.LockedWebcomponent) {
+	if opts.Production {
+		return lf.FilterForProduction()
+	}
+	return lf.ToInstallList()
+}
+
+// verifyOnDiskSignatures re-verifies the LOCK RECORDS of entries whose files are
+// already present, and applies under "require" only.
+//
+// Presence on disk is not evidence that the record was ever accepted: those
+// files may be exactly what an earlier refused run left behind, and skipping
+// them is what let a retry turn exit 1 into exit 0 (GIS-580). Under "warn" they
+// are left alone — the warning was emitted when they were installed, repeating
+// it on every replay is noise that changes no outcome, and `fglpkg audit
+// signatures` is the command for auditing what is in the store.
+//
+// What this does NOT establish is that the files on disk are the version the
+// record names. Presence is checked by package name alone (LockFile.Validate),
+// so a store holding an older version of a locked package reads as present and
+// is never re-fetched. That gap predates signing and applies with signing off
+// too — see GIS-586.
+func (i *Installer) verifyOnDiskSignatures(pkgs []lockfile.LockedPackage, wcs []lockfile.LockedWebcomponent) error {
+	if i.signingEnforce != signing.EnforceRequire {
+		return nil
+	}
+	for _, pkg := range pkgs {
+		if err := i.verifySignature(lockedPackageInfo(pkg), lockedPackageVariant(pkg)); err != nil {
+			return fmt.Errorf("failed to install %s: %w", pkg.Name, err)
+		}
+	}
+	for _, wc := range wcs {
+		if err := i.verifySignature(lockedWebcomponentInfo(wc), "webcomponent"); err != nil {
+			return fmt.Errorf("failed to install webcomponent %s: %w", wc.Name, err)
+		}
+	}
+	return nil
+}
+
+// verifyLockIsStillTrusted re-verifies everything a clean lock names, for the
+// no-op replay that installs nothing at all. Without it, "Lock file is up to
+// date. Nothing to install." reports success for a store that may hold an
+// artifact whose signature was refused on the run that put it there.
+func (i *Installer) verifyLockIsStillTrusted(lf *lockfile.LockFile, opts Options) error {
+	pkgs, _, wcs := lockInstallSet(lf, opts)
+	return i.verifyOnDiskSignatures(pkgs, wcs)
+}
+
+// verifyLockInstallSet verifies every signature a lock replay will rely on. It
+// runs before the prune as well as before any fetch or extraction: verification
+// is read-only, so doing it first costs nothing and means a refused run leaves
+// the store exactly as it found it. Pruning first would delete orphans and only
+// then refuse — a store change on a run that installed nothing, which is the
+// opposite of what the resolve path promises.
+//
+// Entries whose files are missing are about to be fetched, so they are checked
+// under the configured mode. Entries already present are re-checked under
+// "require" only (see verifyOnDiskSignatures). Web components are re-extracted
+// on every replay, so they always count as about to be fetched.
+func (i *Installer) verifyLockInstallSet(lf *lockfile.LockFile, opts Options) error {
+	pkgs, _, wcs := lockInstallSet(lf, opts)
+	var onDisk []lockfile.LockedPackage
+	for _, pkg := range pkgs {
+		if _, err := os.Stat(filepath.Join(i.packagesDir, pkg.Name)); err == nil {
+			onDisk = append(onDisk, pkg)
+			continue
+		}
+		if err := i.verifySignature(lockedPackageInfo(pkg), lockedPackageVariant(pkg)); err != nil {
+			return fmt.Errorf("failed to install %s: %w", pkg.Name, err)
+		}
+	}
+	for _, wc := range wcs {
+		if err := i.verifySignature(lockedWebcomponentInfo(wc), "webcomponent"); err != nil {
+			return fmt.Errorf("failed to install webcomponent %s: %w", wc.Name, err)
+		}
+	}
+	return i.verifyOnDiskSignatures(onDisk, nil)
+}
+
 // Options controls optional install behaviour.
 type Options struct {
 	// Production skips dev-scoped packages and JARs. Optional entries are
@@ -394,6 +562,14 @@ func (i *Installer) InstallAllWithOptions(m *manifest.Manifest, projectDir strin
 					fmt.Printf("warning: %v\n", vr.GeneroMismatch)
 				}
 				if vr.IsClean() {
+					// Everything the lock names is on disk, so this run fetches
+					// nothing — which is precisely the state an earlier refused
+					// install leaves behind. Re-verify before reporting success,
+					// or "Nothing to install" launders a rejected artifact into
+					// an accepted one on the retry (GIS-580).
+					if err := i.verifyLockIsStillTrusted(lf, opts); err != nil {
+						return err
+					}
 					// Everything the lock names is on disk — but something the
 					// lock does NOT name still can be (a branch switch to an
 					// older lock, an interrupted run), so converge first.
@@ -429,6 +605,11 @@ func (i *Installer) InstallAllWithOptions(m *manifest.Manifest, projectDir strin
 				// Lock is valid but some packages are missing on disk — install
 				// them, dropping anything the lock no longer names first.
 				fmt.Printf("Installing from lock file (Genero %s)...\n", gv)
+				// Before the prune, so a refused run changes nothing at all
+				// (GIS-580).
+				if err := i.verifyLockInstallSet(lf, opts); err != nil {
+					return err
+				}
 				if prune {
 					pruned, err := i.pruneToLock(lf)
 					if err != nil {
@@ -457,6 +638,17 @@ func (i *Installer) InstallAllWithOptions(m *manifest.Manifest, projectDir strin
 	}
 	fmt.Printf("Resolved %d package(s), %d JAR(s)\n\n", len(plan.Packages), len(plan.JARs))
 	warnDeprecations(plan, os.Stderr)
+
+	// Signatures are checked here — before the lock file is written, before the
+	// prune, and before anything is fetched — so that under "require" a failure
+	// leaves no trace for a later run to accept: no files in .fglpkg/ and no
+	// lock entry claiming the package is installed. Verifying after extraction
+	// (as this did until GIS-580) failed the first run but left the artifact on
+	// disk and in the lock, so a re-run took the already-installed fast path and
+	// exited 0 — a CI retry step defeated "require" entirely.
+	if err := i.verifyPlanSignatures(plan); err != nil {
+		return err
+	}
 
 	// Write the lock file before installing so it's always present even if
 	// installation is interrupted partway through.
@@ -588,51 +780,38 @@ func goneMessage(name, version string) string {
 // URLs and checksums, bypassing the resolver entirely. When opts.Production
 // is true, dev-scoped entries are skipped.
 func (i *Installer) installFromLock(lf *lockfile.LockFile, root *manifest.Manifest, opts Options, projectDir string) error {
-	var pkgs []lockfile.LockedPackage
-	var jars []lockfile.LockedJAR
-	var wcs []lockfile.LockedWebcomponent
-	if opts.Production {
-		pkgs, jars, wcs = lf.FilterForProduction()
-	} else {
-		pkgs, jars, wcs = lf.ToInstallList()
-	}
+	// Same selection the gate verified (verifyLockInstallSet) — see
+	// lockInstallSet on why this must not be a second copy.
+	pkgs, jars, wcs := lockInstallSet(lf, opts)
 
 	// Filter packages that are already on disk so the parallel phase
-	// only does real work. Already-installed lines are printed
-	// synchronously up front for a stable "already there" prelude.
-	var pkgsToInstall []lockfile.LockedPackage
+	// only does real work.
+	var pkgsToInstall, pkgsOnDisk []lockfile.LockedPackage
 	for _, pkg := range pkgs {
 		if _, err := os.Stat(filepath.Join(i.packagesDir, pkg.Name)); err == nil {
-			fmt.Printf("  ✓ %s@%s (already installed)\n", pkg.Name, pkg.Version)
+			pkgsOnDisk = append(pkgsOnDisk, pkg)
 			continue
 		}
 		pkgsToInstall = append(pkgsToInstall, pkg)
 	}
 
+	// Signatures were verified by verifyLockInstallSet before the prune, so
+	// this function only fetches and extracts (GIS-580). It must stay that
+	// way: its caller is the gate.
+
+	// Already-installed lines are printed synchronously up front for a stable
+	// "already there" prelude.
+	for _, pkg := range pkgsOnDisk {
+		fmt.Printf("  ✓ %s@%s (already installed)\n", pkg.Name, pkg.Version)
+	}
+
 	cap := installConcurrency()
 
 	if err := runParallel(pkgsToInstall, cap, func(pkg lockfile.LockedPackage) error {
-		info := &registry.PackageInfo{
-			Name:        pkg.Name,
-			Version:     pkg.Version,
-			DownloadURL: pkg.DownloadURL,
-			Checksum:    pkg.Checksum,
-			Size:        pkg.Size,
-			UploadedAt:  pkg.UploadedAt,
-			Uploader:    pkg.Uploader,
-			Signature:   lockSignature(pkg.SignatureKeyID, pkg.Signature),
-		}
-		if err := i.Install(info); err != nil {
+		// Signature already verified above; this phase only fetches and
+		// extracts (GIS-580).
+		if err := i.Install(lockedPackageInfo(pkg)); err != nil {
 			return lockInstallError("", pkg.Name, pkg.Version, err)
-		}
-		// The signed artifact variant is "genero<major>" (or the record's
-		// own variant when the lock predates that field).
-		variant := pkg.GeneroMajor
-		if variant != "" {
-			variant = "genero" + variant
-		}
-		if err := i.verifySignature(info, variant); err != nil {
-			return fmt.Errorf("failed to install %s: %w", pkg.Name, err)
 		}
 		printSync("  ✓ %s@%s\n", pkg.Name, pkg.Version)
 		return nil
@@ -646,22 +825,10 @@ func (i *Installer) installFromLock(lf *lockfile.LockFile, root *manifest.Manife
 	// re-extract to refresh the contents anyway, so this gate just keeps
 	// the no-op-fast-path from repeating itself.
 	if err := runParallel(wcs, cap, func(wc lockfile.LockedWebcomponent) error {
-		info := &registry.PackageInfo{
-			Name:        wc.Name,
-			Version:     wc.Version,
-			DownloadURL: wc.DownloadURL,
-			Checksum:    wc.Checksum,
-			Variant:     "webcomponent",
-			Size:        wc.Size,
-			UploadedAt:  wc.UploadedAt,
-			Uploader:    wc.Uploader,
-			Signature:   lockSignature(wc.SignatureKeyID, wc.Signature),
-		}
-		if err := i.Install(info); err != nil {
+		// Signature already verified above; this phase only fetches and
+		// extracts (GIS-580).
+		if err := i.Install(lockedWebcomponentInfo(wc)); err != nil {
 			return lockInstallError("webcomponent", wc.Name, wc.Version, err)
-		}
-		if err := i.verifySignature(info, "webcomponent"); err != nil {
-			return fmt.Errorf("failed to install webcomponent %s: %w", wc.Name, err)
 		}
 		printSync("  ✓ %s@%s (webcomponent)\n", wc.Name, wc.Version)
 		return nil
@@ -791,25 +958,13 @@ func (i *Installer) installFromPlan(plan *resolver.Plan, root *manifest.Manifest
 	cap := installConcurrency()
 
 	if err := runParallel(plan.Packages, cap, func(pkg resolver.ResolvedPackage) error {
-		info := &registry.PackageInfo{
-			Name:        pkg.Name,
-			Version:     pkg.Version.String(),
-			DownloadURL: pkg.DownloadURL,
-			Checksum:    pkg.Checksum,
-			Variant:     pkg.Variant,
-			Size:        pkg.Size,
-			UploadedAt:  pkg.UploadedAt,
-			Uploader:    pkg.Uploader,
-			Signature:   pkg.Signature,
-		}
-		if err := i.Install(info); err != nil {
+		// Signatures were verified by verifyPlanSignatures before the lock
+		// write; this phase only fetches and extracts (GIS-580).
+		if err := i.Install(planPackageInfo(pkg)); err != nil {
 			if pkg.Scope == manifest.ScopeOptional {
 				printSync("  warning: skipping optional package %s: %v\n", pkg.Name, err)
 				return nil
 			}
-			return fmt.Errorf("failed to install %s: %w", pkg.Name, err)
-		}
-		if err := i.verifySignature(info, pkg.Variant); err != nil {
 			return fmt.Errorf("failed to install %s: %w", pkg.Name, err)
 		}
 		// Required-by hint joins the completion line so it doesn't
