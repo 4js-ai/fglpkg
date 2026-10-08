@@ -108,6 +108,29 @@ _req_refusal_does_not_prune() {
 }
 it "a refused replay prunes nothing" _req_refusal_does_not_prune
 
+# The gate and the install pass must select the same set. A dev-scoped package
+# is in a normal replay but not a --production one, so it is the entry that
+# would fall through a gate whose selection had drifted from the installer's —
+# and under require it would then be installed unverified.
+_req_covers_a_dev_scoped_package() {
+  mock_registry_start
+  export FGLPKG_SIGNING=off
+  run install demo.pkg@1.0.0 --save-dev
+  assert_success || return 1
+  assert_file_contains "fglpkg-lock.json" '"scope": "dev"' || return 1
+
+  # Drop it from disk so the replay has something to fetch.
+  rm -rf .fglpkg/packages/demo-pkg
+
+  export FGLPKG_SIGNING=require
+  run install
+  assert_failure || return 1
+  assert_contains "artifact is not signed" || return 1
+  assert_no_file ".fglpkg/packages/demo-pkg/fglpkg.json" || return 1
+}
+it "require covers a dev-scoped package on a normal replay" \
+  _req_covers_a_dev_scoped_package
+
 # Control: the default mode is warn, and it must still install. Verifying
 # earlier must not turn a warning into a failure — while GIS-576 is open most of
 # the real registry fails verification, so this is the common path.

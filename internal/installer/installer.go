@@ -379,15 +379,21 @@ func (i *Installer) verifyPlanSignatures(plan *resolver.Plan) error {
 	return nil
 }
 
-// lockInstallSet is the package and web-component set a replay would install,
-// honouring opts.Production.
-func lockInstallSet(lf *lockfile.LockFile, opts Options) ([]lockfile.LockedPackage, []lockfile.LockedWebcomponent) {
+// lockInstallSet is everything a replay would install, honouring
+// opts.Production.
+//
+// It is deliberately the ONLY place the replay's install set is selected: the
+// gate that verifies signatures and the pass that fetches and extracts both
+// read it, so they cannot disagree about what is being installed. Two copies of
+// this choice would let the gate check one set while installFromLock installs
+// another, and under "require" the difference would go in unverified. Same
+// reason the record builders above exist — the check and the action read one
+// value.
+func lockInstallSet(lf *lockfile.LockFile, opts Options) ([]lockfile.LockedPackage, []lockfile.LockedJAR, []lockfile.LockedWebcomponent) {
 	if opts.Production {
-		p, _, w := lf.FilterForProduction()
-		return p, w
+		return lf.FilterForProduction()
 	}
-	p, _, w := lf.ToInstallList()
-	return p, w
+	return lf.ToInstallList()
 }
 
 // verifyOnDiskSignatures re-verifies the LOCK RECORDS of entries whose files are
@@ -427,7 +433,7 @@ func (i *Installer) verifyOnDiskSignatures(pkgs []lockfile.LockedPackage, wcs []
 // date. Nothing to install." reports success for a store that may hold an
 // artifact whose signature was refused on the run that put it there.
 func (i *Installer) verifyLockIsStillTrusted(lf *lockfile.LockFile, opts Options) error {
-	pkgs, wcs := lockInstallSet(lf, opts)
+	pkgs, _, wcs := lockInstallSet(lf, opts)
 	return i.verifyOnDiskSignatures(pkgs, wcs)
 }
 
@@ -443,7 +449,7 @@ func (i *Installer) verifyLockIsStillTrusted(lf *lockfile.LockFile, opts Options
 // "require" only (see verifyOnDiskSignatures). Web components are re-extracted
 // on every replay, so they always count as about to be fetched.
 func (i *Installer) verifyLockInstallSet(lf *lockfile.LockFile, opts Options) error {
-	pkgs, wcs := lockInstallSet(lf, opts)
+	pkgs, _, wcs := lockInstallSet(lf, opts)
 	var onDisk []lockfile.LockedPackage
 	for _, pkg := range pkgs {
 		if _, err := os.Stat(filepath.Join(i.packagesDir, pkg.Name)); err == nil {
@@ -774,14 +780,9 @@ func goneMessage(name, version string) string {
 // URLs and checksums, bypassing the resolver entirely. When opts.Production
 // is true, dev-scoped entries are skipped.
 func (i *Installer) installFromLock(lf *lockfile.LockFile, root *manifest.Manifest, opts Options, projectDir string) error {
-	var pkgs []lockfile.LockedPackage
-	var jars []lockfile.LockedJAR
-	var wcs []lockfile.LockedWebcomponent
-	if opts.Production {
-		pkgs, jars, wcs = lf.FilterForProduction()
-	} else {
-		pkgs, jars, wcs = lf.ToInstallList()
-	}
+	// Same selection the gate verified (verifyLockInstallSet) — see
+	// lockInstallSet on why this must not be a second copy.
+	pkgs, jars, wcs := lockInstallSet(lf, opts)
 
 	// Filter packages that are already on disk so the parallel phase
 	// only does real work.

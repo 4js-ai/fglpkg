@@ -24,11 +24,11 @@ import (
 // next run took the already-installed fast path, printed "Nothing to install"
 // and exited 0. A CI retry step defeated `require` outright.
 //
-// Verification now happens in two gates, both of which run before anything is
-// pruned, fetched or extracted:
+// Verification now happens in three gates, each of which runs before anything
+// is pruned, fetched or extracted:
 //
-//   - verifyPlanSignatures  — the resolve path, before the lock is written
-//   - verifyLockInstallSet  — the replay path, before the prune
+//   - verifyPlanSignatures     — the resolve path, before the lock is written
+//   - verifyLockInstallSet     — the replay path, before the prune
 //   - verifyLockIsStillTrusted — the no-op replay that installs nothing
 //
 // installFromLock and installFromPlan only fetch and extract; their callers are
@@ -173,6 +173,44 @@ func TestWarnStillWarnsForAPackageAboutToBeFetched(t *testing.T) {
 	}
 	if !strings.Contains(out, "signature check failed") {
 		t.Errorf("warn should warn for a package it is about to fetch:\n%s", out)
+	}
+}
+
+// A dev-scoped package is part of a normal replay but not a --production one,
+// so it is exactly the entry that falls through a gate whose selection has
+// drifted from the installer's. Both now read lockInstallSet, and this pins
+// that: narrow the gate's set and the package installs unverified under
+// require.
+func TestRequireVerifiesADevScopedLockedPackage(t *testing.T) {
+	inst := New(t.TempDir(), "", "", "")
+	projectDir := t.TempDir()
+	lf := &lockfile.LockFile{
+		Version:       1,
+		GeneroVersion: "6.00",
+		RootManifest:  lockfile.RootEntry{Name: "app", Version: "1.0.0"},
+		Packages: []lockfile.LockedPackage{
+			{Name: "devpkg", Version: "1.0.0", DownloadURL: "http://127.0.0.1:1/x.zip",
+				GeneroMajor: "6", Scope: "dev"},
+		},
+	}
+	if err := lf.Save(projectDir); err != nil {
+		t.Fatal(err)
+	}
+	inst.WithSigning(signing.EnforceRequire, "", "")
+
+	err := inst.verifyLockInstallSet(lf, Options{})
+	if err == nil {
+		t.Fatal("a dev-scoped locked package must be verified on a normal replay")
+	}
+	if !errors.Is(err, signing.ErrUnsigned) {
+		t.Errorf("want the signing refusal, got: %v", err)
+	}
+
+	// The complement: under --production it is not installed, so the gate has
+	// nothing to refuse. Without this, the test above would also pass for a
+	// gate that simply verified every entry in the file regardless of scope.
+	if err := inst.verifyLockInstallSet(lf, Options{Production: true}); err != nil {
+		t.Errorf("a dev package is not installed under --production, so it must not be gated: %v", err)
 	}
 }
 
