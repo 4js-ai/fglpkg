@@ -69,22 +69,7 @@ func cmdOutdated(args []string) error {
 	// also records each package's source repository, so an Artifactory-sourced
 	// package is checked against its own repo rather than GI (spec §11).
 	projectDir, _ := os.Getwd()
-	current := map[string]string{}
-	sources := map[string]string{}
-	// locked distinguishes "the lock recorded this package with an empty registry"
-	// (historical GI) from "the lock has no entry at all" — both leave sources[name]
-	// empty, but only the latter may fall back to the consume default below.
-	locked := map[string]bool{}
-	if lockfile.Exists(projectDir) {
-		lf, err := lockfile.Load(projectDir)
-		if err == nil {
-			for _, p := range lf.Packages {
-				current[p.Name] = p.Version
-				sources[p.Name] = p.Registry
-				locked[p.Name] = true
-			}
-		}
-	}
+	current, sources, locked := lockedState(projectDir)
 
 	// Multi-provider set (nil in the single-registry case → GI-only client).
 	home, _ := fglpkgHome()
@@ -143,6 +128,47 @@ func cmdOutdated(args []string) error {
 		return fmt.Errorf("%d dependenc%s out of date", outdatedCount, pluralY(outdatedCount))
 	}
 	return nil
+}
+
+// lockedState reads the lock file into the three maps a row needs: the version
+// currently installed, the repository it came from, and whether the lock knows
+// the package at all.
+//
+// Both arrays are read. A project's web components are locked in Webcomponents,
+// separately from its BDL libraries in Packages, and reading only the latter
+// reported every installed widget as "missing / not installed" and failed the
+// gate — in a project where `install` had just succeeded (GIS-582). Each array
+// carries the same Registry field, so the locked source is honoured for a
+// widget exactly as it is for a library (spec §11, GIS-364).
+//
+// `locked` distinguishes "the lock recorded this package with an empty registry"
+// (historical GI) from "the lock has no entry at all" — both leave sources[name]
+// empty, but only the latter may fall back to the consume default.
+//
+// A missing or unreadable lock is not an error: every dependency is then simply
+// reported as not installed.
+func lockedState(projectDir string) (current, sources map[string]string, locked map[string]bool) {
+	current = map[string]string{}
+	sources = map[string]string{}
+	locked = map[string]bool{}
+	if !lockfile.Exists(projectDir) {
+		return
+	}
+	lf, err := lockfile.Load(projectDir)
+	if err != nil {
+		return
+	}
+	for _, p := range lf.Packages {
+		current[p.Name] = p.Version
+		sources[p.Name] = p.Registry
+		locked[p.Name] = true
+	}
+	for _, w := range lf.Webcomponents {
+		current[w.Name] = w.Version
+		sources[w.Name] = w.Registry
+		locked[w.Name] = true
+	}
+	return
 }
 
 // outdatedSourceFor resolves which registry a dependency's versions are checked
@@ -294,10 +320,11 @@ func runnableVersions(vl *registry.VersionList, gv *genero.Version) []semver.Ver
 		if err != nil {
 			continue
 		}
-		if ok, err := gv.Satisfies(e.GeneroConstraint); err != nil || !ok {
-			continue
-		}
-		if !registry.VariantsSupport(e.Variants, gv.MajorString()) {
+		// One shared predicate with the resolver and the registry client, so
+		// `outdated` cannot offer a version `update` would refuse to select
+		// (GIS-577 #12). It checks both signals: the declared constraint and
+		// the published variants.
+		if ok, _ := registry.Runnable(gv, e.GeneroConstraint, e.Variants); !ok {
 			continue
 		}
 		out = append(out, v)
