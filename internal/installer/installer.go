@@ -406,11 +406,12 @@ func lockInstallSet(lf *lockfile.LockFile, opts Options) ([]lockfile.LockedPacka
 // it on every replay is noise that changes no outcome, and `fglpkg audit
 // signatures` is the command for auditing what is in the store.
 //
-// What this does NOT establish is that the files on disk are the version the
-// record names. Presence is checked by package name alone (LockFile.Validate),
-// so a store holding an older version of a locked package reads as present and
-// is never re-fetched. That gap predates signing and applies with signing off
-// too — see GIS-586.
+// The entries reaching this function are the ones whose extracted manifest
+// names the locked version (lockfile.PackageIsInstalled), so re-verifying the
+// record does say something about the files: anything else was classified as
+// not installed and is about to be fetched and verified as such (GIS-586).
+// Web components are the exception — they carry no manifest on disk, so their
+// presence is still version-blind (GIS-579, GIS-581).
 func (i *Installer) verifyOnDiskSignatures(pkgs []lockfile.LockedPackage, wcs []lockfile.LockedWebcomponent) error {
 	if i.signingEnforce != signing.EnforceRequire {
 		return nil
@@ -452,7 +453,7 @@ func (i *Installer) verifyLockInstallSet(lf *lockfile.LockFile, opts Options) er
 	pkgs, _, wcs := lockInstallSet(lf, opts)
 	var onDisk []lockfile.LockedPackage
 	for _, pkg := range pkgs {
-		if _, err := os.Stat(filepath.Join(i.packagesDir, pkg.Name)); err == nil {
+		if lockfile.PackageIsInstalled(i.packagesDir, pkg) {
 			onDisk = append(onDisk, pkg)
 			continue
 		}
@@ -784,11 +785,13 @@ func (i *Installer) installFromLock(lf *lockfile.LockFile, root *manifest.Manife
 	// lockInstallSet on why this must not be a second copy.
 	pkgs, jars, wcs := lockInstallSet(lf, opts)
 
-	// Filter packages that are already on disk so the parallel phase
-	// only does real work.
+	// Filter packages that are already on disk so the parallel phase only does
+	// real work. "On disk" is the locked VERSION being extracted, the same test
+	// the gate above used and the same one that decided this replay was not a
+	// no-op — see lockfile.PackageIsInstalled.
 	var pkgsToInstall, pkgsOnDisk []lockfile.LockedPackage
 	for _, pkg := range pkgs {
-		if _, err := os.Stat(filepath.Join(i.packagesDir, pkg.Name)); err == nil {
+		if lockfile.PackageIsInstalled(i.packagesDir, pkg) {
 			pkgsOnDisk = append(pkgsOnDisk, pkg)
 			continue
 		}

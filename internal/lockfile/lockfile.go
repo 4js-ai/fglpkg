@@ -559,8 +559,9 @@ type ValidationResult struct {
 	// changed since the lock was written (lock is stale).
 	ManifestMismatch *ManifestMismatchError
 
-	// MissingPackages lists packages in the lock that are not yet installed
-	// (install directory absent).
+	// MissingPackages lists packages in the lock that are not installed at the
+	// version the lock names — the directory is absent, holds no readable
+	// manifest, or holds a different version (see PackageIsInstalled).
 	MissingPackages []string
 
 	// MissingWebcomponents lists webcomponent packages in the lock whose
@@ -731,6 +732,54 @@ func sortedKeys(a, b map[string]string) []string {
 	return keys
 }
 
+// PackageIsInstalled reports whether packagesDir holds the exact version of pkg
+// that the lock names.
+//
+// It is the single definition of "this locked package is already on disk",
+// shared by Validate (which decides whether a replay is a no-op) and by the
+// installer's signature gate and fetch filter. Three copies of this choice is
+// how the bug below survived: the gate can verify one set while the install
+// pass installs another, and either can disagree with "Nothing to install".
+//
+// Presence used to be decided by stat'ing packagesDir/<name> and nothing else,
+// so a store holding an OLDER version of a locked package read as installed and
+// was never re-fetched. The most ordinary team workflow then silently did
+// nothing: pull a commit that bumps a dependency, run `fglpkg install`, get
+// "Nothing to install" and exit 0, and keep running the old version while the
+// lock file — the thing that is meant to say what is installed — claimed
+// otherwise (GIS-586). The root-manifest check does not catch it, because the
+// teammate regenerated the lock and diffDeclared is therefore clean.
+//
+// Anything that is not a readable manifest naming the locked version counts as
+// NOT installed, so the entry re-installs through the normal verified path.
+// That is the safe direction: a directory with no manifest in it is an
+// interrupted extraction, and re-fetching costs a download, whereas trusting it
+// ships whatever happens to be there.
+//
+// Two details that look like bugs and are not:
+//
+//   - Only the version is compared, never the name. The directory is named by
+//     the package's registry slug ("demo-pkg") while the manifest inside it
+//     carries the package's own name ("demo.pkg"), so the two disagree even
+//     when everything is correct.
+//   - The version is read with a tolerant decode rather than manifest.Load,
+//     which rejects unknown fields. A package published by a newer fglpkg would
+//     otherwise fail to load, read as stale, and be re-downloaded on every
+//     single install — forever, since re-extracting it changes nothing.
+func PackageIsInstalled(packagesDir string, pkg LockedPackage) bool {
+	data, err := os.ReadFile(filepath.Join(packagesDir, pkg.Name, manifest.Filename))
+	if err != nil {
+		return false
+	}
+	var probe struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return false
+	}
+	return probe.Version != "" && probe.Version == pkg.Version
+}
+
 // Validate checks whether the lock file is consistent with the current
 // environment and manifest. currentGenero may be "" to skip that check.
 // packagesDir / webcomponentsDir / jarsDir are used to check which BDL
@@ -773,11 +822,11 @@ func (lf *LockFile) Validate(root *manifest.Manifest, currentGenero, packagesDir
 		result.ManifestMismatch = e
 	}
 
-	// On-disk presence check.
+	// On-disk presence check. "Present" means the locked VERSION is extracted,
+	// not merely a directory with the right name — see PackageIsInstalled.
 	if packagesDir != "" {
 		for _, pkg := range lf.Packages {
-			dir := filepath.Join(packagesDir, pkg.Name)
-			if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
+			if !PackageIsInstalled(packagesDir, pkg) {
 				result.MissingPackages = append(result.MissingPackages, pkg.Name)
 			}
 		}

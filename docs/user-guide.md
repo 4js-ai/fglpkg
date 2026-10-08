@@ -695,13 +695,17 @@ Note that pruning deletes anything under `.fglpkg/packages/`, `.fglpkg/jars/`, a
 
 Once a `fglpkg-lock.json` exists, `fglpkg install` will **not** fetch a newer version of a dependency just because one was published — even if your version constraint (e.g. `^1.0.0`) would allow it. `install` re-resolves when `fglpkg.json` has changed (including by hand); otherwise it validates the existing lock against disk and stops there (`Lock file is up to date... Nothing to install`).
 
+Pulling a teammate's version bump is a different case, and plain `install` is the right command for it. When a colleague commits a new `fglpkg.json` and `fglpkg-lock.json`, `fglpkg install` installs what the new lock names: it compares the version each directory under `.fglpkg/packages/` actually holds against the version the lock records, so a package left behind at an older version is re-fetched instead of being counted as present. The same comparison covers a downgrade, and a package directory left half-extracted by an interrupted run.
+
 To re-resolve all dependencies to their latest compatible versions (ignoring the lock file):
 
 ```bash
 fglpkg update
 ```
 
-This rewrites `fglpkg-lock.json` with whatever versions the registry now resolves to, and re-installs anything that changed — BDL packages, Java JARs, and webcomponent packages alike. Webcomponent bundles are always re-extracted on install (there's no "already installed, skip" fast path for them like there is for BDL packages), so an `update` that picks up a new webcomponent version reliably overwrites the old files in `.fglpkg/webcomponents/<COMPONENTTYPE>/`. See [Publishing an Update](#publishing-an-update) for the publisher side of this flow.
+This rewrites `fglpkg-lock.json` with whatever versions the registry now resolves to, and re-installs anything that changed — BDL packages, Java JARs, and webcomponent packages alike. Whenever an install has work to do, webcomponent bundles are re-extracted rather than skipped (there's no "already installed, skip" fast path for them like there is for BDL packages), so an `update` that picks up a new webcomponent version reliably overwrites the old files in `.fglpkg/webcomponents/<COMPONENTTYPE>/`. See [Publishing an Update](#publishing-an-update) for the publisher side of this flow.
+
+> **Known gap — web components and a pulled bump.** Unlike a BDL package, an installed web component leaves no manifest behind, so a lock replay cannot tell which version is extracted; it only checks that `.fglpkg/webcomponents/` is not empty. If a pulled commit bumps *only* a web component and nothing else, `fglpkg install` reports `Nothing to install` and the old bundle stays on disk. Run `fglpkg update` to pick it up. Tracked as GIS-579.
 
 ### Reproducible Installs for CI (`--frozen`)
 

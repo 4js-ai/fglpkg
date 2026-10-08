@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -32,6 +34,23 @@ func lockOnePkg(t *testing.T, downloadURL string) (*Installer, string, *lockfile
 		t.Fatal(err)
 	}
 	return inst, projectDir, lf
+}
+
+// extractPackage writes what a successful install leaves in the store: the
+// package directory with the extracted package's own fglpkg.json in it. A bare
+// MkdirAll is NOT enough — since GIS-586 a package counts as installed only
+// when its manifest names the locked version — and that is the point: a
+// directory alone is what an interrupted run leaves behind.
+func extractPackage(t *testing.T, inst *Installer, name, version string) {
+	t.Helper()
+	dir := filepath.Join(inst.packagesDir, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"name":"acme.` + name + `","version":"` + version + `","license":"MIT"}`
+	if err := os.WriteFile(filepath.Join(dir, manifest.Filename), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestInstallFromLockGoneArtifact: a locked package the registry answers 404/410
