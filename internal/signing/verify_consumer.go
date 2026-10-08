@@ -50,7 +50,7 @@ func (m *Manifest) KeyByID(keyid string) (Key, bool) {
 func (m *Manifest) VerifyArtifact(f ArtifactFields, sig ArtifactSignature) error {
 	at, err := parseTimestamp(f.UploadedAt)
 	if err != nil {
-		return fmt.Errorf("%w: cannot parse upload time %q: %v", ErrKeyExpired, f.UploadedAt, err)
+		return fmt.Errorf("%w: %q: %v", ErrBadUploadTime, f.UploadedAt, err)
 	}
 	key, err := m.SelectKey(sig.KeyID, at)
 	if err != nil {

@@ -29,8 +29,9 @@ type auditResult int
 const (
 	auditOK auditResult = iota
 	auditMissing       // no signature recorded at all
-	auditOutsideWindow // key window misses the upload, but the signature itself verifies
-	auditMismatch      // the signature does not verify, or its key is unknown
+	auditOutsideWindow // uploaded BEFORE the key's validFrom, signature otherwise valid
+	auditKeyRetired    // uploaded AFTER the key's validTo — signed with a retired key
+	auditMismatch      // the signature does not verify, its key is unknown, or the time is unreadable
 )
 
 // cmdAuditSignatures implements `fglpkg audit signatures`: it walks the lock
@@ -94,12 +95,19 @@ func cmdAuditSignatures(args []string) error {
 	failures := total - counts[auditOK]
 	if failures > 0 {
 		if n := counts[auditOutsideWindow]; n > 0 {
-			fmt.Printf("\nNote: %d package%s failed only on the key's validity window.\n", n, pluralS(n))
-			fmt.Println("  The signature itself verifies — the signing key was minted after the")
-			fmt.Println("  artifact was published, so the window does not cover it. That is a")
+			fmt.Printf("\nNote: %d package%s uploaded before the signing key became valid.\n", n, pluralS(n))
+			fmt.Println("  The signature itself verifies — the key was minted after the artifact")
+			fmt.Println("  was published, so the window does not reach back to cover it. That is a")
 			fmt.Println("  registry key-rollout problem, not evidence the artifact was altered.")
 			fmt.Println("  The registry operator fixes it by re-issuing the keys manifest.")
 			fmt.Println("  FGLPKG_SIGNING=require refuses these packages until then.")
+		}
+		if n := counts[auditKeyRetired]; n > 0 {
+			fmt.Printf("\nWarning: %d package%s signed with a key that had already been retired.\n", n, pluralS(n))
+			fmt.Println("  The signature verifies, but the artifact was uploaded after the key's")
+			fmt.Println("  validTo — which is the condition that window exists to catch. Treat this")
+			fmt.Println("  as a signing-pipeline fault, or as a key still in use past its rotation,")
+			fmt.Println("  and establish why before trusting the artifact.")
 		}
 		return &ExitError{Code: 1, Err: fmt.Errorf(
 			"%d of %d package%s failed signature verification (%s)",
@@ -117,9 +125,13 @@ func auditBreakdown(counts map[auditResult]int) string {
 		r     auditResult
 		label string
 	}{
-		{auditMismatch, "signature does not verify"},
+		// "failed verification" rather than "signature does not verify": this
+		// category also counts an unknown key and an unreadable upload time,
+		// neither of which is a statement about the signature bytes.
+		{auditMismatch, "failed verification"},
+		{auditKeyRetired, "signed with a retired key"},
 		{auditMissing, "unsigned"},
-		{auditOutsideWindow, "outside the key's validity window"},
+		{auditOutsideWindow, "uploaded before the key was valid"},
 	} {
 		if n := counts[c.r]; n > 0 {
 			parts = append(parts, fmt.Sprintf("%d %s", n, c.label))
@@ -148,18 +160,27 @@ func auditOne(m *signing.Manifest, name, version, variant, sha256 string, size i
 		return auditOK
 
 	case errors.Is(err, signing.ErrKeyExpired):
-		// The window is checked before the bytes are, so ErrKeyExpired on its
+		// The window is checked before the bytes are, so a window error on its
 		// own says nothing about whether the artifact matches what was signed —
 		// VerifyArtifact returned before it looked. Check the signature directly
-		// against the named key (KeyByID deliberately ignores the window) so the
-		// two conditions are reported as what they are: a key-rollout problem,
-		// or an artifact that is ALSO wrong.
-		if key, ok := m.KeyByID(keyid); ok && signing.VerifyArtifact(p, sig, key.Pub) == nil {
-			fmt.Printf("! %-40s OUTSIDE KEY WINDOW: %v\n", label, err)
+		// against the named key (KeyByID deliberately ignores the window) before
+		// calling this anything other than a mismatch.
+		key, ok := m.KeyByID(keyid)
+		if !ok || signing.VerifyArtifact(p, sig, key.Pub) != nil {
+			fmt.Printf("✗ %-40s ERROR: signature does not verify, and %v\n", label, err)
+			return auditMismatch
+		}
+		// Which side of the window matters. Below validFrom the registry
+		// attested to an artifact older than the key — a rollout problem.
+		// Above validTo it was signed with a RETIRED key, which is the
+		// condition validTo exists to catch and must never be reported as
+		// the benign one.
+		if errors.Is(err, signing.ErrKeyNotYetValid) {
+			fmt.Printf("! %-40s KEY NOT YET VALID: %v\n", label, err)
 			return auditOutsideWindow
 		}
-		fmt.Printf("✗ %-40s ERROR: signature does not verify, and %v\n", label, err)
-		return auditMismatch
+		fmt.Printf("✗ %-40s RETIRED KEY: %v\n", label, err)
+		return auditKeyRetired
 
 	default:
 		fmt.Printf("✗ %-40s ERROR: %v\n", label, err)

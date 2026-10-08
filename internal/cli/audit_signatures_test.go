@@ -75,11 +75,58 @@ func TestAuditOneReportsAWindowFailureSeparately(t *testing.T) {
 	if got != auditOutsideWindow {
 		t.Errorf("result = %v, want auditOutsideWindow", got)
 	}
-	if !strings.Contains(out, "OUTSIDE KEY WINDOW") {
-		t.Errorf("line should name the window as the cause:\n%s", out)
+	if !strings.Contains(out, "KEY NOT YET VALID") {
+		t.Errorf("line should name the cause as the key not yet being valid:\n%s", out)
 	}
 	if strings.HasPrefix(strings.TrimSpace(out), "✗") {
-		t.Errorf("a window failure must not render as a plain verification failure:\n%s", out)
+		t.Errorf("a backfill window failure must not render as a plain verification failure:\n%s", out)
+	}
+}
+
+// The other side of the window is the opposite finding. An artifact uploaded
+// AFTER the key's validTo was signed with a retired key — the condition validTo
+// exists to catch — so it must never collect the benign "the registry just
+// minted the key late" diagnosis. Both halves share ErrKeyExpired, so without
+// the split this landed in the backfill category and was explained away.
+func TestAuditOneRetiredKeyIsNotTreatedAsBackfill(t *testing.T) {
+	f, sig, m := signedFixture(t,
+		"2028-01-15T10:00:00.000Z", // uploaded well after...
+		"2026-09-28T21:42:18.238Z",
+		"2027-09-28T21:42:18.238Z") // ...the key was retired
+
+	got, out := runAuditOne(t, m, f, sig)
+	if got == auditOutsideWindow {
+		t.Fatal("a retired-key signature must not be filed as the backfill case")
+	}
+	if got != auditKeyRetired {
+		t.Errorf("result = %v, want auditKeyRetired", got)
+	}
+	if !strings.Contains(out, "RETIRED KEY") {
+		t.Errorf("line should name the retired key:\n%s", out)
+	}
+	if strings.Contains(out, "NOT YET VALID") {
+		t.Errorf("a retired key is not a not-yet-valid key:\n%s", out)
+	}
+}
+
+// An upload time that cannot be parsed tells us nothing about the window, so it
+// is not a window finding. It used to be wrapped as ErrKeyExpired, which put an
+// unreadable timestamp under the "key minted late, harmless" explanation.
+func TestAuditOneUnparseableUploadTimeIsNotAWindowProblem(t *testing.T) {
+	f, sig, m := signedFixture(t,
+		"2026-10-01T00:00:00+0000", // inside the window, but not RFC 3339
+		"2026-09-28T21:42:18.238Z",
+		"2027-09-28T21:42:18.238Z")
+
+	got, out := runAuditOne(t, m, f, sig)
+	if got == auditOutsideWindow || got == auditKeyRetired {
+		t.Fatalf("an unreadable upload time is not a window finding, got %v", got)
+	}
+	if got != auditMismatch {
+		t.Errorf("result = %v, want auditMismatch", got)
+	}
+	if strings.Contains(out, "NOT YET VALID") || strings.Contains(out, "RETIRED KEY") {
+		t.Errorf("must not diagnose a window problem it could not test for:\n%s", out)
 	}
 }
 
@@ -173,11 +220,13 @@ func TestAuditBreakdownNamesEachCategory(t *testing.T) {
 		auditMismatch:      1,
 		auditMissing:       2,
 		auditOutsideWindow: 3,
+		auditKeyRetired:    5,
 	})
 	for _, want := range []string{
-		"1 signature does not verify",
+		"1 failed verification",
 		"2 unsigned",
-		"3 outside the key's validity window",
+		"3 uploaded before the key was valid",
+		"5 signed with a retired key",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("breakdown %q missing %q", got, want)
@@ -191,7 +240,7 @@ func TestAuditBreakdownNamesEachCategory(t *testing.T) {
 // A category with no members is left out rather than printed as zero.
 func TestAuditBreakdownOmitsEmptyCategories(t *testing.T) {
 	got := auditBreakdown(map[auditResult]int{auditOutsideWindow: 2})
-	if got != "2 outside the key's validity window" {
+	if got != "2 uploaded before the key was valid" {
 		t.Errorf("breakdown = %q, want only the non-empty category", got)
 	}
 }

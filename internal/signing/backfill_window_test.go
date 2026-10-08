@@ -34,10 +34,19 @@ import (
 //     under both the old and new manifest. That is what makes re-issuing safe
 //     without touching a single artifact.
 
-// backfillFixture returns a signed artifact whose upload predates prod-key-1's
-// real validFrom, plus the key that signed it — poiapi 1.8.0 genero6, the oldest
-// of the 11 affected production artifacts.
-func backfillFixture(t *testing.T) (ArtifactFields, ArtifactSignature, string) {
+// backfillUpload is poiapi 1.8.0 genero6's real upload time on the production
+// registry — the oldest of the 11 artifacts GIS-576 affects.
+const backfillUpload = "2026-09-04T19:59:47.781Z"
+
+// backfillFixture returns an artifact uploaded at uploadedAt, signed over that
+// exact value, plus the key that signed it — poiapi 1.8.0 genero6, the oldest of
+// the 11 affected production artifacts.
+//
+// uploadedAt is a parameter rather than a constant the caller edits afterwards:
+// mutating the field post-signing silently invalidates the signature, so such a
+// test passes only while the window happens to be checked before the bytes, and
+// would break the moment that order changed for unrelated reasons.
+func backfillFixture(t *testing.T, uploadedAt string) (ArtifactFields, ArtifactSignature, string) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -49,7 +58,7 @@ func backfillFixture(t *testing.T) (ArtifactFields, ArtifactSignature, string) {
 		Variant:    "genero6",
 		SHA256:     "b6e1",
 		Size:       87477,
-		UploadedAt: "2026-09-04T19:59:47.781Z",
+		UploadedAt: uploadedAt,
 		Uploader:   "partner:fourjs",
 	}
 	payload, err := CanonicalArtifactPayload(f)
@@ -77,7 +86,7 @@ func manifestWithWindow(pub, validFrom, validTo string) *Manifest {
 // The bug as it stands in production: a validly-signed artifact is refused
 // purely because it was uploaded before the key was minted.
 func TestBackfilledArtifactFailsTheMintedWindow(t *testing.T) {
-	f, sig, pub := backfillFixture(t)
+	f, sig, pub := backfillFixture(t, backfillUpload)
 	m := manifestWithWindow(pub, "2026-09-28T21:42:18.238Z", "2027-09-28T21:42:18.238Z")
 
 	err := m.VerifyArtifact(f, sig)
@@ -93,7 +102,7 @@ func TestBackfilledArtifactFailsTheMintedWindow(t *testing.T) {
 // Nothing about the artifact changed, which is the point: re-issuing the
 // manifest repairs the whole backfilled corpus without rewriting any of it.
 func TestWideningTheWindowAcceptsTheSameSignature(t *testing.T) {
-	f, sig, pub := backfillFixture(t)
+	f, sig, pub := backfillFixture(t, backfillUpload)
 	m := manifestWithWindow(pub, "2026-09-01T00:00:00.000Z", "2027-09-28T21:42:18.238Z")
 
 	if err := m.VerifyArtifact(f, sig); err != nil {
@@ -103,10 +112,16 @@ func TestWideningTheWindowAcceptsTheSameSignature(t *testing.T) {
 
 // A window that opens before the manifest was issued is legitimate and must stay
 // so: it is how the registry states that a key attests to artifacts older than
-// itself. If this test starts failing, the server-side fix for GIS-576 has been
-// undone from the client side.
+// itself.
+//
+// Scope, so this is not read as more than it is: it builds a Manifest directly
+// and calls SelectKey, so it only guards against such a check being added
+// THERE. A check added in ParseManifest or Verify — arguably the more natural
+// place — would be caught instead by the existing manifest fixtures, which
+// already carry a validFrom months before their issuedAt (the pinned keys.json,
+// and the cache_test / signing_test fixtures).
 func TestValidFromMayPrecedeIssuedAt(t *testing.T) {
-	_, _, pub := backfillFixture(t)
+	_, _, pub := backfillFixture(t, backfillUpload)
 	m := manifestWithWindow(pub, "2026-09-01T00:00:00.000Z", "2027-09-28T21:42:18.238Z")
 	if m.IssuedAt <= m.Keys[0].ValidFrom {
 		t.Fatalf("fixture is wrong: issuedAt %q should be after validFrom %q", m.IssuedAt, m.Keys[0].ValidFrom)
@@ -125,8 +140,11 @@ func TestValidFromMayPrecedeIssuedAt(t *testing.T) {
 // widened window is still refused. Without this, the two tests above would also
 // pass for a client that had stopped checking the lower bound altogether.
 func TestWideningStillRefusesWhatItDoesNotCover(t *testing.T) {
-	f, sig, pub := backfillFixture(t)
-	f.UploadedAt = "2026-08-01T00:00:00.000Z" // before the widened validFrom
+	// Signed over this upload time, so the signature is valid and the window is
+	// the only thing that can refuse it. Mutating UploadedAt after signing would
+	// invalidate the signature, and the test would then pass only for as long as
+	// the window happens to be checked before the bytes.
+	f, sig, pub := backfillFixture(t, "2026-08-01T00:00:00.000Z")
 	m := manifestWithWindow(pub, "2026-09-01T00:00:00.000Z", "2027-09-28T21:42:18.238Z")
 
 	err := m.VerifyArtifact(f, sig)
@@ -135,5 +153,9 @@ func TestWideningStillRefusesWhatItDoesNotCover(t *testing.T) {
 	}
 	if !errors.Is(err, ErrKeyExpired) {
 		t.Errorf("want ErrKeyExpired, got: %v", err)
+	}
+	// Specifically the lower bound, not just "some window error".
+	if !errors.Is(err, ErrKeyNotYetValid) {
+		t.Errorf("want ErrKeyNotYetValid for an upload before validFrom, got: %v", err)
 	}
 }

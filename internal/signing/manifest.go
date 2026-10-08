@@ -107,7 +107,14 @@ func (m *Manifest) SelectKey(keyid string, at time.Time) (*Key, error) {
 		if err != nil {
 			return nil, fmt.Errorf("signing: key %q has invalid validTo: %w", keyid, err)
 		}
-		if at.Before(from) || at.After(to) {
+		// The two sides are reported separately: below validFrom is the
+		// backfill case, above validTo is a retired key. ErrKeyNotYetValid
+		// wraps ErrKeyExpired, so a caller that does not care still matches.
+		if at.Before(from) {
+			return nil, fmt.Errorf("%w: key %q valid %s..%s, artifact at %s",
+				ErrKeyNotYetValid, keyid, k.ValidFrom, k.ValidTo, at.UTC().Format(time.RFC3339))
+		}
+		if at.After(to) {
 			return nil, fmt.Errorf("%w: key %q valid %s..%s, artifact at %s",
 				ErrKeyExpired, keyid, k.ValidFrom, k.ValidTo, at.UTC().Format(time.RFC3339))
 		}
