@@ -321,8 +321,9 @@ func lockedPackageInfo(pkg lockfile.LockedPackage) *registry.PackageInfo {
 }
 
 // lockedPackageVariant is the artifact variant that was signed for a locked
-// BDL package: "genero<major>", or "" when the lock predates GeneroMajor and
-// the record's own variant stands in.
+// BDL package: "genero<major>", or "" when the lock predates GeneroMajor —
+// such an entry cannot be verified until `fglpkg update` re-locks it, since
+// the signed payload names a real variant and "" will never match it.
 func lockedPackageVariant(pkg lockfile.LockedPackage) string {
 	if pkg.GeneroMajor == "" {
 		return ""
@@ -378,15 +379,32 @@ func (i *Installer) verifyPlanSignatures(plan *resolver.Plan) error {
 	return nil
 }
 
-// verifyOnDiskSignatures re-verifies locked entries whose files are already
-// present, and applies under "require" only.
+// lockInstallSet is the package and web-component set a replay would install,
+// honouring opts.Production.
+func lockInstallSet(lf *lockfile.LockFile, opts Options) ([]lockfile.LockedPackage, []lockfile.LockedWebcomponent) {
+	if opts.Production {
+		p, _, w := lf.FilterForProduction()
+		return p, w
+	}
+	p, _, w := lf.ToInstallList()
+	return p, w
+}
+
+// verifyOnDiskSignatures re-verifies the LOCK RECORDS of entries whose files are
+// already present, and applies under "require" only.
 //
-// Presence on disk is not evidence of trust: those files may be exactly what an
-// earlier refused run left behind, and skipping them is what let a retry turn
-// exit 1 into exit 0 (GIS-580). Under "warn" they are left alone — the warning
-// was emitted when they were installed, repeating it on every replay is noise
-// that changes no outcome, and `fglpkg audit signatures` is the command for
-// auditing what is in the store.
+// Presence on disk is not evidence that the record was ever accepted: those
+// files may be exactly what an earlier refused run left behind, and skipping
+// them is what let a retry turn exit 1 into exit 0 (GIS-580). Under "warn" they
+// are left alone — the warning was emitted when they were installed, repeating
+// it on every replay is noise that changes no outcome, and `fglpkg audit
+// signatures` is the command for auditing what is in the store.
+//
+// What this does NOT establish is that the files on disk are the version the
+// record names. Presence is checked by package name alone (LockFile.Validate),
+// so a store holding an older version of a locked package reads as present and
+// is never re-fetched. That gap predates signing and applies with signing off
+// too — see GIS-586.
 func (i *Installer) verifyOnDiskSignatures(pkgs []lockfile.LockedPackage, wcs []lockfile.LockedWebcomponent) error {
 	if i.signingEnforce != signing.EnforceRequire {
 		return nil
@@ -409,14 +427,39 @@ func (i *Installer) verifyOnDiskSignatures(pkgs []lockfile.LockedPackage, wcs []
 // date. Nothing to install." reports success for a store that may hold an
 // artifact whose signature was refused on the run that put it there.
 func (i *Installer) verifyLockIsStillTrusted(lf *lockfile.LockFile, opts Options) error {
-	var pkgs []lockfile.LockedPackage
-	var wcs []lockfile.LockedWebcomponent
-	if opts.Production {
-		pkgs, _, wcs = lf.FilterForProduction()
-	} else {
-		pkgs, _, wcs = lf.ToInstallList()
-	}
+	pkgs, wcs := lockInstallSet(lf, opts)
 	return i.verifyOnDiskSignatures(pkgs, wcs)
+}
+
+// verifyLockInstallSet verifies every signature a lock replay will rely on. It
+// runs before the prune as well as before any fetch or extraction: verification
+// is read-only, so doing it first costs nothing and means a refused run leaves
+// the store exactly as it found it. Pruning first would delete orphans and only
+// then refuse — a store change on a run that installed nothing, which is the
+// opposite of what the resolve path promises.
+//
+// Entries whose files are missing are about to be fetched, so they are checked
+// under the configured mode. Entries already present are re-checked under
+// "require" only (see verifyOnDiskSignatures). Web components are re-extracted
+// on every replay, so they always count as about to be fetched.
+func (i *Installer) verifyLockInstallSet(lf *lockfile.LockFile, opts Options) error {
+	pkgs, wcs := lockInstallSet(lf, opts)
+	var onDisk []lockfile.LockedPackage
+	for _, pkg := range pkgs {
+		if _, err := os.Stat(filepath.Join(i.packagesDir, pkg.Name)); err == nil {
+			onDisk = append(onDisk, pkg)
+			continue
+		}
+		if err := i.verifySignature(lockedPackageInfo(pkg), lockedPackageVariant(pkg)); err != nil {
+			return fmt.Errorf("failed to install %s: %w", pkg.Name, err)
+		}
+	}
+	for _, wc := range wcs {
+		if err := i.verifySignature(lockedWebcomponentInfo(wc), "webcomponent"); err != nil {
+			return fmt.Errorf("failed to install webcomponent %s: %w", wc.Name, err)
+		}
+	}
+	return i.verifyOnDiskSignatures(onDisk, nil)
 }
 
 // Options controls optional install behaviour.
@@ -556,6 +599,11 @@ func (i *Installer) InstallAllWithOptions(m *manifest.Manifest, projectDir strin
 				// Lock is valid but some packages are missing on disk — install
 				// them, dropping anything the lock no longer names first.
 				fmt.Printf("Installing from lock file (Genero %s)...\n", gv)
+				// Before the prune, so a refused run changes nothing at all
+				// (GIS-580).
+				if err := i.verifyLockInstallSet(lf, opts); err != nil {
+					return err
+				}
 				if prune {
 					pruned, err := i.pruneToLock(lf)
 					if err != nil {
@@ -746,27 +794,12 @@ func (i *Installer) installFromLock(lf *lockfile.LockFile, root *manifest.Manife
 		pkgsToInstall = append(pkgsToInstall, pkg)
 	}
 
-	// Verify before fetching or extracting anything, so a "require" failure
-	// refuses without leaving files in .fglpkg/ (GIS-580). Web components are
-	// always re-extracted, so they all belong to the about-to-be-fetched set.
-	for _, pkg := range pkgsToInstall {
-		if err := i.verifySignature(lockedPackageInfo(pkg), lockedPackageVariant(pkg)); err != nil {
-			return fmt.Errorf("failed to install %s: %w", pkg.Name, err)
-		}
-	}
-	for _, wc := range wcs {
-		if err := i.verifySignature(lockedWebcomponentInfo(wc), "webcomponent"); err != nil {
-			return fmt.Errorf("failed to install webcomponent %s: %w", wc.Name, err)
-		}
-	}
-	// Entries already on disk are re-checked under "require" only.
-	if err := i.verifyOnDiskSignatures(pkgsOnDisk, nil); err != nil {
-		return err
-	}
+	// Signatures were verified by verifyLockInstallSet before the prune, so
+	// this function only fetches and extracts (GIS-580). It must stay that
+	// way: its caller is the gate.
 
 	// Already-installed lines are printed synchronously up front for a stable
-	// "already there" prelude — after verification, so a rejected package is
-	// never announced as installed.
+	// "already there" prelude.
 	for _, pkg := range pkgsOnDisk {
 		fmt.Printf("  ✓ %s@%s (already installed)\n", pkg.Name, pkg.Version)
 	}

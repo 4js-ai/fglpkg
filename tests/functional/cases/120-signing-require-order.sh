@@ -84,6 +84,30 @@ _req_replay_reverifies_what_is_on_disk() {
 it "require re-verifies a package that is already installed" \
   _req_replay_reverifies_what_is_on_disk
 
+# A refused replay must not change the store at all. The prune runs on the
+# lock-replay path, so verification has to come first — otherwise a run that
+# installs nothing still deletes orphans before refusing, which is the opposite
+# of what the resolve path promises.
+_req_refusal_does_not_prune() {
+  mock_registry_start
+  export FGLPKG_SIGNING=off
+  run install demo.pkg@1.0.0
+  assert_success || return 1
+
+  # An orphan the lock does not name: what the prune would sweep.
+  mkdir -p .fglpkg/packages/orphan
+  # Drop the locked package so the replay takes the install path rather than
+  # the "Nothing to install" one.
+  rm -rf .fglpkg/packages/demo-pkg
+
+  export FGLPKG_SIGNING=require
+  run install --local
+  assert_failure || return 1
+  assert_not_contains "pruned" || return 1
+  assert_dir ".fglpkg/packages/orphan" || return 1
+}
+it "a refused replay prunes nothing" _req_refusal_does_not_prune
+
 # Control: the default mode is warn, and it must still install. Verifying
 # earlier must not turn a warning into a failure — while GIS-576 is open most of
 # the real registry fails verification, so this is the common path.

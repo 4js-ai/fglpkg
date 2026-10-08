@@ -2084,9 +2084,9 @@ Set `signing.enforce` in `~/.fglpkg/config.json` (or the `FGLPKG_SIGNING` enviro
 | `require` | A bad or missing signature aborts the install before anything is fetched. |
 | `off` | Signature verification is skipped entirely. |
 
-Under `require`, verification runs **before** the artifact is downloaded — the signature covers the `sha256`, so it can be checked from the registry metadata, and the usual checksum check then binds the downloaded bytes to the signature you already verified. A refused package therefore leaves nothing behind: no files under `.fglpkg/`, and no entry in `fglpkg-lock.json`.
+Under `require`, verification runs **before** the artifact is downloaded — the signature covers the `sha256`, so it can be checked from the registry metadata, and the usual checksum check then binds the downloaded bytes to the signature you already verified. A refused package therefore leaves nothing behind: no files under `.fglpkg/`, and no entry in `fglpkg-lock.json`. When you named the package on the command line, `fglpkg.json` keeps the dependency you asked for; `fglpkg remove <pkg>` drops it.
 
-This matters for pipelines that retry. A package already installed is re-verified on every run under `require`, so being on disk is never taken as evidence that it was trusted — a second attempt cannot accept what the first one refused. (Under `warn` an already-installed package is not re-checked, since the warning was issued when it was installed; use `fglpkg audit signatures` to audit the store on demand.)
+This matters for pipelines that retry. Under `require`, the **lock record** of an already-installed package is re-verified on every run, so a second attempt cannot accept what the first one refused. Note what that does and does not establish: the record is re-checked, but installed files are matched to it by package name, so it is not a proof that the files on disk are the version the lock names. (Under `warn` an already-installed package is not re-checked, since the warning was issued when it was installed; use `fglpkg audit signatures` to audit the store on demand.)
 
 `fglpkg install --no-verify-signature` skips verification for a single run (discouraged; for emergencies).
 
