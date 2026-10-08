@@ -3,6 +3,7 @@ package cli
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 
@@ -147,11 +148,38 @@ func TestAuditOneOutsideWindowWithBadBytesIsAMismatch(t *testing.T) {
 	if got != auditMismatch {
 		t.Errorf("result = %v, want auditMismatch — the bytes do not match what was signed", got)
 	}
-	if strings.Contains(out, "OUTSIDE KEY WINDOW:") {
+	if strings.Contains(out, "KEY NOT YET VALID") {
 		t.Errorf("a corrupted artifact must not be excused as a window failure:\n%s", out)
 	}
-	if !strings.Contains(out, "does not verify") {
-		t.Errorf("line should say the signature does not verify:\n%s", out)
+	// Deliberately the marker, not the wording: which of the two failures is
+	// named depends on whether the window or the bytes are checked first, and
+	// the result assertion above already pins the classification.
+	if !strings.HasPrefix(strings.TrimSpace(out), "✗") {
+		t.Errorf("line should render as a failure:\n%s", out)
+	}
+}
+
+// The retired side needs the same guard. Moving the retired branch above the
+// byte re-check would render a tampered post-validTo artifact as
+// "✗ RETIRED KEY", under a note that opens "The signature verifies" — which it
+// does not. Every other test stays green under that mutation.
+func TestAuditOneRetiredKeyWithBadBytesIsAMismatch(t *testing.T) {
+	f, sig, m := signedFixture(t,
+		"2028-01-15T10:00:00.000Z", // after validTo
+		"2026-09-28T21:42:18.238Z",
+		"2027-09-28T21:42:18.238Z")
+
+	f.SHA256 = "deadbeef" // ...and the artifact is not what was signed
+
+	got, out := runAuditOne(t, m, f, sig)
+	if got == auditKeyRetired {
+		t.Fatal("a tampered artifact must not be filed as a retired-key finding — that note claims the signature verifies")
+	}
+	if got != auditMismatch {
+		t.Errorf("result = %v, want auditMismatch", got)
+	}
+	if strings.Contains(out, "RETIRED KEY") {
+		t.Errorf("must not render as a retired-key finding:\n%s", out)
 	}
 }
 
@@ -242,5 +270,105 @@ func TestAuditBreakdownOmitsEmptyCategories(t *testing.T) {
 	got := auditBreakdown(map[auditResult]int{auditOutsideWindow: 2})
 	if got != "2 uploaded before the key was valid" {
 		t.Errorf("breakdown = %q, want only the non-empty category", got)
+	}
+}
+
+// ── the command's verdict ────────────────────────────────────────────────────
+//
+// `audit signatures` is documented as a CI gate, and the invariant that makes it
+// one is that EVERY non-OK category exits 1. `install` under
+// FGLPKG_SIGNING=require refuses all of them, so a gate that passed what install
+// refuses would be the same drift as `outdated` offering a version `update` will
+// not select.
+//
+// Until these tests the invariant was unpinned: cmdAuditSignatures had no test
+// at all (functional case 150 skips it for want of signed fixtures), so dropping
+// a category from the failure count reddened nothing. The tempting change — "a
+// not-yet-valid key is benign, stop failing CI on it" — is exactly that.
+
+func verdict(t *testing.T, counts map[auditResult]int, total int) (error, string) {
+	t.Helper()
+	var b strings.Builder
+	return auditVerdict(&b, counts, total), b.String()
+}
+
+// Every failing category on its own must still exit 1.
+func TestAuditVerdictFailsForEveryCategory(t *testing.T) {
+	for name, r := range map[string]auditResult{
+		"not yet valid": auditOutsideWindow,
+		"retired key":   auditKeyRetired,
+		"unsigned":      auditMissing,
+		"mismatch":      auditMismatch,
+	} {
+		t.Run(name, func(t *testing.T) {
+			err, _ := verdict(t, map[auditResult]int{auditOK: 2, r: 1}, 3)
+			if err == nil {
+				t.Fatalf("%s must fail the audit — install under require refuses it", name)
+			}
+			var ee *ExitError
+			if !errors.As(err, &ee) || ee.Code != 1 {
+				t.Errorf("want ExitError{Code:1}, got %#v", err)
+			}
+		})
+	}
+}
+
+// The rollout note belongs only to the not-yet-valid category, and must not
+// appear for a retired key — that was the misdiagnosis of the previous round.
+func TestAuditVerdictNotesMatchTheCategory(t *testing.T) {
+	_, out := verdict(t, map[auditResult]int{auditOutsideWindow: 1}, 1)
+	if !strings.Contains(out, "re-issuing the keys manifest") {
+		t.Errorf("not-yet-valid should carry the rollout note:\n%s", out)
+	}
+	if strings.Contains(out, "retired") {
+		t.Errorf("not-yet-valid must not carry the retired-key warning:\n%s", out)
+	}
+
+	_, out = verdict(t, map[auditResult]int{auditKeyRetired: 1}, 1)
+	if !strings.Contains(out, "retired") {
+		t.Errorf("retired key should carry its own warning:\n%s", out)
+	}
+	if strings.Contains(out, "not evidence the artifact was altered") {
+		t.Errorf("a retired key must never be explained away as benign:\n%s", out)
+	}
+	if strings.Contains(out, "re-issuing the keys manifest") {
+		t.Errorf("re-issuing the manifest does not fix a retired-key signature:\n%s", out)
+	}
+}
+
+// An all-clear reports success and exits 0.
+func TestAuditVerdictPassesWhenEverythingVerifies(t *testing.T) {
+	err, out := verdict(t, map[auditResult]int{auditOK: 3}, 3)
+	if err != nil {
+		t.Fatalf("all-verified must exit 0, got: %v", err)
+	}
+	if !strings.Contains(out, "All 3 package signatures verified.") {
+		t.Errorf("expected the all-clear line:\n%s", out)
+	}
+}
+
+// An empty lock file is not a failure — there is nothing to attest to.
+func TestAuditVerdictEmptyLock(t *testing.T) {
+	err, out := verdict(t, map[auditResult]int{}, 0)
+	if err != nil {
+		t.Fatalf("an empty lock must not fail the audit, got: %v", err)
+	}
+	if !strings.Contains(out, "No packages") {
+		t.Errorf("expected the empty-lock line:\n%s", out)
+	}
+}
+
+// The summary names the categories, so a CI log says which kind of failure
+// occurred without the operator reading every line.
+func TestAuditVerdictSummaryNamesTheCategories(t *testing.T) {
+	err, _ := verdict(t, map[auditResult]int{auditOK: 1, auditOutsideWindow: 2, auditMismatch: 1}, 4)
+	if err == nil {
+		t.Fatal("expected a failure")
+	}
+	msg := err.Error()
+	for _, want := range []string{"3 of 4", "2 uploaded before the key was valid", "1 failed verification"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("summary %q missing %q", msg, want)
+		}
 	}
 }

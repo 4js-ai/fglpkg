@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -17,13 +18,15 @@ import (
 // that passed what install refuses would be worse than one that did not
 // distinguish them at all.
 //
-// They are reported separately because they demand different responses. An
-// artifact outside the key's validity window carries a signature that does
-// verify — the registry minted the signing key after the artifact was published
-// — which is a key-rollout problem for the registry operator (GIS-576). A
-// mismatch means the bytes are not what was signed, which is a tampering
-// question. Rendering both as a bare "✗ ERROR" left the operator to tell them
-// apart by reading each message.
+// They are reported separately because they demand different responses, and
+// the two sides of the key's validity window demand opposite ones. Below
+// validFrom the signature verifies and the registry simply minted the key after
+// the artifact was published — a key-rollout matter for the registry operator
+// (GIS-576). Above validTo the signature also verifies, but something signed
+// with a RETIRED key, which is the condition validTo exists to catch and must
+// never collect the benign explanation. A mismatch means the bytes are not what
+// was signed, which is a tampering question. Rendering all of these as a bare
+// "✗ ERROR" left the operator to tell them apart by reading each message.
 type auditResult int
 
 const (
@@ -88,33 +91,52 @@ func cmdAuditSignatures(args []string) error {
 			w.UploadedAt, w.Uploader, w.SignatureKeyID, w.Signature)]++
 	}
 
+	return auditVerdict(os.Stdout, counts, total)
+}
+
+// auditVerdict prints the per-category notes and returns the command's result:
+// nil when every package verified, or an ExitError when any did not.
+//
+// It is separate from the walk, and takes its writer, so the command's whole
+// contract — which categories fail, what each note says — is testable without a
+// keys-manifest fixture. That absence is what left `audit signatures` with no
+// test of its own: the one invariant that matters most, that EVERY non-OK
+// category exits 1, could be removed without reddening anything.
+//
+// That invariant is deliberate and load-bearing. `install` under
+// FGLPKG_SIGNING=require refuses every category here, so an audit that passed
+// what install refuses would be the same drift as `outdated` offering a version
+// `update` will not select. The tempting change — "a not-yet-valid key is
+// benign, stop failing CI on it" — would make the gate disagree with install,
+// and is pinned against below.
+func auditVerdict(w io.Writer, counts map[auditResult]int, total int) error {
 	if total == 0 {
-		fmt.Println("No packages in the lock file to audit.")
+		fmt.Fprintln(w, "No packages in the lock file to audit.")
 		return nil
 	}
 	failures := total - counts[auditOK]
-	if failures > 0 {
-		if n := counts[auditOutsideWindow]; n > 0 {
-			fmt.Printf("\nNote: %d package%s uploaded before the signing key became valid.\n", n, pluralS(n))
-			fmt.Println("  The signature itself verifies — the key was minted after the artifact")
-			fmt.Println("  was published, so the window does not reach back to cover it. That is a")
-			fmt.Println("  registry key-rollout problem, not evidence the artifact was altered.")
-			fmt.Println("  The registry operator fixes it by re-issuing the keys manifest.")
-			fmt.Println("  FGLPKG_SIGNING=require refuses these packages until then.")
-		}
-		if n := counts[auditKeyRetired]; n > 0 {
-			fmt.Printf("\nWarning: %d package%s signed with a key that had already been retired.\n", n, pluralS(n))
-			fmt.Println("  The signature verifies, but the artifact was uploaded after the key's")
-			fmt.Println("  validTo — which is the condition that window exists to catch. Treat this")
-			fmt.Println("  as a signing-pipeline fault, or as a key still in use past its rotation,")
-			fmt.Println("  and establish why before trusting the artifact.")
-		}
-		return &ExitError{Code: 1, Err: fmt.Errorf(
-			"%d of %d package%s failed signature verification (%s)",
-			failures, total, pluralS(total), auditBreakdown(counts))}
+	if failures == 0 {
+		fmt.Fprintf(w, "\nAll %d package signature%s verified.\n", total, pluralS(total))
+		return nil
 	}
-	fmt.Printf("\nAll %d package signature%s verified.\n", total, pluralS(total))
-	return nil
+	if n := counts[auditOutsideWindow]; n > 0 {
+		fmt.Fprintf(w, "\nNote: %d package%s uploaded before the signing key became valid.\n", n, pluralS(n))
+		fmt.Fprintln(w, "  The signature itself verifies — the key was minted after the artifact")
+		fmt.Fprintln(w, "  was published, so the window does not reach back to cover it. That is a")
+		fmt.Fprintln(w, "  registry key-rollout problem, not evidence the artifact was altered.")
+		fmt.Fprintln(w, "  The registry operator fixes it by re-issuing the keys manifest.")
+		fmt.Fprintln(w, "  FGLPKG_SIGNING=require refuses these packages until then.")
+	}
+	if n := counts[auditKeyRetired]; n > 0 {
+		fmt.Fprintf(w, "\nWarning: %d package%s signed with a key that had already been retired.\n", n, pluralS(n))
+		fmt.Fprintln(w, "  The signature verifies, but the artifact was uploaded after the key's")
+		fmt.Fprintln(w, "  validTo — which is the condition that window exists to catch. Treat this")
+		fmt.Fprintln(w, "  as a signing-pipeline fault, or as a key still in use past its rotation,")
+		fmt.Fprintln(w, "  and establish why before trusting the artifact.")
+	}
+	return &ExitError{Code: 1, Err: fmt.Errorf(
+		"%d of %d package%s failed signature verification (%s)",
+		failures, total, pluralS(total), auditBreakdown(counts))}
 }
 
 // auditBreakdown renders the per-category counts for the summary line, so the
