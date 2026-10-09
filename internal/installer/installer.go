@@ -406,11 +406,12 @@ func lockInstallSet(lf *lockfile.LockFile, opts Options) ([]lockfile.LockedPacka
 // it on every replay is noise that changes no outcome, and `fglpkg audit
 // signatures` is the command for auditing what is in the store.
 //
-// What this does NOT establish is that the files on disk are the version the
-// record names. Presence is checked by package name alone (LockFile.Validate),
-// so a store holding an older version of a locked package reads as present and
-// is never re-fetched. That gap predates signing and applies with signing off
-// too — see GIS-586.
+// The entries reaching this function are the ones whose extracted manifest
+// names the locked version (lockfile.PackageIsInstalled), so re-verifying the
+// record does say something about the files: anything else was classified as
+// not installed and is about to be fetched and verified as such (GIS-586).
+// Web components are the exception — they carry no manifest on disk, so their
+// presence is still version-blind (GIS-579, GIS-581).
 func (i *Installer) verifyOnDiskSignatures(pkgs []lockfile.LockedPackage, wcs []lockfile.LockedWebcomponent) error {
 	if i.signingEnforce != signing.EnforceRequire {
 		return nil
@@ -452,7 +453,7 @@ func (i *Installer) verifyLockInstallSet(lf *lockfile.LockFile, opts Options) er
 	pkgs, _, wcs := lockInstallSet(lf, opts)
 	var onDisk []lockfile.LockedPackage
 	for _, pkg := range pkgs {
-		if _, err := os.Stat(filepath.Join(i.packagesDir, pkg.Name)); err == nil {
+		if lockfile.PackageIsInstalled(i.packagesDir, pkg) {
 			onDisk = append(onDisk, pkg)
 			continue
 		}
@@ -784,11 +785,13 @@ func (i *Installer) installFromLock(lf *lockfile.LockFile, root *manifest.Manife
 	// lockInstallSet on why this must not be a second copy.
 	pkgs, jars, wcs := lockInstallSet(lf, opts)
 
-	// Filter packages that are already on disk so the parallel phase
-	// only does real work.
+	// Filter packages that are already on disk so the parallel phase only does
+	// real work. "On disk" is the locked VERSION being extracted, the same test
+	// the gate above used and the same one that decided this replay was not a
+	// no-op — see lockfile.PackageIsInstalled.
 	var pkgsToInstall, pkgsOnDisk []lockfile.LockedPackage
 	for _, pkg := range pkgs {
-		if _, err := os.Stat(filepath.Join(i.packagesDir, pkg.Name)); err == nil {
+		if lockfile.PackageIsInstalled(i.packagesDir, pkg) {
 			pkgsOnDisk = append(pkgsOnDisk, pkg)
 			continue
 		}
@@ -1089,6 +1092,15 @@ func (i *Installer) installBDL(info *registry.PackageInfo) error {
 	if err := os.RemoveAll(destDir); err != nil {
 		return fmt.Errorf("cannot clean existing package dir: %w", err)
 	}
+	// Claim the directory before a single file lands in it, so a run killed
+	// mid-extraction leaves a store that reads as NOT installed. Absence of the
+	// stamp cannot carry that meaning on its own: a directory with no stamp is
+	// also what a pre-stamp fglpkg left behind, and `fglpkg pack` puts
+	// fglpkg.json mid-zip, so a half-extracted package can otherwise present a
+	// manifest naming exactly the version the lock wants (GIS-586).
+	if err := lockfile.MarkInstalling(i.packagesDir, info.Name, info.Version); err != nil {
+		return err
+	}
 	wcInstalled, err := extractZipRouted(tmpName, destDir, i.webcomponentsDir, wcNames)
 	if err != nil {
 		return err
@@ -1114,7 +1126,14 @@ func (i *Installer) installBDL(info *registry.PackageInfo) error {
 			return fmt.Errorf("cannot set bin script permissions: %w", err)
 		}
 	}
-	return nil
+
+	// LAST, once everything is in place: mark the install complete. Nothing may
+	// be added below this line without moving it, or the stamp would start
+	// claiming an install that had not finished (GIS-586). info.Version is the
+	// authority, not the zip's manifest — the installer accepts zips carrying
+	// no manifest, or one naming a different version than the registry
+	// published it as, and a replay must not read either as stale forever.
+	return lockfile.MarkInstalled(i.packagesDir, info.Name, info.Version)
 }
 
 // installWebcomponent downloads, verifies, and unpacks a webcomponent
@@ -1834,6 +1853,10 @@ func extractZipRouted(zipPath, destDir, webcomponentsDir string, wcNames []strin
 			return nil, fmt.Errorf("unsafe path in zip: %s", f.Name)
 		}
 		slashed := filepath.ToSlash(clean)
+		if reservedStoreEntry(slashed) {
+			warnReservedEntry(filepath.Base(destDir), slashed)
+			continue
+		}
 		top := strings.SplitN(slashed, "/", 2)[0]
 
 		routedToWC := wcSet[top]
@@ -1867,6 +1890,48 @@ func extractZipRouted(zipPath, destDir, webcomponentsDir string, wcNames []strin
 	return wcInstalled, nil
 }
 
+// reservedStoreEntry reports whether a zip entry is one of fglpkg's own store
+// artifacts — files the installer writes into an installed package directory,
+// which are never package content and must never be written by an extraction.
+//
+// Today that is the install stamp. The two-phase write of it is what makes an
+// interrupted extraction detectable (GIS-586): a marker goes down before the
+// first file lands and is completed after the last one. A zip carrying its own
+// .fglpkg-installed at the root would overwrite that marker mid-extraction, so
+// if the extraction then failed, the ZIP's stamp is what the next replay would
+// trust — and a failed install would read as a finished one, which is precisely
+// what the two-phase write exists to prevent.
+//
+// It needs no hostile publisher. `fglpkg pack` with a broad glob ("*", "**/*")
+// picks up a stray .fglpkg-installed from a directory that was itself installed
+// — re-publishing a vendored package is the plausible route — and because "."
+// sorts first it becomes the archive's FIRST entry. `pack` now excludes it so
+// fglpkg cannot produce such an artifact; this is the half that defends against
+// one that already exists.
+//
+// Skipping, rather than refusing the install: the package is otherwise fine,
+// and failing it outright would break a package that installs today. The
+// warning says what to do about it.
+//
+// The comparison folds case because the filesystem usually does. On APFS and
+// NTFS — the defaults on macOS and Windows — an entry named .FGLPKG-INSTALLED
+// opens the SAME file as the marker MarkInstalling wrote, so a case-sensitive
+// check would wave it through and let it overwrite exactly what it is meant to
+// protect. Nobody arrives at an upper-case copy by accident, so this is a
+// deliberately-crafted zip rather than the vendoring mishap above, but the
+// filesystem makes it work and the comparison costs nothing.
+func reservedStoreEntry(cleanName string) bool {
+	return strings.EqualFold(filepath.ToSlash(cleanName), lockfile.InstalledStampFilename)
+}
+
+// warnReservedEntry reports a skipped store artifact once per archive.
+func warnReservedEntry(pkgDirName, entry string) {
+	fmt.Fprintf(os.Stderr,
+		"warning: %s ships %s, which is fglpkg's own install record — not extracting it.\n"+
+			"  The package was most likely built by packing an installed copy; re-publish it from source.\n",
+		pkgDirName, entry)
+}
+
 // extractZip unpacks a zip archive into destDir, sanitising all paths.
 func extractZip(zipPath, destDir string) error {
 	r, err := zip.OpenReader(zipPath)
@@ -1880,6 +1945,10 @@ func extractZip(zipPath, destDir string) error {
 		cleanName := filepath.Clean(f.Name)
 		if strings.HasPrefix(cleanName, "..") {
 			return fmt.Errorf("unsafe path in zip: %s", f.Name)
+		}
+		if reservedStoreEntry(cleanName) {
+			warnReservedEntry(filepath.Base(destDir), filepath.ToSlash(cleanName))
+			continue
 		}
 
 		target := filepath.Join(destDir, cleanName)

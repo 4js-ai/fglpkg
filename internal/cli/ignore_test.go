@@ -316,3 +316,52 @@ func TestBuildPackageZipBinScriptOverridesIgnore(t *testing.T) {
 		t.Error("declared bin script must always be included even if .fglpkgignore matches its path")
 	}
 }
+
+
+// ─── reserved store artifacts ────────────────────────────────────────────────
+
+// GIS-586, review round 3. `.fglpkg-installed` is the INSTALLER's record of
+// what it put in a package directory, and the installer relies on being its
+// only writer: a published zip carrying one overwrites the incomplete marker
+// mid-extraction, so a failed install reads as a finished one.
+//
+// The reservation is on the ARCHIVE path, not the project-relative one. The
+// first version of this guard lived in ignoreSet.shouldExclude, which only ever
+// sees project-relative paths — so with `importRoot: "dist"` the project's
+// dist/.fglpkg-installed sailed through and shipped as the archive root's
+// .fglpkg-installed. stageFile is where the archive path is known, and every
+// staging route funnels through it.
+func TestReservedStoreArtifactIsKeyedOnTheArchivePath(t *testing.T) {
+	for _, tc := range []struct {
+		archivePath string
+		want        bool
+		why         string
+	}{
+		{".fglpkg-installed", true, "the archive root is what the installer reads"},
+		{".FGLPKG-INSTALLED", true, "APFS and NTFS make this the same file"},
+		{".FgLpKg-InStAlLeD", true, "case folding is not just the all-upper form"},
+		{"docs/.fglpkg-installed", false, "not at the archive root — ordinary content"},
+		{"fglpkg-installed", false, "a different name"},
+		{".fglpkg-installed.bak", false, "a different name"},
+		{".fglpkg-install", false, "a different name"},
+	} {
+		if got := isReservedStoreArtifact(tc.archivePath); got != tc.want {
+			t.Errorf("isReservedStoreArtifact(%q) = %v, want %v — %s",
+				tc.archivePath, got, tc.want, tc.why)
+		}
+	}
+}
+
+// The reservation must NOT have been left in the ignore layer: a project file
+// at dist/.fglpkg-installed is not excluded project-relative — it is caught
+// later, by its archive path. Pinning this stops the guard drifting back to the
+// layer that cannot see importRoot.
+func TestIgnoreDoesNotSecondGuessTheArchivePath(t *testing.T) {
+	s := &ignoreSet{}
+	for _, relPath := range []string{".fglpkg-installed", "dist/.fglpkg-installed"} {
+		if s.shouldExclude(relPath, false) {
+			t.Errorf("%s: the ignore layer sees project-relative paths and must not "+
+				"decide this — stageFile does, on the archive path", relPath)
+		}
+	}
+}

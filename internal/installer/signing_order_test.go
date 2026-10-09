@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -125,10 +124,10 @@ func TestRequireReVerifiesAPackageAlreadyOnDisk(t *testing.T) {
 	inst, _, lf := lockOnePkg(t, "http://127.0.0.1:1/never.zip")
 	inst.WithSigning(signing.EnforceRequire, "", "")
 
-	// What the aborted first run left behind.
-	if err := os.MkdirAll(filepath.Join(inst.packagesDir, "ghostpkg"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	// What the aborted first run left behind — the extracted package, at the
+	// version the lock names, so this really does take the on-disk path and not
+	// the about-to-be-fetched one (GIS-586).
+	extractPackage(t, inst, "ghostpkg", "2.1.0")
 
 	err := inst.verifyLockInstallSet(lf, Options{})
 	if err == nil {
@@ -146,9 +145,7 @@ func TestRequireReVerifiesAPackageAlreadyOnDisk(t *testing.T) {
 func TestWarnDoesNotReWarnForAPackageAlreadyOnDisk(t *testing.T) {
 	inst, _, lf := lockOnePkg(t, "http://127.0.0.1:1/never.zip")
 	inst.WithSigning(signing.EnforceWarn, "", "")
-	if err := os.MkdirAll(filepath.Join(inst.packagesDir, "ghostpkg"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	extractPackage(t, inst, "ghostpkg", "2.1.0")
 
 	var err error
 	out := captureStdout(t, func() { err = inst.verifyLockInstallSet(lf, Options{}) })
@@ -157,6 +154,50 @@ func TestWarnDoesNotReWarnForAPackageAlreadyOnDisk(t *testing.T) {
 	}
 	if strings.Contains(out, "signature check failed") {
 		t.Errorf("warn must not re-warn for a package already on disk:\n%s", out)
+	}
+}
+
+// The gate splits the install set by what is on disk, and since GIS-586 "on
+// disk" means the locked VERSION is extracted. A package the store holds at
+// some other version is about to be re-fetched, so it must be checked under the
+// configured mode like any other fetch — classifying it as already-installed is
+// what let a pulled dependency bump sail past both the gate and the installer.
+func TestGateTreatsAStaleVersionOnDiskAsAFetch(t *testing.T) {
+	inst, _, lf := lockOnePkg(t, "http://127.0.0.1:1/never.zip")
+	inst.WithSigning(signing.EnforceWarn, "", "")
+	extractPackage(t, inst, "ghostpkg", "1.0.0") // the lock names 2.1.0
+
+	var err error
+	out := captureStdout(t, func() { err = inst.verifyLockInstallSet(lf, Options{}) })
+	if err != nil {
+		t.Fatalf("warn must not fail the install: %v", err)
+	}
+	if !strings.Contains(out, "signature check failed") {
+		t.Errorf("a package on disk at another version is about to be fetched, so warn should warn:\n%s", out)
+	}
+}
+
+// (There is deliberately no require-side twin of the test above. Under require
+// both branches call verifySignature with the same arguments, so the two
+// classifications are indistinguishable there and such a test could not fail.
+// Warn is the only mode where the split is observable.)
+
+// The fetch pass must agree with the gate: a stale version is work to do,
+// not an "(already installed)" line. installFromLock cannot reach the network
+// here (port 1), so the attempt is visible as the failure.
+func TestInstallFromLockRefetchesAStaleVersion(t *testing.T) {
+	inst, projectDir, lf := lockOnePkg(t, "http://127.0.0.1:1/never.zip")
+	extractPackage(t, inst, "ghostpkg", "1.0.0")
+
+	var err error
+	out := captureStdout(t, func() {
+		err = inst.installFromLock(lf, manifest.New("app", "1.0.0", "", ""), Options{}, projectDir)
+	})
+	if err == nil {
+		t.Fatal("expected the re-fetch of the stale package to be attempted (and fail)")
+	}
+	if strings.Contains(out, "already installed") {
+		t.Errorf("a package on disk at another version must not report as already installed:\n%s", out)
 	}
 }
 

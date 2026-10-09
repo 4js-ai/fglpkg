@@ -695,13 +695,21 @@ Note that pruning deletes anything under `.fglpkg/packages/`, `.fglpkg/jars/`, a
 
 Once a `fglpkg-lock.json` exists, `fglpkg install` will **not** fetch a newer version of a dependency just because one was published — even if your version constraint (e.g. `^1.0.0`) would allow it. `install` re-resolves when `fglpkg.json` has changed (including by hand); otherwise it validates the existing lock against disk and stops there (`Lock file is up to date... Nothing to install`).
 
+Pulling a teammate's version bump is a different case, and plain `install` is the right command for it. When a colleague commits a new `fglpkg.json` and `fglpkg-lock.json`, `fglpkg install` installs what the new lock names, so a package left behind at an older version is re-fetched instead of being counted as present. A downgrade works the same way — the versions have to match, not merely be close enough.
+
+What counts as "already installed" comes from a record fglpkg writes itself, `.fglpkg/packages/<name>/.fglpkg-installed`, naming the version it installed. The package's own `fglpkg.json` is deliberately *not* the source: it describes what the publisher built, which is not the same question, and some artifacts cannot answer it at all — a zip may ship no root manifest, and on Artifactory the version comes from the folder path, so a re-upload can leave the zip naming an older one. The record is written before extraction begins and marked complete only once every file is in place, so a run killed part-way leaves a package that correctly reads as *not* installed, even though a half-extracted directory can already contain a plausible-looking `fglpkg.json`.
+
+A store installed by an earlier fglpkg carries no such record. Those keep working — fglpkg falls back to the package's manifest, so upgrading does not re-download your whole store or break an offline replay — and each package picks up a proper record the next time it is installed.
+
 To re-resolve all dependencies to their latest compatible versions (ignoring the lock file):
 
 ```bash
 fglpkg update
 ```
 
-This rewrites `fglpkg-lock.json` with whatever versions the registry now resolves to, and re-installs anything that changed — BDL packages, Java JARs, and webcomponent packages alike. Webcomponent bundles are always re-extracted on install (there's no "already installed, skip" fast path for them like there is for BDL packages), so an `update` that picks up a new webcomponent version reliably overwrites the old files in `.fglpkg/webcomponents/<COMPONENTTYPE>/`. See [Publishing an Update](#publishing-an-update) for the publisher side of this flow.
+This rewrites `fglpkg-lock.json` with whatever versions the registry now resolves to, and re-installs anything that changed — BDL packages, Java JARs, and webcomponent packages alike. Whenever an install has work to do, webcomponent bundles are re-extracted rather than skipped (there's no "already installed, skip" fast path for them like there is for BDL packages), so an `update` that picks up a new webcomponent version reliably overwrites the old files in `.fglpkg/webcomponents/<COMPONENTTYPE>/`. See [Publishing an Update](#publishing-an-update) for the publisher side of this flow.
+
+> **Known gap — web components and a pulled bump.** Unlike a BDL package, an installed web component leaves no manifest behind, so a lock replay cannot tell which version is extracted; it only checks that `.fglpkg/webcomponents/` is not empty. If a pulled commit bumps *only* a web component and nothing else, `fglpkg install` reports `Nothing to install` and the old bundle stays on disk. Run `fglpkg update` to pick it up. Tracked as GIS-579.
 
 ### Reproducible Installs for CI (`--frozen`)
 

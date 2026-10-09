@@ -91,6 +91,11 @@ func dirShouldBeSkipped(ignore *ignoreSet, path string) bool {
 // shouldExclude reports whether a relative path should be omitted from
 // the zip. relPath is normalised to forward slashes before matching so
 // patterns work the same on Windows. Empty rule sets always return false.
+//
+// This sees PROJECT-relative paths, which is why fglpkg's own reserved store
+// artifacts are not handled here — what matters for those is where a file lands
+// in the ARCHIVE, and importRoot makes the two differ. See isReservedStoreArtifact,
+// applied in stageFile once the archive path is known.
 func (s *ignoreSet) shouldExclude(relPath string, isDir bool) bool {
 	if s == nil || len(s.rules) == 0 {
 		return false

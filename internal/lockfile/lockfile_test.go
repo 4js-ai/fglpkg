@@ -374,19 +374,210 @@ func TestValidateMissingPackages(t *testing.T) {
 	}
 }
 
+// extractPackage writes what a successful install leaves on disk: the package
+// directory with the extracted package's own fglpkg.json in it. The name inside
+// the manifest is deliberately NOT the directory name — a real install names
+// the directory by the registry slug ("demo-pkg") while the manifest carries
+// the package's own name ("demo.pkg") — so a check that compared names would
+// fail here.
+func extractPackage(t *testing.T, packagesDir, name, version string) {
+	t.Helper()
+	dir := filepath.Join(packagesDir, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"name":"acme.` + name + `","version":"` + version + `","license":"MIT"}`
+	if err := os.WriteFile(filepath.Join(dir, manifest.Filename), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidatePresentPackages(t *testing.T) {
 	dir := t.TempDir()
 	root := makeRoot()
 	lf := lockfile.FromPlan(makePlan(), root, "")
 
-	// Create stub package directories to simulate a successful install.
 	for _, pkg := range lf.Packages {
-		os.MkdirAll(filepath.Join(dir, pkg.Name), 0755) //nolint:errcheck
+		extractPackage(t, dir, pkg.Name, pkg.Version)
 	}
 
 	result := lf.Validate(root, "4.01.12", dir, "", "")
 	if len(result.MissingPackages) != 0 {
 		t.Errorf("expected no missing packages, got: %v", result.MissingPackages)
+	}
+}
+
+// GIS-586: the bug. A directory with the right NAME but the wrong version used
+// to read as installed, so `install` after a pulled dependency bump reported
+// "Nothing to install" and left the old version running.
+func TestValidateReportsAnInstalledPackageAtTheWrongVersionAsMissing(t *testing.T) {
+	dir := t.TempDir()
+	root := makeRoot()
+	lf := lockfile.FromPlan(makePlan(), root, "")
+
+	extractPackage(t, dir, "utils", "1.2.3") // the locked version
+	extractPackage(t, dir, "dbtools", "2.0.0")
+
+	result := lf.Validate(root, "4.01.12", dir, "", "")
+	if got := strings.Join(result.MissingPackages, ","); got != "dbtools" {
+		t.Errorf("only the package at the wrong version should be missing, got: %v",
+			result.MissingPackages)
+	}
+	if result.IsClean() {
+		t.Error("a lock whose package is installed at another version is not clean")
+	}
+}
+
+// The directory exists but holds nothing — an extraction interrupted part-way.
+// There is no version to compare, so it must count as missing and reinstall,
+// never as present.
+func TestValidateReportsAPackageDirWithNoManifestAsMissing(t *testing.T) {
+	dir := t.TempDir()
+	root := makeRoot()
+	lf := lockfile.FromPlan(makePlan(), root, "")
+
+	for _, pkg := range lf.Packages {
+		if err := os.MkdirAll(filepath.Join(dir, pkg.Name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result := lf.Validate(root, "4.01.12", dir, "", "")
+	if len(result.MissingPackages) != 2 {
+		t.Errorf("expected both packages missing, got: %v", result.MissingPackages)
+	}
+}
+
+// The fallback path: none of these fixtures carry an install stamp, which is
+// what a warm .fglpkg/ installed by a pre-stamp fglpkg looks like. Such a store
+// must keep replaying — offline, and without re-downloading the world on the
+// first run after an upgrade — so the publisher's manifest still answers here.
+func TestPackageIsInstalled(t *testing.T) {
+	dir := t.TempDir()
+	extractPackage(t, dir, "utils", "1.2.3")
+
+	// A manifest carrying a field this build does not know about. Published by
+	// a newer fglpkg, it must still read as installed: rejecting it would make
+	// the package stale on every run and re-download it forever.
+	future := filepath.Join(dir, "futurepkg")
+	if err := os.MkdirAll(future, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(future, manifest.Filename),
+		[]byte(`{"name":"futurepkg","version":"9.9.9","somethingNew":{"a":1}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Not JSON at all.
+	junk := filepath.Join(dir, "junkpkg")
+	if err := os.MkdirAll(junk, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(junk, manifest.Filename), []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Valid JSON, no version in it.
+	noVer := filepath.Join(dir, "noverpkg")
+	if err := os.MkdirAll(noVer, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(noVer, manifest.Filename), []byte(`{"name":"noverpkg"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		why  string
+		pkg  lockfile.LockedPackage
+		want bool
+	}{
+		{"the locked version is extracted", lockfile.LockedPackage{Name: "utils", Version: "1.2.3"}, true},
+		{"an older version is extracted", lockfile.LockedPackage{Name: "utils", Version: "2.0.0"}, false},
+		{"a newer version is extracted", lockfile.LockedPackage{Name: "utils", Version: "1.0.0"}, false},
+		{"nothing is extracted", lockfile.LockedPackage{Name: "absent", Version: "1.0.0"}, false},
+		{"an unknown manifest field", lockfile.LockedPackage{Name: "futurepkg", Version: "9.9.9"}, true},
+		{"an unparseable manifest", lockfile.LockedPackage{Name: "junkpkg", Version: "1.0.0"}, false},
+		{"a manifest with no version", lockfile.LockedPackage{Name: "noverpkg", Version: ""}, false},
+	} {
+		if got := lockfile.PackageIsInstalled(dir, tc.pkg); got != tc.want {
+			t.Errorf("%s: PackageIsInstalled(%s@%s) = %v, want %v",
+				tc.why, tc.pkg.Name, tc.pkg.Version, got, tc.want)
+		}
+	}
+}
+
+// writeStamp puts a raw stamp file in a package directory, so a test can state
+// exactly what is on disk — including shapes the installer would never write.
+func writeStamp(t *testing.T, packagesDir, name, body string) {
+	t.Helper()
+	dir := filepath.Join(packagesDir, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, lockfile.InstalledStampFilename), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The stamp is the installer's own record and outranks the publisher's
+// manifest, which describes what was BUILT and is not evidence that anything
+// was installed. Every case here puts a manifest on disk saying 1.0.0, so a
+// check that consulted the manifest at all would get a different answer.
+func TestPackageIsInstalledPrefersTheStampOverTheManifest(t *testing.T) {
+	for _, tc := range []struct {
+		why    string
+		stamp  string
+		locked string
+		want   bool
+	}{
+		{"the stamp names the locked version",
+			`{"version":"1.0.1","complete":true}`, "1.0.1", true},
+		{"the stamp names another version",
+			`{"version":"1.0.1","complete":true}`, "1.0.0", false},
+		{"the install never completed",
+			`{"version":"1.0.0","complete":false}`, "1.0.0", false},
+		{"the stamp has no completion field at all",
+			`{"version":"1.0.0"}`, "1.0.0", false},
+		{"the stamp names no version",
+			`{"complete":true}`, "", false},
+		{"the stamp is not JSON",
+			`half-written`, "1.0.0", false},
+		{"the stamp is empty",
+			``, "1.0.0", false},
+	} {
+		dir := t.TempDir()
+		extractPackage(t, dir, "utils", "1.0.0") // the manifest always says 1.0.0
+		writeStamp(t, dir, "utils", tc.stamp)
+
+		got := lockfile.PackageIsInstalled(dir, lockfile.LockedPackage{Name: "utils", Version: tc.locked})
+		if got != tc.want {
+			t.Errorf("%s: PackageIsInstalled(utils@%q) = %v, want %v",
+				tc.why, tc.locked, got, tc.want)
+		}
+	}
+}
+
+// A package the installer wrote a stamp for needs no manifest at all — a zip
+// with no root fglpkg.json installs fine, and must not then read as stale
+// forever.
+func TestPackageIsInstalledNeedsNoManifestWhenStamped(t *testing.T) {
+	dir := t.TempDir()
+	writeStamp(t, dir, "nomani", `{"version":"1.0.0","complete":true}`)
+
+	if !lockfile.PackageIsInstalled(dir, lockfile.LockedPackage{Name: "nomani", Version: "1.0.0"}) {
+		t.Error("a stamped package with no manifest must read as installed")
+	}
+}
+
+// A lock entry with an empty version must never match a package whose manifest
+// also fails to state one — "unknown equals unknown" would report a package
+// nobody can identify as correctly installed.
+func TestPackageIsInstalledNeedsARealVersionOnBothSides(t *testing.T) {
+	dir := t.TempDir()
+	extractPackage(t, dir, "utils", "1.2.3")
+
+	if lockfile.PackageIsInstalled(dir, lockfile.LockedPackage{Name: "utils"}) {
+		t.Error("a lock entry with no version must not match an extracted package")
 	}
 }
 

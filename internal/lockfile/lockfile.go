@@ -559,8 +559,9 @@ type ValidationResult struct {
 	// changed since the lock was written (lock is stale).
 	ManifestMismatch *ManifestMismatchError
 
-	// MissingPackages lists packages in the lock that are not yet installed
-	// (install directory absent).
+	// MissingPackages lists packages in the lock that are not installed at the
+	// version the lock names — the directory is absent, holds no readable
+	// manifest, or holds a different version (see PackageIsInstalled).
 	MissingPackages []string
 
 	// MissingWebcomponents lists webcomponent packages in the lock whose
@@ -731,6 +732,142 @@ func sortedKeys(a, b map[string]string) []string {
 	return keys
 }
 
+// InstalledStampFilename is the installer-owned record of what was installed
+// into a package directory, written by the installer once extraction has
+// finished. It is deliberately NOT the package's own fglpkg.json: that file is
+// the publisher's, it describes what they built, and it is not evidence that
+// anything was installed (see PackageIsInstalled).
+const InstalledStampFilename = ".fglpkg-installed"
+
+// installedStamp is the stamp's contents. Decoded tolerantly, so fields may be
+// added later without making every existing store read as stale.
+//
+// Complete is what makes an interrupted extraction detectable. The stamp is
+// written TWICE: once before extraction with Complete false, once after with
+// Complete true. Absence cannot carry that meaning on its own, because a
+// directory with no stamp is also what a store installed by an older fglpkg
+// looks like, and those must keep working (see PackageIsInstalled).
+type installedStamp struct {
+	Version  string `json:"version"`
+	Complete bool   `json:"complete"`
+}
+
+// MarkInstalling records that packagesDir/<name> is mid-install. The installer
+// calls it after clearing the directory and BEFORE extracting, so a run killed
+// part-way leaves a directory that correctly reads as not installed instead of
+// one that happens to contain a plausible fglpkg.json.
+func MarkInstalling(packagesDir, name, version string) error {
+	return writeInstalledStamp(packagesDir, name, installedStamp{Version: version})
+}
+
+// MarkInstalled records that version finished extracting into
+// packagesDir/<name>. The installer calls it LAST, once every file is in place.
+func MarkInstalled(packagesDir, name, version string) error {
+	return writeInstalledStamp(packagesDir, name, installedStamp{Version: version, Complete: true})
+}
+
+func writeInstalledStamp(packagesDir, name string, stamp installedStamp) error {
+	dir := filepath.Join(packagesDir, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("cannot create the package directory for %s: %w", name, err)
+	}
+	data, err := json.MarshalIndent(stamp, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, InstalledStampFilename), append(data, '\n'), 0o644); err != nil {
+		return fmt.Errorf("cannot record the installed version of %s: %w", name, err)
+	}
+	return nil
+}
+
+// PackageIsInstalled reports whether packagesDir holds the exact version of pkg
+// that the lock names.
+//
+// It is the single definition of "this locked package is already on disk",
+// shared by Validate (which decides whether a replay is a no-op) and by the
+// installer's signature gate and fetch filter. Three copies of this choice is
+// how the bug below survived: the gate can verify one set while the install
+// pass installs another, and either can disagree with "Nothing to install".
+//
+// Presence used to be decided by stat'ing packagesDir/<name> and nothing else,
+// so a store holding an OLDER version of a locked package read as installed and
+// was never re-fetched. The most ordinary team workflow then silently did
+// nothing: pull a commit that bumps a dependency, run `fglpkg install`, get
+// "Nothing to install" and exit 0, and keep running the old version while the
+// lock file — the thing that is meant to say what is installed — claimed
+// otherwise (GIS-586). The root-manifest check does not catch it, because the
+// teammate regenerated the lock and diffDeclared is therefore clean.
+//
+// The answer comes from the installer's own stamp, in this order:
+//
+//  1. A readable, COMPLETE stamp naming a version: that version, and nothing
+//     else, is what is installed.
+//  2. A stamp that is incomplete, unreadable, unparseable, or names no version:
+//     NOT installed. Incomplete means the installer wrote the stamp, started
+//     extracting and never came back, so the directory holds some prefix of the
+//     package.
+//  3. No stamp at all: fall back to the version in the package's own extracted
+//     fglpkg.json. This is the pre-stamp store — a warm .fglpkg/ from an
+//     earlier fglpkg — and the fallback is what lets it keep replaying offline
+//     instead of re-downloading the world on the first run after an upgrade.
+//     The next install of that package writes a stamp, so a store converges on
+//     the authoritative answer by being used.
+//
+// Case 3 is the one place the weaker, publisher-supplied answer is still used,
+// so the guarantee in case 2 is precise rather than universal: an extraction
+// interrupted by THIS fglpkg is detected; one interrupted by a pre-stamp
+// fglpkg, which left a manifest and no stamp, is not.
+//
+// The publisher's manifest cannot be the primary source, which is why the stamp
+// exists. The installer accepts zips it does not satisfy: a zip with no root
+// fglpkg.json at all (readWebcomponentsFromZip returns no error for one), and
+// an Artifactory layout whose version comes from the folder path while the zip's
+// manifest still names the version it was built as. Either would read as
+// perpetually stale — re-downloaded on every install, forever, since
+// re-extracting changes nothing — and would make a warm store unreplayable
+// offline. The manifest also cannot witness a complete extraction: `fglpkg pack`
+// writes entries in alphabetical order, so fglpkg.json lands mid-zip
+// (["a.42m", "fglpkg.json", "src/com/acme/z.42m"]) and an interruption after it
+// leaves a directory naming the right version with later files missing.
+//
+// Anything that does not resolve to the locked version counts as NOT installed,
+// so the entry re-installs through the normal verified path. That is the safe
+// direction: re-fetching costs a download, whereas trusting the directory ships
+// whatever happens to be there.
+//
+// One detail that looks like a bug and is not: only the version is compared,
+// never the name. The directory is named by the package's registry slug
+// ("demo-pkg") while the manifest inside it carries the package's own name
+// ("demo.pkg"), so the two disagree even when everything is correct.
+func PackageIsInstalled(packagesDir string, pkg LockedPackage) bool {
+	dir := filepath.Join(packagesDir, pkg.Name)
+	if data, err := os.ReadFile(filepath.Join(dir, InstalledStampFilename)); err == nil {
+		var stamp installedStamp
+		if err := json.Unmarshal(data, &stamp); err != nil {
+			return false
+		}
+		return stamp.Complete && stamp.Version != "" && stamp.Version == pkg.Version
+	} else if !os.IsNotExist(err) {
+		return false
+	}
+	// No stamp: a store installed before stamps existed. Fall back to the
+	// publisher's manifest, read with a tolerant decode rather than
+	// manifest.Load — that rejects unknown fields, so a package published by a
+	// newer fglpkg would read as stale on every run.
+	data, err := os.ReadFile(filepath.Join(dir, manifest.Filename))
+	if err != nil {
+		return false
+	}
+	var probe struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return false
+	}
+	return probe.Version != "" && probe.Version == pkg.Version
+}
+
 // Validate checks whether the lock file is consistent with the current
 // environment and manifest. currentGenero may be "" to skip that check.
 // packagesDir / webcomponentsDir / jarsDir are used to check which BDL
@@ -773,11 +910,11 @@ func (lf *LockFile) Validate(root *manifest.Manifest, currentGenero, packagesDir
 		result.ManifestMismatch = e
 	}
 
-	// On-disk presence check.
+	// On-disk presence check. "Present" means the locked VERSION is extracted,
+	// not merely a directory with the right name — see PackageIsInstalled.
 	if packagesDir != "" {
 		for _, pkg := range lf.Packages {
-			dir := filepath.Join(packagesDir, pkg.Name)
-			if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
+			if !PackageIsInstalled(packagesDir, pkg) {
 				result.MissingPackages = append(result.MissingPackages, pkg.Name)
 			}
 		}
