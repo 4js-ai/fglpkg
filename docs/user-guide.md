@@ -592,6 +592,8 @@ fglpkg install myutils@1.2.0
 
 This resolves the version, adds it to your `fglpkg.json`, and installs it.
 
+It is all-or-nothing: if the install fails for any reason — the download, a signature refusal, a file collision — `fglpkg.json` and `fglpkg-lock.json` are put back exactly as they were. A failed `install` never leaves the project declaring a version it does not have, which would otherwise be invisible: a lock that names a version the disk lacks is the one thing the replay commands are meant to catch, and the lock is what they trust.
+
 ### Dependency Scopes (prod / dev / optional)
 
 Packages can be recorded under three scopes depending on when they should be installed:
@@ -707,9 +709,9 @@ To re-resolve all dependencies to their latest compatible versions (ignoring the
 fglpkg update
 ```
 
-This rewrites `fglpkg-lock.json` with whatever versions the registry now resolves to, and re-installs anything that changed — BDL packages, Java JARs, and webcomponent packages alike. Whenever an install has work to do, webcomponent bundles are re-extracted rather than skipped (there's no "already installed, skip" fast path for them like there is for BDL packages), so an `update` that picks up a new webcomponent version reliably overwrites the old files in `.fglpkg/webcomponents/<COMPONENTTYPE>/`. See [Publishing an Update](#publishing-an-update) for the publisher side of this flow.
+This rewrites `fglpkg-lock.json` with whatever versions the registry now resolves to, and re-installs anything that changed — BDL packages, Java JARs, and webcomponent packages alike. Whenever an install has work to do, webcomponent bundles are re-extracted rather than skipped (there's no "already installed, skip" fast path for them like there is for BDL packages), so an `update` that picks up a new webcomponent version reliably overwrites the old files in `.fglpkg/webcomponents/<COMPONENTTYPE>/`, and files the new version no longer ships are removed with it. See [Publishing an Update](#publishing-an-update) for the publisher side of this flow.
 
-> **Known gap — web components and a pulled bump.** Unlike a BDL package, an installed web component leaves no manifest behind, so a lock replay cannot tell which version is extracted; it only checks that `.fglpkg/webcomponents/` is not empty. If a pulled commit bumps *only* a web component and nothing else, `fglpkg install` reports `Nothing to install` and the old bundle stays on disk. Run `fglpkg update` to pick it up. Tracked as GIS-579.
+A pulled commit that bumps *only* a web component is picked up by plain `fglpkg install`, the same as a BDL package. An installed web component leaves no manifest behind — the publisher's is deliberately not extracted, since several widgets would collide on it — so fglpkg records the version it installed in `.fglpkg/webcomponent-owners.json` and compares against that. A store written by an older fglpkg has no such record, so its web components re-extract once on the first install after the upgrade and are a no-op from then on.
 
 ### Reproducible Installs for CI (`--frozen`)
 
@@ -1484,6 +1486,24 @@ Then reference the component from a form just like a built-in one:
 WEBCOMPONENT wc = FORMONLY.mychart,
     COMPONENTTYPE = "3DChart";
 ```
+
+### Changing an installed widget's version
+
+`fglpkg install <widget>@<version>` moves an installed widget to another version, up or down. Files the new version no longer ships are removed with it, so nothing lingers on `FGLIMAGEPATH` from the version you replaced.
+
+This matters most for widgets that ship files *outside* their `<COMPONENTTYPE>/` directory — a BDL wrapper under `com/`, examples, documentation. Those land next to every other package's files in `.fglpkg/webcomponents/`, and fglpkg tracks which package installed each one (in `.fglpkg/webcomponent-owners.json`) so it can tell your widget's own previous files from a genuine collision with somebody else's.
+
+A real collision is still refused, and that refusal is the useful one:
+
+```
+failed to install fx-grid: webcomponent install would overwrite 1 file(s)
+already installed by another package with different content:
+    com/acme/Map.4gl
+refusing to clobber — remove the conflicting package first, or have the
+packages namespace their shared files (e.g. examples/<pkg>/, docs/<pkg>/)
+```
+
+Two different packages writing different content to the same shared path is a packaging problem that only the publishers can fix; fglpkg will not pick a winner. When it happens, nothing is written — and the install leaves your `fglpkg.json` and `fglpkg-lock.json` exactly as it found them, so the project never records a version it did not install.
 
 ### Environment wiring
 

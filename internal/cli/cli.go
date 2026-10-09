@@ -795,8 +795,14 @@ func cmdInstall(args []string) error {
 		}
 	}
 	// A global tool install writes nothing to the current directory — neither the
-	// manifest here nor (via SkipLock below) a lock file (GIS-565).
+	// manifest here nor (via SkipLock below) a lock file (GIS-565), so there is
+	// nothing to snapshot or undo for one.
+	var snapshot *projectSnapshot
 	if !globalToolInstall {
+		// Captured BEFORE the save: if the install fails, the project must not
+		// be left declaring a version it never got (GIS-579).
+		// "." matches m.Save(".") just below; the lock lands in projectDir.
+		snapshot = snapshotProject(".", projectDir)
 		if err := m.Save("."); err != nil {
 			return err
 		}
@@ -822,6 +828,7 @@ func cmdInstall(args []string) error {
 	// the store and build the global merged root, but write no project lock (GIS-565).
 	instOpts.SkipLock = globalToolInstall
 	if err := inst.InstallAllWithOptions(m, projectDir, true, instOpts); err != nil {
+		snapshot.restore()
 		return err
 	}
 	return runHook(m, manifest.HookPostInstall, projectDir)
@@ -860,7 +867,7 @@ func checkFrozen(m *manifest.Manifest, projectDir string) error {
 	if err != nil {
 		return fmt.Errorf("--frozen: cannot read %s: %w", lockfile.Filename, err)
 	}
-	if vr := lf.Validate(m, "", "", "", ""); vr.NeedsResolve() {
+	if vr := lf.Validate(m, "", "", "", "", nil); vr.NeedsResolve() {
 		return fmt.Errorf("--frozen: %s is out of date with %s — %s.\n"+
 			"  Run 'fglpkg install' (or 'fglpkg update') and commit the updated lock.",
 			lockfile.Filename, manifest.Filename, vr.StaleReason())

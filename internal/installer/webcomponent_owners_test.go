@@ -19,11 +19,14 @@ func installWC(t *testing.T, tmp, wcDir, name, comp string, extra map[string]str
 	}
 	z := filepath.Join(tmp, name+".zip")
 	writeTestZip(t, z, entries)
-	files, err := extractWebcomponentZip(z, wcDir, []string{comp})
+	// wcOwnedBy, not nil: installWebcomponent consults the sidecar so a
+	// package's own previous files are not mistaken for another package's
+	// (GIS-579), and a helper that claims to mirror it has to do the same.
+	files, err := extractWebcomponentZip(z, wcDir, []string{comp}, wcOwnedBy(wcDir, name))
 	if err != nil {
 		t.Fatalf("install %s: %v", name, err)
 	}
-	if err := recordWCOwnership(wcDir, name, files); err != nil {
+	if err := recordWCOwnership(wcDir, name, "1.0.0", files); err != nil {
 		t.Fatalf("record ownership %s: %v", name, err)
 	}
 }

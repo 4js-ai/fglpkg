@@ -1,0 +1,100 @@
+package cli
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/4js-mikefolcher/fglpkg/internal/lockfile"
+	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
+)
+
+// GIS-579. The add path declares the dependency and saves the manifest before
+// anything is fetched, and the lock is written inside the install. A failed
+// install left both files describing a version that was never installed — the
+// loud failure is recoverable, the silent drift that follows is not.
+
+func TestSnapshotRestoresBothFilesToTheirPriorContents(t *testing.T) {
+	dir := t.TempDir()
+	before := map[string]string{
+		manifest.Filename: `{"name":"app","version":"1.0.0"}`,
+		lockfile.Filename: `{"lockfileVersion":1}`,
+	}
+	for name, body := range before {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	func() {
+		s := snapshotProject(dir, dir)
+		// What the add path does before the install runs.
+		for name := range before {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(`{"declares":"a package that never installed"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		s.restore()
+	}()
+
+	for name, want := range before {
+		got, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if string(got) != want {
+			t.Errorf("%s = %q, want the pre-install contents %q", name, got, want)
+		}
+	}
+}
+
+// `fglpkg install <pkg>` in an empty directory generates a manifest. A failed
+// install must not leave a project behind that nobody asked for, so "restore"
+// of a file that did not exist means removing it again.
+func TestSnapshotRemovesFilesThatDidNotExistBefore(t *testing.T) {
+	dir := t.TempDir()
+
+	func() {
+		s := snapshotProject(dir, dir)
+		for _, name := range []string{manifest.Filename, lockfile.Filename} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(`{}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		s.restore()
+	}()
+
+	for _, name := range []string{manifest.Filename, lockfile.Filename} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s survived the restore of a project that had none", name)
+		}
+	}
+}
+
+// A file that exists but cannot be read is left strictly alone. Restoring it
+// would mean deleting content that was never captured, which is worse than the
+// stale record the restore exists to clean up.
+//
+// The unreadable file here is a directory, so the check is permission-independent
+// and behaves the same if the suite runs as root.
+func TestSnapshotLeavesAnUnreadableFileAlone(t *testing.T) {
+	dir := t.TempDir()
+	lockAsDir := filepath.Join(dir, lockfile.Filename)
+	if err := os.MkdirAll(filepath.Join(lockAsDir, "inside"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshotProject(dir, dir).restore()
+
+	if _, err := os.Stat(filepath.Join(lockAsDir, "inside")); err != nil {
+		t.Errorf("an unreadable path was modified by the restore: %v", err)
+	}
+}
+
+// restore must tolerate being called on a snapshot that was never taken — the
+// global-tool install path writes nothing to the project directory and so
+// deliberately leaves the snapshot nil.
+func TestNilSnapshotRestoreIsANoOp(t *testing.T) {
+	var s *projectSnapshot
+	s.restore()
+}
