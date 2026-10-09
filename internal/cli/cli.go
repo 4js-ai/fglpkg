@@ -3258,9 +3258,6 @@ func stagePathFor(importRoot, relPath string, kind pathKind) (string, error) {
 	return rel, nil
 }
 
-// stageFile copies srcDiskPath into stageDir at archivePath, creating parent
-// directories. Staging two distinct sources at the same archive path is a
-// collision (hard error); staging the same source twice is a no-op.
 // isReservedStoreArtifact reports whether an ARCHIVE-relative path is one of
 // fglpkg's own store artifacts: a file the INSTALLER writes inside an installed
 // package directory. It is never package content, so it is never packed.
@@ -3293,6 +3290,10 @@ func isReservedStoreArtifact(archivePath string) bool {
 	return strings.EqualFold(filepath.ToSlash(archivePath), lockfile.InstalledStampFilename)
 }
 
+// stageFile copies srcDiskPath into stageDir at archivePath, creating parent
+// directories. Staging two distinct sources at the same archive path is a
+// collision (hard error); staging the same source twice is a no-op. A reserved
+// store artifact is skipped with a warning rather than staged.
 func stageFile(stageDir, archivePath, srcDiskPath string, staged map[string]string) error {
 	archivePath = filepath.ToSlash(archivePath)
 	// Every staging route — the files walk, bin scripts, docs, webcomponents,
