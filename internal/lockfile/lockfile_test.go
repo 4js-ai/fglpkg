@@ -448,6 +448,10 @@ func TestValidateReportsAPackageDirWithNoManifestAsMissing(t *testing.T) {
 	}
 }
 
+// The fallback path: none of these fixtures carry an install stamp, which is
+// what a warm .fglpkg/ installed by a pre-stamp fglpkg looks like. Such a store
+// must keep replaying — offline, and without re-downloading the world on the
+// first run after an upgrade — so the publisher's manifest still answers here.
 func TestPackageIsInstalled(t *testing.T) {
 	dir := t.TempDir()
 	extractPackage(t, dir, "utils", "1.2.3")
@@ -499,6 +503,69 @@ func TestPackageIsInstalled(t *testing.T) {
 			t.Errorf("%s: PackageIsInstalled(%s@%s) = %v, want %v",
 				tc.why, tc.pkg.Name, tc.pkg.Version, got, tc.want)
 		}
+	}
+}
+
+// writeStamp puts a raw stamp file in a package directory, so a test can state
+// exactly what is on disk — including shapes the installer would never write.
+func writeStamp(t *testing.T, packagesDir, name, body string) {
+	t.Helper()
+	dir := filepath.Join(packagesDir, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, lockfile.InstalledStampFilename), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The stamp is the installer's own record and outranks the publisher's
+// manifest, which describes what was BUILT and is not evidence that anything
+// was installed. Every case here puts a manifest on disk saying 1.0.0, so a
+// check that consulted the manifest at all would get a different answer.
+func TestPackageIsInstalledPrefersTheStampOverTheManifest(t *testing.T) {
+	for _, tc := range []struct {
+		why    string
+		stamp  string
+		locked string
+		want   bool
+	}{
+		{"the stamp names the locked version",
+			`{"version":"1.0.1","complete":true}`, "1.0.1", true},
+		{"the stamp names another version",
+			`{"version":"1.0.1","complete":true}`, "1.0.0", false},
+		{"the install never completed",
+			`{"version":"1.0.0","complete":false}`, "1.0.0", false},
+		{"the stamp has no completion field at all",
+			`{"version":"1.0.0"}`, "1.0.0", false},
+		{"the stamp names no version",
+			`{"complete":true}`, "", false},
+		{"the stamp is not JSON",
+			`half-written`, "1.0.0", false},
+		{"the stamp is empty",
+			``, "1.0.0", false},
+	} {
+		dir := t.TempDir()
+		extractPackage(t, dir, "utils", "1.0.0") // the manifest always says 1.0.0
+		writeStamp(t, dir, "utils", tc.stamp)
+
+		got := lockfile.PackageIsInstalled(dir, lockfile.LockedPackage{Name: "utils", Version: tc.locked})
+		if got != tc.want {
+			t.Errorf("%s: PackageIsInstalled(utils@%q) = %v, want %v",
+				tc.why, tc.locked, got, tc.want)
+		}
+	}
+}
+
+// A package the installer wrote a stamp for needs no manifest at all — a zip
+// with no root fglpkg.json installs fine, and must not then read as stale
+// forever.
+func TestPackageIsInstalledNeedsNoManifestWhenStamped(t *testing.T) {
+	dir := t.TempDir()
+	writeStamp(t, dir, "nomani", `{"version":"1.0.0","complete":true}`)
+
+	if !lockfile.PackageIsInstalled(dir, lockfile.LockedPackage{Name: "nomani", Version: "1.0.0"}) {
+		t.Error("a stamped package with no manifest must read as installed")
 	}
 }
 

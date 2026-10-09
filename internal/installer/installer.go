@@ -1092,6 +1092,15 @@ func (i *Installer) installBDL(info *registry.PackageInfo) error {
 	if err := os.RemoveAll(destDir); err != nil {
 		return fmt.Errorf("cannot clean existing package dir: %w", err)
 	}
+	// Claim the directory before a single file lands in it, so a run killed
+	// mid-extraction leaves a store that reads as NOT installed. Absence of the
+	// stamp cannot carry that meaning on its own: a directory with no stamp is
+	// also what a pre-stamp fglpkg left behind, and `fglpkg pack` puts
+	// fglpkg.json mid-zip, so a half-extracted package can otherwise present a
+	// manifest naming exactly the version the lock wants (GIS-586).
+	if err := lockfile.MarkInstalling(i.packagesDir, info.Name, info.Version); err != nil {
+		return err
+	}
 	wcInstalled, err := extractZipRouted(tmpName, destDir, i.webcomponentsDir, wcNames)
 	if err != nil {
 		return err
@@ -1117,7 +1126,14 @@ func (i *Installer) installBDL(info *registry.PackageInfo) error {
 			return fmt.Errorf("cannot set bin script permissions: %w", err)
 		}
 	}
-	return nil
+
+	// LAST, once everything is in place: mark the install complete. Nothing may
+	// be added below this line without moving it, or the stamp would start
+	// claiming an install that had not finished (GIS-586). info.Version is the
+	// authority, not the zip's manifest — the installer accepts zips carrying
+	// no manifest, or one naming a different version than the registry
+	// published it as, and a replay must not read either as stale forever.
+	return lockfile.MarkInstalled(i.packagesDir, info.Name, info.Version)
 }
 
 // installWebcomponent downloads, verifies, and unpacks a webcomponent
