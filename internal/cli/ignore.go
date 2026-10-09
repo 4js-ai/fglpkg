@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/4js-mikefolcher/fglpkg/internal/lockfile"
 )
 
 // ignoreFilename is the name of the per-project ignore file. Patterns
@@ -88,10 +90,36 @@ func dirShouldBeSkipped(ignore *ignoreSet, path string) bool {
 	return ignore.shouldExclude(filepath.ToSlash(rel), true)
 }
 
+// isReservedStoreArtifact reports whether a project-relative path is one of
+// fglpkg's own store artifacts: a file the INSTALLER writes inside an installed
+// package directory. It is never package content, so it is never packed.
+//
+// Today that is the install stamp, .fglpkg-installed. The installer writes it
+// before extraction and completes it after, and that two-phase write is what
+// makes an interrupted extraction detectable (GIS-586). A published zip
+// carrying one would overwrite the marker mid-extraction, so a failed install
+// could then read as a finished one.
+//
+// The way such a zip gets built is mundane: `fglpkg pack` with a broad glob
+// ("*", "**/*") run over a directory that was itself installed — vendoring an
+// installed package and re-publishing it. Because "." sorts first, the stray
+// file becomes the archive's first entry. Extraction refuses it as well
+// (see installer.reservedStoreEntry); excluding it here is what stops fglpkg
+// producing the artifact in the first place.
+func isReservedStoreArtifact(relPath string) bool {
+	return filepath.ToSlash(relPath) == lockfile.InstalledStampFilename
+}
+
 // shouldExclude reports whether a relative path should be omitted from
 // the zip. relPath is normalised to forward slashes before matching so
-// patterns work the same on Windows. Empty rule sets always return false.
+// patterns work the same on Windows. Empty rule sets always return false,
+// except for fglpkg's own store artifacts, which are excluded unconditionally:
+// this is the single predicate every packer and lint walker consults, so the
+// reservation holds everywhere without being repeated at seven call sites.
 func (s *ignoreSet) shouldExclude(relPath string, isDir bool) bool {
+	if isReservedStoreArtifact(relPath) {
+		return true
+	}
 	if s == nil || len(s.rules) == 0 {
 		return false
 	}

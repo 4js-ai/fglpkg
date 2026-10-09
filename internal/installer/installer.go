@@ -1853,6 +1853,10 @@ func extractZipRouted(zipPath, destDir, webcomponentsDir string, wcNames []strin
 			return nil, fmt.Errorf("unsafe path in zip: %s", f.Name)
 		}
 		slashed := filepath.ToSlash(clean)
+		if reservedStoreEntry(slashed) {
+			warnReservedEntry(filepath.Base(destDir), slashed)
+			continue
+		}
 		top := strings.SplitN(slashed, "/", 2)[0]
 
 		routedToWC := wcSet[top]
@@ -1886,6 +1890,40 @@ func extractZipRouted(zipPath, destDir, webcomponentsDir string, wcNames []strin
 	return wcInstalled, nil
 }
 
+// reservedStoreEntry reports whether a zip entry is one of fglpkg's own store
+// artifacts — files the installer writes into an installed package directory,
+// which are never package content and must never be written by an extraction.
+//
+// Today that is the install stamp. The two-phase write of it is what makes an
+// interrupted extraction detectable (GIS-586): a marker goes down before the
+// first file lands and is completed after the last one. A zip carrying its own
+// .fglpkg-installed at the root would overwrite that marker mid-extraction, so
+// if the extraction then failed, the ZIP's stamp is what the next replay would
+// trust — and a failed install would read as a finished one, which is precisely
+// what the two-phase write exists to prevent.
+//
+// It needs no hostile publisher. `fglpkg pack` with a broad glob ("*", "**/*")
+// picks up a stray .fglpkg-installed from a directory that was itself installed
+// — re-publishing a vendored package is the plausible route — and because "."
+// sorts first it becomes the archive's FIRST entry. `pack` now excludes it so
+// fglpkg cannot produce such an artifact; this is the half that defends against
+// one that already exists.
+//
+// Skipping, rather than refusing the install: the package is otherwise fine,
+// and failing it outright would break a package that installs today. The
+// warning says what to do about it.
+func reservedStoreEntry(cleanName string) bool {
+	return filepath.ToSlash(cleanName) == lockfile.InstalledStampFilename
+}
+
+// warnReservedEntry reports a skipped store artifact once per archive.
+func warnReservedEntry(pkgDirName, entry string) {
+	fmt.Fprintf(os.Stderr,
+		"warning: %s ships %s, which is fglpkg's own install record — not extracting it.\n"+
+			"  The package was most likely built by packing an installed copy; re-publish it from source.\n",
+		pkgDirName, entry)
+}
+
 // extractZip unpacks a zip archive into destDir, sanitising all paths.
 func extractZip(zipPath, destDir string) error {
 	r, err := zip.OpenReader(zipPath)
@@ -1899,6 +1937,10 @@ func extractZip(zipPath, destDir string) error {
 		cleanName := filepath.Clean(f.Name)
 		if strings.HasPrefix(cleanName, "..") {
 			return fmt.Errorf("unsafe path in zip: %s", f.Name)
+		}
+		if reservedStoreEntry(cleanName) {
+			warnReservedEntry(filepath.Base(destDir), filepath.ToSlash(cleanName))
+			continue
 		}
 
 		target := filepath.Join(destDir, cleanName)

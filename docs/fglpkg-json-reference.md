@@ -353,6 +353,15 @@ compiled forms, and schema files). Files can additionally
 be excluded with a `.fglpkgignore` file — note its patterns are relative to the
 **project root**, whereas `files` path-patterns are relative to `root`.
 
+One name at the project root is reserved and is never packed, whatever `files`
+or `.fglpkgignore` say: **`.fglpkg-installed`**. That file is fglpkg's own
+record of what it installed into a package directory, and the installer relies
+on being its only writer — so a zip carrying one is refused at extraction too.
+You would only ever hit this by packing a directory that was itself installed
+(a broad glob such as `["*"]` sweeps it up); pack from source instead. A file of
+that name anywhere other than the project root is ordinary content and ships
+normally.
+
 #### `importRoot` — string
 The directory whose *contents* become the **archive root**. Files packaged from
 under it are stored relative to it, so the package namespace sits at the

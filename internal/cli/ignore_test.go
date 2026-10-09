@@ -316,3 +316,33 @@ func TestBuildPackageZipBinScriptOverridesIgnore(t *testing.T) {
 		t.Error("declared bin script must always be included even if .fglpkgignore matches its path")
 	}
 }
+
+// GIS-586, review round 2. .fglpkg-installed is the INSTALLER's record of what
+// it put in a package directory, and the installer relies on being the only
+// writer of it: a published zip carrying one overwrites the incomplete marker
+// mid-extraction, so a failed install reads as a finished one.
+//
+// `fglpkg pack` run over an installed directory with a broad glob is how such a
+// zip gets built, so it is excluded here regardless of what .fglpkgignore says
+// — including when there is no .fglpkgignore at all, which is the common case
+// and the one the early-return used to let straight through.
+func TestIgnoreAlwaysExcludesTheInstallStamp(t *testing.T) {
+	for _, s := range []*ignoreSet{
+		nil,
+		{},
+		{rules: []ignoreRule{{pattern: ".fglpkg-installed", negate: true}}},
+	} {
+		if !s.shouldExclude(".fglpkg-installed", false) {
+			t.Errorf("the install stamp must never be packed (ignoreSet %#v)", s)
+		}
+	}
+
+	// Only the reserved name itself, and only at the project root: a package
+	// is free to ship files that merely resemble it.
+	s := &ignoreSet{}
+	for _, keep := range []string{"fglpkg-installed", ".fglpkg-installed.bak", "docs/.fglpkg-installed"} {
+		if s.shouldExclude(keep, false) {
+			t.Errorf("%s is ordinary package content and must still be packed", keep)
+		}
+	}
+}

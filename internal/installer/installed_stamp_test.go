@@ -194,3 +194,96 @@ func TestAnInterruptedExtractionDoesNotReadAsInstalled(t *testing.T) {
 		t.Errorf("the stamp should still be marked incomplete:\n%s", stamp)
 	}
 }
+
+// GIS-586, review round 2. The stamp is written before extraction and completed
+// after, so a run killed in between leaves a package that reads as not
+// installed. A zip carrying its own .fglpkg-installed at the root defeated
+// that: extraction overwrote the incomplete marker with the zip's copy, so a
+// failed install read as a finished one on the next replay.
+//
+// It needs no hostile publisher — `fglpkg pack` over an installed directory
+// picks the file up, and because "." sorts first it lands before anything else.
+// Extraction now refuses the entry, and `pack` excludes it (see the cli
+// package's isReservedStoreArtifact).
+
+// escapingEntry fails extraction when it is reached: ".." is rejected as an
+// unsafe path. It goes last, so everything before it has already been written.
+var escapingEntry = [2]string{"../escape.txt", "x"}
+
+// forgedStamp is what a packed-from-an-installed-directory zip would carry.
+func forgedStamp(version string) [2]string {
+	return [2]string{".fglpkg-installed", `{"version":"` + version + `","complete":true}`}
+}
+
+func TestAZipCannotForgeAnInstallStamp(t *testing.T) {
+	inst, info := servePackage(t, "stampy", "1.0.0", [][2]string{
+		forgedStamp("1.0.0"), // "." sorts first, exactly as pack would emit it
+		manifestEntry("stampy", "1.0.0"),
+		escapingEntry,
+	})
+	if err := inst.Install(info); err == nil {
+		t.Fatal("precondition: the extraction was supposed to fail")
+	}
+
+	if lockfile.PackageIsInstalled(inst.packagesDir, lockfile.LockedPackage{Name: "stampy", Version: "1.0.0"}) {
+		t.Error("a failed install must not read as installed because the zip said so")
+	}
+	if stamp := readStamp(t, inst, "stampy"); !strings.Contains(stamp, `"complete": false`) {
+		t.Errorf("the installer's incomplete marker should have survived the zip:\n%s", stamp)
+	}
+}
+
+// The same, through the routed extraction a mixed package takes —
+// extractZipRouted has its own loop, so the two paths are guarded separately.
+func TestAZipCannotForgeAnInstallStampThroughTheRoutedPath(t *testing.T) {
+	mixed := [2]string{"fglpkg.json",
+		`{"name":"mixed","version":"1.0.0","genero":">=3.20","license":"MIT","webcomponents":["Chart"]}`}
+	inst, info := servePackage(t, "mixed", "1.0.0", [][2]string{
+		forgedStamp("1.0.0"),
+		{"Chart/Chart.html", "<html></html>"},
+		mixed,
+		escapingEntry,
+	})
+	if err := inst.Install(info); err == nil {
+		t.Fatal("precondition: the extraction was supposed to fail")
+	}
+
+	if lockfile.PackageIsInstalled(inst.packagesDir, lockfile.LockedPackage{Name: "mixed", Version: "1.0.0"}) {
+		t.Error("a failed mixed install must not read as installed because the zip said so")
+	}
+	// Proof the routed loop really ran, rather than the plain one.
+	if _, err := os.Stat(filepath.Join(inst.webcomponentsDir, "Chart", "Chart.html")); err != nil {
+		t.Fatalf("precondition: the webcomponent should have been routed out: %v", err)
+	}
+}
+
+// MarkInstalled is the last statement in installBDL, and the steps between
+// extraction and it — the wcsettings mirror, the ownership record, the bin
+// chmod — can each fail. Moving the call up to just after extraction was
+// caught by nothing; only a comment said not to. This forces one of those
+// steps to fail.
+//
+// The vehicle is permission-independent, so it behaves the same when the suite
+// runs as root: webcomponent-owners.json is created as a DIRECTORY, and
+// loadWCOwners' os.ReadFile of it fails with "is a directory".
+func TestMarkInstalledRunsAfterThePostExtractionSteps(t *testing.T) {
+	inst, info := servePackage(t, "latepkg", "1.0.0", [][2]string{manifestEntry("latepkg", "1.0.0")})
+	if err := os.MkdirAll(wcOwnersPath(inst.webcomponentsDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := inst.Install(info)
+	if err == nil {
+		t.Fatal("precondition: recording webcomponent ownership was supposed to fail")
+	}
+	if !strings.Contains(err.Error(), "directory") {
+		t.Fatalf("precondition: expected the ownership write to fail, got: %v", err)
+	}
+
+	if lockfile.PackageIsInstalled(inst.packagesDir, lockfile.LockedPackage{Name: "latepkg", Version: "1.0.0"}) {
+		t.Error("an install that failed after extraction must not read as installed")
+	}
+	if stamp := readStamp(t, inst, "latepkg"); !strings.Contains(stamp, `"complete": false`) {
+		t.Errorf("the stamp must not be completed before the post-extraction steps:\n%s", stamp)
+	}
+}

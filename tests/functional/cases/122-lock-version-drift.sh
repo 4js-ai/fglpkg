@@ -278,3 +278,62 @@ _drift_incomplete_install_is_reinstalled() {
 }
 it "an install that never completed is reinstalled, manifest notwithstanding" \
   _drift_incomplete_install_is_reinstalled
+
+# A zip that already ships `.fglpkg-installed` — built before `pack` learned to
+# exclude it, or by other tooling. Extraction must refuse the entry, so the
+# marker the installer wrote just beforehand survives and still governs.
+_drift_zip_stamp_fixtures() {  # _drift_zip_stamp_fixtures <dir>
+  local dir="$1"; mkdir -p "$dir"
+  mock_build_fixtures "$dir" || return 1
+
+  # "." sorts first, so the forged stamp is the archive's first entry — exactly
+  # where `fglpkg pack` over an installed directory would have put it.
+  python3 - "$dir/stampy-1.0.0-genero6.zip" <<'PY' || return 1
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], "w") as z:
+    z.writestr(".fglpkg-installed", '{"version":"9.9.9","complete":true}\n')
+    z.writestr("fglpkg.json", '{"name":"stampy","version":"1.0.0","genero":">=3.20","license":"MIT"}')
+    z.writestr("mod.42m", "stub")
+PY
+
+  python3 - "$dir/packages.json" <<'PY' || return 1
+import json, sys
+path = sys.argv[1]
+with open(path) as fh:
+    doc = json.load(fh)
+doc["packages"].append({
+    "slug": "stampy", "name": "stampy",
+    "description": "Ships fglpkg's own install stamp",
+    "genero": ">=3.20",
+    "owner": {"partner_id": "mock", "name": "fglpkg tests"},
+    "versions": [{
+        "version": "1.0.0", "genero": ">=3.20",
+        "author": "fglpkg tests", "license": "MIT",
+        "artifacts": [{"variant": "genero6", "zip": "stampy-1.0.0-genero6.zip"}],
+    }],
+})
+with open(path, "w") as fh:
+    json.dump(doc, fh, indent=2)
+PY
+}
+
+_drift_zip_cannot_supply_the_stamp() {
+  local fx; fx="$(mktemp -d "$_SANDBOX_ROOT/stampfx.XXXXXX")"
+  _drift_zip_stamp_fixtures "$fx" || return 1
+  mock_registry_start "$fx" || return 1
+
+  run install stampy@1.0.0
+  assert_success || return 1
+  assert_contains "install record" || return 1
+
+  # The installer's stamp, not the zip's: the published version, and complete
+  # because this install really did finish.
+  assert_file_contains ".fglpkg/packages/stampy/.fglpkg-installed" '"version": "1.0.0"' || return 1
+  assert_not_contains "9.9.9" "$(cat .fglpkg/packages/stampy/.fglpkg-installed)" || return 1
+
+  run install
+  assert_success || return 1
+  assert_contains "Nothing to install" || return 1
+}
+it "a zip shipping an install stamp cannot supply it" \
+  _drift_zip_cannot_supply_the_stamp
