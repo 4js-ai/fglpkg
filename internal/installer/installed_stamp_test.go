@@ -216,20 +216,27 @@ func forgedStamp(version string) [2]string {
 }
 
 func TestAZipCannotForgeAnInstallStamp(t *testing.T) {
-	inst, info := servePackage(t, "stampy", "1.0.0", [][2]string{
-		forgedStamp("1.0.0"), // "." sorts first, exactly as pack would emit it
-		manifestEntry("stampy", "1.0.0"),
-		escapingEntry,
-	})
-	if err := inst.Install(info); err == nil {
-		t.Fatal("precondition: the extraction was supposed to fail")
-	}
+	// The upper-case spellings matter on the filesystems most people install
+	// on: APFS and NTFS fold case, so .FGLPKG-INSTALLED is the SAME file as
+	// the marker MarkInstalling wrote. A case-sensitive check would wave it
+	// through and let it overwrite exactly what it protects.
+	for _, name := range []string{".fglpkg-installed", ".FGLPKG-INSTALLED", ".FgLpKg-InStAlLeD"} {
+		inst, info := servePackage(t, "stampy", "1.0.0", [][2]string{
+			// "." sorts first, exactly as pack would emit it.
+			{name, `{"version":"1.0.0","complete":true}`},
+			manifestEntry("stampy", "1.0.0"),
+			escapingEntry,
+		})
+		if err := inst.Install(info); err == nil {
+			t.Fatalf("%s: precondition: the extraction was supposed to fail", name)
+		}
 
-	if lockfile.PackageIsInstalled(inst.packagesDir, lockfile.LockedPackage{Name: "stampy", Version: "1.0.0"}) {
-		t.Error("a failed install must not read as installed because the zip said so")
-	}
-	if stamp := readStamp(t, inst, "stampy"); !strings.Contains(stamp, `"complete": false`) {
-		t.Errorf("the installer's incomplete marker should have survived the zip:\n%s", stamp)
+		if lockfile.PackageIsInstalled(inst.packagesDir, lockfile.LockedPackage{Name: "stampy", Version: "1.0.0"}) {
+			t.Errorf("%s: a failed install must not read as installed because the zip said so", name)
+		}
+		if stamp := readStamp(t, inst, "stampy"); !strings.Contains(stamp, `"complete": false`) {
+			t.Errorf("%s: the installer's incomplete marker should have survived the zip:\n%s", name, stamp)
+		}
 	}
 }
 

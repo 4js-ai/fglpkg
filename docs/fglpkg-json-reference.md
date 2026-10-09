@@ -353,14 +353,20 @@ compiled forms, and schema files). Files can additionally
 be excluded with a `.fglpkgignore` file — note its patterns are relative to the
 **project root**, whereas `files` path-patterns are relative to `root`.
 
-One name at the project root is reserved and is never packed, whatever `files`
-or `.fglpkgignore` say: **`.fglpkg-installed`**. That file is fglpkg's own
+One name is reserved and is never packed, whatever `files` or `.fglpkgignore`
+say: **`.fglpkg-installed`** at the **archive root**. That file is fglpkg's own
 record of what it installed into a package directory, and the installer relies
-on being its only writer — so a zip carrying one is refused at extraction too.
-You would only ever hit this by packing a directory that was itself installed
-(a broad glob such as `["*"]` sweeps it up); pack from source instead. A file of
-that name anywhere other than the project root is ordinary content and ships
-normally.
+on being its only writer — so a zip carrying one has that entry skipped at
+extraction too, with a warning, rather than the install failing. You would only
+ever hit this by packing a directory that was itself installed (a broad glob
+such as `["*"]` sweeps it up); pack from source instead.
+
+Note that "archive root" means after `importRoot` is stripped, which is not the
+same as the project root: with `importRoot: "dist"`, it is `dist/.fglpkg-installed`
+that is reserved. A file of that name landing anywhere else in the archive, such
+as `docs/.fglpkg-installed`, is ordinary content and ships normally. The match
+ignores case, because the filesystems these archives are extracted onto usually
+do.
 
 #### `importRoot` — string
 The directory whose *contents* become the **archive root**. Files packaged from

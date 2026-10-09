@@ -3261,8 +3261,50 @@ func stagePathFor(importRoot, relPath string, kind pathKind) (string, error) {
 // stageFile copies srcDiskPath into stageDir at archivePath, creating parent
 // directories. Staging two distinct sources at the same archive path is a
 // collision (hard error); staging the same source twice is a no-op.
+// isReservedStoreArtifact reports whether an ARCHIVE-relative path is one of
+// fglpkg's own store artifacts: a file the INSTALLER writes inside an installed
+// package directory. It is never package content, so it is never packed.
+//
+// Today that is the install stamp, .fglpkg-installed. The installer writes it
+// before extraction and completes it after, and that two-phase write is what
+// makes an interrupted extraction detectable (GIS-586). A published zip carrying
+// one would overwrite the marker mid-extraction, so a failed install could then
+// read as a finished one.
+//
+// The way such a zip gets built is mundane: `fglpkg pack` with a broad glob
+// ("*", "**/*") over a directory that was itself installed — vendoring an
+// installed package and re-publishing it. Because "." sorts first, the stray
+// file becomes the archive's first entry.
+//
+// The path has to be the archive one, not the project-relative one. With
+// importRoot the two differ, and it is the archive root that the installer
+// reads: with importRoot "dist", the project's dist/.fglpkg-installed ships as
+// .fglpkg-installed, while a project-relative check sees only "dist/…" and lets
+// it through. Conversely docs/.fglpkg-installed is ordinary content when it
+// archives as docs/.fglpkg-installed — and is reserved when importRoot "docs"
+// makes it the archive root.
+//
+// Case is folded because the filesystems these archives are extracted onto
+// usually do: on APFS and NTFS, .FGLPKG-INSTALLED is the same file.
+//
+// Extraction skips the entry too, with a warning (installer.reservedStoreEntry).
+// Excluding it here is what stops fglpkg producing such an artifact at all.
+func isReservedStoreArtifact(archivePath string) bool {
+	return strings.EqualFold(filepath.ToSlash(archivePath), lockfile.InstalledStampFilename)
+}
+
 func stageFile(stageDir, archivePath, srcDiskPath string, staged map[string]string) error {
 	archivePath = filepath.ToSlash(archivePath)
+	// Every staging route — the files walk, bin scripts, docs, webcomponents,
+	// include folding, profiles — funnels through here with the archive path
+	// already resolved, so the reservation holds for all of them at one site.
+	if isReservedStoreArtifact(archivePath) {
+		fmt.Fprintf(os.Stderr,
+			"warning: not packing %s as %s — that name is fglpkg's own install record.\n"+
+				"  It looks like this package was built from an installed copy; pack from source instead.\n",
+			srcDiskPath, archivePath)
+		return nil
+	}
 	if prev, ok := staged[archivePath]; ok {
 		if filepath.Clean(prev) == filepath.Clean(srcDiskPath) {
 			return nil

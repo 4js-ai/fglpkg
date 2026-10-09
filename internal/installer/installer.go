@@ -1912,8 +1912,16 @@ func extractZipRouted(zipPath, destDir, webcomponentsDir string, wcNames []strin
 // Skipping, rather than refusing the install: the package is otherwise fine,
 // and failing it outright would break a package that installs today. The
 // warning says what to do about it.
+//
+// The comparison folds case because the filesystem usually does. On APFS and
+// NTFS — the defaults on macOS and Windows — an entry named .FGLPKG-INSTALLED
+// opens the SAME file as the marker MarkInstalling wrote, so a case-sensitive
+// check would wave it through and let it overwrite exactly what it is meant to
+// protect. Nobody arrives at an upper-case copy by accident, so this is a
+// deliberately-crafted zip rather than the vendoring mishap above, but the
+// filesystem makes it work and the comparison costs nothing.
 func reservedStoreEntry(cleanName string) bool {
-	return filepath.ToSlash(cleanName) == lockfile.InstalledStampFilename
+	return strings.EqualFold(filepath.ToSlash(cleanName), lockfile.InstalledStampFilename)
 }
 
 // warnReservedEntry reports a skipped store artifact once per archive.
