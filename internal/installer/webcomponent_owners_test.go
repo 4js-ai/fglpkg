@@ -134,3 +134,35 @@ func TestPruneWebcomponentsNoSidecar(t *testing.T) {
 		t.Errorf("expected nothing pruned, got %v", pruned)
 	}
 }
+
+// GIS-579, review round 1. installedWebcomponents feeds LockFile.Validate,
+// which SKIPS the version comparison for a nil map — so returning nil for an
+// unreadable sidecar would switch drift detection off for exactly the corrupt
+// store that most needs it, and the replay would report "Nothing to install"
+// over whatever happens to be on disk.
+func TestInstalledWebcomponentsIsEmptyNotNilForACorruptSidecar(t *testing.T) {
+	inst := New(t.TempDir(), "", "", "")
+	if err := os.MkdirAll(inst.webcomponentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(wcOwnersPath(inst.webcomponentsDir), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := inst.installedWebcomponents()
+	if got == nil {
+		t.Fatal("a corrupt sidecar must not read as 'cannot observe the store'")
+	}
+	if len(got) != 0 {
+		t.Errorf("a corrupt sidecar names no installed version, got %v", got)
+	}
+}
+
+// A missing sidecar is the ordinary case for a project with no web components,
+// and must give the same answer.
+func TestInstalledWebcomponentsIsEmptyNotNilWithNoSidecar(t *testing.T) {
+	inst := New(t.TempDir(), "", "", "")
+	if got := inst.installedWebcomponents(); got == nil || len(got) != 0 {
+		t.Errorf("want an empty non-nil map with no sidecar, got %#v", got)
+	}
+}

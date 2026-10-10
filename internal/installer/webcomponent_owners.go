@@ -122,9 +122,30 @@ func wcOwnedBy(webcomponentsDir, pkg string) map[string]bool {
 	if err != nil {
 		return nil
 	}
+	// EXCLUSIVELY owned. A file another package also owns is co-owned, which is
+	// what dedup produces when two packages ship identical bytes at one path
+	// (GIS-298) — and when one of them starts shipping DIFFERENT bytes there,
+	// the two genuinely disagree about that file. Skipping the conflict check
+	// for it would overwrite the other package's copy in silence, which is the
+	// clobber GIS-298 exists to refuse. Leaving it in means the normal conflict
+	// path reports it, which is the right answer.
+	//
+	// recordWCOwnership has the matching guard on deletion; this is the one on
+	// overwrite.
+	coOwned := make(map[string]bool)
+	for other, files := range o.Packages {
+		if other == pkg {
+			continue
+		}
+		for _, f := range files {
+			coOwned[f] = true
+		}
+	}
 	owned := make(map[string]bool, len(o.Packages[pkg]))
 	for _, f := range o.Packages[pkg] {
-		owned[f] = true
+		if !coOwned[f] {
+			owned[f] = true
+		}
 	}
 	return owned
 }
@@ -305,12 +326,17 @@ func removeEmptyDirs(root string) error {
 // and `prune`, and splitting its shape across two packages is how the two
 // copies drift apart.
 //
-// An unreadable sidecar yields nil, which Validate reads as "nothing is
-// installed" — the safe direction, and the same answer a missing one gives.
+// An unreadable sidecar yields an EMPTY map, not nil. The difference matters:
+// Validate skips the version comparison entirely for a nil map (the caller
+// cannot observe the store), so returning nil here would quietly switch drift
+// detection off for exactly the corrupt sidecar that most deserves it, and the
+// replay would report "Nothing to install" over whatever is on disk. An empty
+// map instead reads as "nothing is installed", so every locked widget
+// re-extracts and recordWCOwnership then fails loudly on the unparseable file.
 func (i *Installer) installedWebcomponents() map[string]string {
 	o, err := loadWCOwners(i.webcomponentsDir)
 	if err != nil {
-		return nil
+		return map[string]string{}
 	}
 	return o.Versions
 }

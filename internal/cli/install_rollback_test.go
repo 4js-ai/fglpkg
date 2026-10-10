@@ -98,3 +98,56 @@ func TestNilSnapshotRestoreIsANoOp(t *testing.T) {
 	var s *projectSnapshot
 	s.restore()
 }
+
+// GIS-579, review round 1. The restore must also undo the .fglpkg/ scaffolding
+// when this run created it: ensureDirs lays packages/, jars/ and webcomponents/
+// down before anything is fetched, and isProjectDir counts .fglpkg/ as a
+// project marker — so a refused `install <pkg>` in an empty directory left
+// behind something that still read as a project.
+func TestSnapshotRemovesAStoreThisRunCreated(t *testing.T) {
+	dir := t.TempDir()
+	s := snapshotProject(dir, dir)
+	for _, sub := range []string{"packages", "jars", "webcomponents"} {
+		if err := os.MkdirAll(filepath.Join(dir, ".fglpkg", sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.restore()
+
+	if _, err := os.Stat(filepath.Join(dir, ".fglpkg")); !os.IsNotExist(err) {
+		t.Error("the empty store this run created survived the restore")
+	}
+}
+
+// A store that already existed is never touched, however empty it looks.
+func TestSnapshotKeepsAStoreThatAlreadyExisted(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".fglpkg", "packages"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	snapshotProject(dir, dir).restore()
+
+	if _, err := os.Stat(filepath.Join(dir, ".fglpkg")); err != nil {
+		t.Errorf("a pre-existing store was removed: %v", err)
+	}
+}
+
+// A store holding real files is never removed, even when this run created it.
+// A partially-successful install put them there, and deleting a package the
+// user may now depend on is a worse surprise than a directory left behind.
+func TestSnapshotKeepsAStoreThatHoldsFiles(t *testing.T) {
+	dir := t.TempDir()
+	s := snapshotProject(dir, dir)
+	pkg := filepath.Join(dir, ".fglpkg", "packages", "demo-pkg")
+	if err := os.MkdirAll(pkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "mod.42m"), []byte("stub"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.restore()
+
+	if _, err := os.Stat(filepath.Join(pkg, "mod.42m")); err != nil {
+		t.Errorf("an installed package was deleted by the restore: %v", err)
+	}
+}

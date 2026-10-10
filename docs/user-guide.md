@@ -112,6 +112,14 @@ channel, and no downgrade. The only manual recovery path is the download link sh
 install that looks managed by a package manager such as Homebrew — update those the way you
 installed them.
 
+**After upgrading: one install needs the network.** Projects that depend on web components get
+their bundles re-downloaded on the *first* `fglpkg install` after the upgrade, once per project.
+Older fglpkg did not record which version of a web component it had extracted, so a store written
+by one cannot be shown to match the lock — and fglpkg re-installs rather than assume. Every run
+after that is a no-op again. BDL packages and JARs are unaffected. If you build in a sealed
+environment, run one install with network access after upgrading, or warm the store before cutting
+it off.
+
 ### Update notices
 
 fglpkg also tells you, passively, when a newer version is out. After a command finishes, it

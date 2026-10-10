@@ -798,11 +798,23 @@ func cmdInstall(args []string) error {
 	// manifest here nor (via SkipLock below) a lock file (GIS-565), so there is
 	// nothing to snapshot or undo for one.
 	var snapshot *projectSnapshot
+	installed := false
 	if !globalToolInstall {
 		// Captured BEFORE the save: if the install fails, the project must not
 		// be left declaring a version it never got (GIS-579).
 		// "." matches m.Save(".") just below; the lock lands in projectDir.
 		snapshot = snapshotProject(".", projectDir)
+		// Deferred with a success flag rather than undone at each failure
+		// branch: the contract is that a failed `install <pkg>` changes
+		// nothing, and there are several ways out between here and the end —
+		// the repository rebuild, the preinstall hook, the install itself. A
+		// restore written at one of them covers only that one, and the next
+		// `return err` added below would silently not be covered.
+		defer func() {
+			if !installed {
+				snapshot.restore()
+			}
+		}()
 		if err := m.Save("."); err != nil {
 			return err
 		}
@@ -828,9 +840,11 @@ func cmdInstall(args []string) error {
 	// the store and build the global merged root, but write no project lock (GIS-565).
 	instOpts.SkipLock = globalToolInstall
 	if err := inst.InstallAllWithOptions(m, projectDir, true, instOpts); err != nil {
-		snapshot.restore()
 		return err
 	}
+	// The package is in the store and the lock describes it, so the project's
+	// files are now true and must survive whatever the post-install hook does.
+	installed = true
 	return runHook(m, manifest.HookPostInstall, projectDir)
 }
 

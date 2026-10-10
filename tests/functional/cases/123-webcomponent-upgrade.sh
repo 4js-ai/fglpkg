@@ -315,3 +315,49 @@ _wcup_deleted_store_is_reinstalled() {
 }
 it "a deleted webcomponents store is reinstalled despite a surviving sidecar" \
   _wcup_deleted_store_is_reinstalled
+
+# ── the rollback covers every way out, not just the install ────────────────
+#
+# Review round 1. The restore was wired to the install's own error branch, so
+# two earlier `return err`s after the manifest was saved skipped it — the
+# repository rebuild, and the PREINSTALL HOOK. A failing hook therefore left
+# fglpkg.json declaring a package that was never fetched, which is the same
+# false claim the rollback exists to prevent. It is now deferred with a success
+# flag, so every exit path is covered, including any added later.
+_wcup_failing_preinstall_hook_rolls_back() {
+  mock_registry_start
+
+  cat > fglpkg.json <<'EOF'
+{ "name":"app","version":"1.0.0","genero":">=3.20","license":"MIT",
+  "hooks": { "preinstall": [ { "op":"copy-files", "from":"does-not-exist.txt", "to":"out" } ] } }
+EOF
+  cp fglpkg.json before.json || return 1
+
+  run install demo.pkg@1.0.0
+  assert_failure || return 1
+  assert_contains "preinstall" || return 1
+
+  # The manifest must be byte-identical to what it was before the run.
+  run_raw diff before.json fglpkg.json
+  assert_success || return 1
+  assert_no_file "fglpkg-lock.json" || return 1
+}
+it "a failing preinstall hook leaves the manifest untouched" \
+  _wcup_failing_preinstall_hook_rolls_back
+
+# The .fglpkg/ scaffolding goes too. ensureDirs lays it down before anything is
+# fetched, and isProjectDir counts it as a project marker — so without this a
+# refused install in an empty directory left something behind that still read
+# as a project.
+_wcup_refused_install_leaves_no_store() {
+  mock_registry_start
+  export FGLPKG_SIGNING=require     # the mock serves unsigned artifacts
+
+  run install demo.pkg@1.0.0
+  assert_failure || return 1
+  assert_no_file "fglpkg.json" || return 1
+  assert_no_file "fglpkg-lock.json" || return 1
+  assert_no_file ".fglpkg" || return 1
+}
+it "a refused install in an empty directory leaves no store behind" \
+  _wcup_refused_install_leaves_no_store

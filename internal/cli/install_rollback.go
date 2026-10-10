@@ -9,6 +9,11 @@ import (
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 )
 
+// localStoreDirName is the project-local install directory. The rest of the
+// package spells it inline; it is named here because the restore both tests for
+// it and reports it.
+const localStoreDirName = ".fglpkg"
+
 // projectSnapshot captures fglpkg.json and fglpkg-lock.json so a failed
 // `fglpkg install <pkg>` can put the project back exactly as it found it.
 //
@@ -29,6 +34,12 @@ import (
 // install should not leave a project behind that nobody asked for.
 type projectSnapshot struct {
 	files []snapshotFile
+	// storeDir is the project's .fglpkg/ directory when this run is the one
+	// that created it, or "" when it already existed. A refused install that
+	// leaves the scaffolding behind leaves a directory that isProjectDir still
+	// counts as a project, which contradicts "changes nothing" for the case
+	// that motivates it most: `fglpkg install <pkg>` in an empty directory.
+	storeDir string
 }
 
 type snapshotFile struct {
@@ -52,7 +63,43 @@ func snapshotProject(manifestDir, projectDir string) *projectSnapshot {
 	} {
 		s.files = append(s.files, captureFile(p))
 	}
+	store := filepath.Join(projectDir, localStoreDirName)
+	if _, err := os.Stat(store); os.IsNotExist(err) {
+		s.storeDir = store
+	}
 	return s
+}
+
+// removeStoreIfEmpty deletes a .fglpkg/ this run created, provided nothing was
+// actually installed into it. "Empty" means no regular files anywhere beneath
+// it — ensureDirs lays down packages/, jars/ and webcomponents/ before anything
+// is fetched, so the scaffolding alone is what a refused install leaves.
+//
+// A store holding real files is never removed. A partially-successful run put
+// them there, and deleting a package the user may now be depending on would be
+// a far worse surprise than a directory left behind.
+func removeStoreIfEmpty(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	hasFiles := false
+	err := filepath.WalkDir(dir, func(_ string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !d.IsDir() {
+			hasFiles = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil || hasFiles {
+		return err
+	}
+	return os.RemoveAll(dir)
 }
 
 func captureFile(path string) snapshotFile {
@@ -73,6 +120,11 @@ func captureFile(path string) snapshotFile {
 func (s *projectSnapshot) restore() {
 	if s == nil {
 		return
+	}
+	if err := removeStoreIfEmpty(s.storeDir); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"warning: could not remove the %s directory this run created: %v\n",
+			localStoreDirName, err)
 	}
 	for _, f := range s.files {
 		if f.skip {
