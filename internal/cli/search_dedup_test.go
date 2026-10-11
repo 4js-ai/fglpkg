@@ -112,6 +112,67 @@ func TestSearchAcrossProviders_GradesAgainstTarget(t *testing.T) {
 	}
 }
 
+// TestSearchAcrossProviders_GradesFromPublishedBuilds covers the fan-out half of
+// GIS-575: a result's published builds must survive the per-name merge, and on
+// a collision both compatibility signals must come from the SAME repository as
+// the version and description. Grading one repo's constraint against another's
+// builds would invent a verdict for a package that exists in neither.
+func TestSearchAcrossProviders_GradesFromPublishedBuilds(t *testing.T) {
+	gi := &searchStub{name: "gi", results: []registry.SearchResult{
+		{Name: "modern", LatestVersion: "2.0.0", Description: "builds for here",
+			Variants: []string{"genero4", "genero6"}},
+		{Name: "elsewhere", LatestVersion: "1.0.0", Description: "builds for genero 6 only",
+			Variants: []string{"genero6"}},
+		// Collides with acme's entry below. gi wins on priority, so the ✓ must
+		// come from gi's genero4 build — not from acme's genero6-only one.
+		{Name: "utils", LatestVersion: "1.3.0", Description: "gi utils",
+			Variants: []string{"genero4"}},
+	}}
+	acme := &searchStub{name: "acme", results: []registry.SearchResult{
+		{Name: "utils", LatestVersion: "0.9.0", Description: "acme utils",
+			Variants: []string{"genero6"}},
+		// Artifactory reports no variants at all: nil, meaning "cannot tell",
+		// which must stay "?" rather than becoming "publishes nothing".
+		{Name: "acmeonly", LatestVersion: "3.0.0", Description: "internal"},
+	}}
+	descs := []config.Registry{
+		{Name: "gi", Type: config.TypeGenero, URL: "https://gi", Priority: 1},
+		{Name: "acme", Type: config.TypeArtifactory, URL: "https://a", RepoKey: "k", Priority: 2},
+	}
+	rs := provider.NewRepositorySet([]provider.Provider{gi, acme}, descs, nil)
+	target := genero.MustParse("4.01.12")
+
+	out, err := captureStdout(t, func() error { return searchAcrossProviders(rs, "x", false, &target, "") })
+	if err != nil {
+		t.Fatalf("searchAcrossProviders: %v", err)
+	}
+
+	cases := []struct{ pkg, genero, marker string }{
+		{"modern", "4, 6", "✓"},
+		{"elsewhere", "6", "✗"},
+		{"utils", "4", "✓"},
+		{"acmeonly", "-", "?"},
+	}
+	for _, c := range cases {
+		line := lineContaining(out, c.pkg)
+		if line == "" {
+			t.Errorf("no row for %q\n%s", c.pkg, out)
+			continue
+		}
+		if !strings.Contains(line, c.genero) {
+			t.Errorf("%s row = %q, want GENERO %q", c.pkg, line, c.genero)
+		}
+		if !strings.Contains(line, c.marker) {
+			t.Errorf("%s row = %q, want marker %q", c.pkg, line, c.marker)
+		}
+	}
+	// The collided row keeps gi's description too, so the signals and the text
+	// are demonstrably from one source rather than merged field by field.
+	if line := lineContaining(out, "utils"); !strings.Contains(line, "gi utils") {
+		t.Errorf("utils row should keep gi's description: %q", line)
+	}
+}
+
 // TestSearchAcrossProviders_GeneroColumnWidensToFit guards the dynamic GENERO
 // column width: a constraint longer than the 12-char floor must not push its
 // row's later columns out of alignment with a short-constraint row (the "spill

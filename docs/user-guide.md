@@ -814,9 +814,9 @@ you are running. The version is detected automatically (honoring `FGLPKG_GENERO_
 and can be overridden with `--genero <version>`. The marker is advisory — nothing is hidden
 or reordered:
 
-- `✓` — the package's latest version is compatible with your Genero version
-- `✗` — the latest version requires a different Genero version
-- `?` — unknown: the registry reports no constraint, or no Genero version could be resolved
+- `✓` — the package's latest version runs on your Genero version
+- `✗` — it does not
+- `?` — unknown: the registry reports nothing to judge by, or no Genero version could be resolved
 
 ```bash
 $ fglpkg search json
@@ -825,8 +825,36 @@ Results for "json" (Genero 4.01):
   ----                           -------      ------       -  -----------
   jsonutils                      2.0.1        ^4.0.0       ✓  JSON utility functions for BDL
   legacyjson                     1.4.0        ^3.0.0       ✗  JSON helpers for Genero 3
-  mystery                        0.9.0        -            ?  registry reports no constraint
+  jsonfast                       1.1.0        4, 5, 6      ✓  no constraint declared
+  jsonmodern                     3.0.0        5, 6         ✗  no Genero 4 build published
+  mystery                        0.9.0        -            ?  nothing to judge by
 ```
+
+#### What the GENERO column shows
+
+Two independent things decide whether a package runs on your Genero version, and the column
+shows whichever is more informative:
+
+- **A declared constraint**, like `^4.0.0` — what the publisher wrote in their `fglpkg.json`.
+  It is optional, and most publishers leave it out. When present it is shown as-is, because it
+  carries a minimum patch level that a list of majors cannot express.
+- **The builds that exist**, shown as the Genero majors a build was published for — `4, 5, 6`.
+  A publisher cannot forget to supply this, since uploading a build is what creates it.
+
+Both are consulted for the verdict, and either can rule a package out: a package whose
+constraint allows Genero 4 but which ships no Genero 4 build grades `✗`.
+
+Two other values appear in this column:
+
+- `any` — the package publishes a build that serves every major. Web components ship browser
+  assets rather than p-code, and older packages were published as a single build.
+- `none` — the registry reports the latest version's builds, and there are none. Usually a
+  publish that did not finish; there is nothing to install. This is the one case that outranks
+  a declared constraint, since no range can make an absent build installable.
+
+`-` means the registry reported neither signal. That is what a secondary (non-GI) repository
+reports — those results are never graded and always show `?` — and what the GI registry itself
+reported before it began serving the published build list.
 
 Grade against a specific version instead of the detected one:
 
@@ -835,8 +863,7 @@ $ fglpkg search json --genero 3.20
 ```
 
 If no Genero version can be detected (no `fglcomp`, no `$FGLDIR`, no override), search still
-runs — every result shows `?` and the header explains how to set the version. Results from
-secondary (non-GI) repositories are not graded and always show `?`.
+runs — every result shows `?` and the header explains how to set the version.
 
 When you have [secondary repositories](#secondary-repositories-jfrog-artifactory) configured,
 `fglpkg search` fans out to all of them by default. Scope it to a single source with

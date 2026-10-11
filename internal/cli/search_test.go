@@ -87,20 +87,109 @@ func TestGradeCompat(t *testing.T) {
 		name       string
 		target     *genero.Version
 		constraint string
+		variants   []string
 		want       string
 	}{
-		{"no target version", nil, "^4.0.0", "?"},
-		{"empty constraint", &v4, "", "?"},
-		{"compatible", &v4, "^4.0.0", "✓"},
-		{"incompatible", &v4, "^3.0.0", "✗"},
-		{"star constraint is compatible", &v4, "*", "✓"},
-		{"unparseable constraint", &v4, "not-a-constraint", "?"},
-		{"no target and empty constraint", nil, "", "?"},
+		{"no target version", nil, "^4.0.0", []string{"genero4"}, "?"},
+		{"no signal at all", &v4, "", nil, "?"},
+		{"no target and no signal", nil, "", nil, "?"},
+		{"compatible", &v4, "^4.0.0", nil, "✓"},
+		{"incompatible", &v4, "^3.0.0", nil, "✗"},
+		{"star constraint is compatible", &v4, "*", nil, "✓"},
+		{"unparseable constraint with nothing to fall back on", &v4, "not-a-constraint", nil, "?"},
+
+		// The GIS-575 cases: no publisher declared a constraint, so the
+		// published builds are the only evidence — and they are conclusive.
+		{"builds for this major", &v4, "", []string{"genero4", "genero5", "genero6"}, "✓"},
+		{"builds, but not for this major", &v4, "", []string{"genero5", "genero6"}, "✗"},
+		{"web components run anywhere", &v4, "", []string{"webcomponent"}, "✓"},
+		{"legacy single build runs anywhere", &v4, "", []string{"default"}, "✓"},
+		// Reported, and empty: the version published nothing. Distinct from nil,
+		// which is a registry that cannot answer.
+		{"no builds published", &v4, "", []string{}, "✗"},
+
+		// Both signals present: either one may veto.
+		{"both agree", &v4, "^4.0.0", []string{"genero4"}, "✓"},
+		{"constraint allows it, no build exists", &v4, "^4.0.0", []string{"genero6"}, "✗"},
+		{"build exists, constraint forbids it", &v4, "^3.0.0", []string{"genero4"}, "✗"},
+
+		// A constraint we cannot read drops that signal only. The builds are an
+		// independent fact and still answer.
+		{"unparseable constraint, builds say yes", &v4, "nonsense", []string{"genero4"}, "✓"},
+		{"unparseable constraint, builds say no", &v4, "nonsense", []string{"genero6"}, "✗"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := gradeCompat(c.target, c.constraint); got != c.want {
-				t.Errorf("gradeCompat(%v, %q) = %q, want %q", c.target, c.constraint, got, c.want)
+			if got := gradeCompat(c.target, c.constraint, c.variants); got != c.want {
+				t.Errorf("gradeCompat(%v, %q, %v) = %q, want %q",
+					c.target, c.constraint, c.variants, got, c.want)
+			}
+		})
+	}
+}
+
+// TestGradeCompatMatchesInstall pins the grade to what install actually does.
+// A search that says "✓" over a version registry.Resolve would refuse — or "✗"
+// over one it would happily install — is worse than no column at all, so both
+// read the same registry.Runnable rather than each implementing the rule.
+func TestGradeCompatMatchesInstall(t *testing.T) {
+	v4 := genero.MustParse("4.01.12")
+	cases := []struct {
+		constraint string
+		variants   []string
+	}{
+		{"", []string{"genero4"}},
+		{"", []string{"genero5", "genero6"}},
+		{"", []string{"webcomponent"}},
+		{"", []string{}},
+		{"^4.0.0", []string{"genero6"}},
+		{"^3.0.0", []string{"genero4"}},
+		{"^4.0.0", nil},
+	}
+	for _, c := range cases {
+		runnable, _ := registry.Runnable(&v4, c.constraint, c.variants)
+		want := "✗"
+		if runnable {
+			want = "✓"
+		}
+		if got := gradeCompat(&v4, c.constraint, c.variants); got != want {
+			t.Errorf("gradeCompat(%q, %v) = %q but registry.Runnable says runnable=%v",
+				c.constraint, c.variants, got, runnable)
+		}
+	}
+}
+
+func TestDisplayGenero(t *testing.T) {
+	cases := []struct {
+		name       string
+		constraint string
+		variants   []string
+		want       string
+	}{
+		// A declared constraint carries minimum-patch detail a build list
+		// cannot express, so it wins even when both are present.
+		{"declared constraint wins", ">=4.1.3 <7.0.0", []string{"genero4", "genero5", "genero6"}, ">=4.1.3 <7.0.0"},
+		{"neither signal", "", nil, "-"},
+		{"reported and empty", "", []string{}, "none"},
+		// The one case where a declared constraint does NOT win: there is
+		// nothing to install, so showing a range the grader then marks ✗ would
+		// read as a bug rather than as an unfinished publish.
+		{"no builds outranks a declared constraint", "^4.0.0", []string{}, "none"},
+		{"build majors", "", []string{"genero4", "genero5", "genero6"}, "4, 5, 6"},
+		{"single major", "", []string{"genero6"}, "6"},
+		{"web component serves every major", "", []string{"webcomponent"}, "any"},
+		{"legacy default serves every major", "", []string{"default"}, "any"},
+		// Naming "6" here would understate it: VariantsSupport would install
+		// this on Genero 4 too, and the column must not contradict the verdict.
+		{"a universal build among majors", "", []string{"genero6", "webcomponent"}, "any"},
+		// Nothing recognisable: "none" would claim they are unusable, "any"
+		// would vouch for them. Neither is known.
+		{"unrecognised tags only", "", []string{"mystery"}, "-"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := displayGenero(c.constraint, c.variants); got != c.want {
+				t.Errorf("displayGenero(%q, %v) = %q, want %q", c.constraint, c.variants, got, c.want)
 			}
 		})
 	}
@@ -245,6 +334,80 @@ func TestCmdSearchRendersAnnotatedTable(t *testing.T) {
 		if !strings.Contains(line, c.marker) {
 			t.Errorf("%s row = %q, want marker %q", c.pkg, line, c.marker)
 		}
+	}
+}
+
+// TestCmdSearchGradesFromPublishedBuilds is the GIS-575 reproduction, end to
+// end over the browse endpoint: the registry's real package set, where only
+// `qrcode` declares a `genero` constraint. Before this, every other row showed
+// "-" / "?" — including `odatalib`, which publishes genero5 and genero6 only
+// and provably cannot run here. The published builds now answer for the
+// packages whose publisher declared nothing.
+func TestCmdSearchGradesFromPublishedBuilds(t *testing.T) {
+	ts := browsePackagesServer(t, []map[string]any{
+		{"slug": "poiapi", "name": "poiapi", "description": "spreadsheets",
+			"latest_version": "1.9.1", "owner": map[string]any{"name": "4Js"},
+			"variants": []string{"genero4", "genero5", "genero6"}},
+		{"slug": "odatalib", "name": "odatalib", "description": "OData client",
+			"latest_version": "1.2.0", "owner": map[string]any{"name": "4Js"},
+			"variants": []string{"genero5", "genero6"}},
+		{"slug": "fglunit", "name": "fglunit", "description": "unit testing",
+			"latest_version": "1.0.1", "owner": map[string]any{"name": "4Js"},
+			"variants": []string{"genero6"}},
+		{"slug": "qrcode", "name": "qrcode", "description": "QR codes",
+			"latest_version": "1.2.0", "owner": map[string]any{"name": "4Js"},
+			"genero": ">=4.1.3 <7.0.0", "variants": []string{"genero4", "genero5", "genero6"}},
+		{"slug": "megamenu", "name": "megamenu", "description": "a menu widget",
+			"latest_version": "2.1.1", "owner": map[string]any{"name": "4Js"},
+			"variants": []string{"webcomponent"}},
+		{"slug": "halfpublished", "name": "halfpublished", "description": "upload never finished",
+			"latest_version": "0.1.0", "owner": map[string]any{"name": "4Js"},
+			"variants": []string{}},
+		// No `variants` key at all — a registry predating the field. Must stay
+		// "unknown": reading its silence as "publishes nothing" would mark every
+		// package on an older registry incompatible.
+		{"slug": "oldreg", "name": "oldreg", "description": "served by an older registry",
+			"latest_version": "0.9.0", "owner": map[string]any{"name": "4Js"}},
+	})
+	t.Setenv("FGLPKG_REGISTRY", ts.URL)
+	t.Setenv("FGLPKG_HOME", t.TempDir())
+
+	out, err := captureStdout(t, func() error {
+		return cmdSearch([]string{"--all", "--genero", "4.01.12"})
+	})
+	if err != nil {
+		t.Fatalf("cmdSearch: %v", err)
+	}
+
+	cases := []struct {
+		pkg, genero, marker string
+	}{
+		{"poiapi", "4, 5, 6", "✓"},
+		{"odatalib", "5, 6", "✗"},
+		{"fglunit", "6", "✗"},
+		// A declared constraint is more precise than a build list, so it is what
+		// the column shows even though both signals are present.
+		{"qrcode", ">=4.1.3 <7.0.0", "✓"},
+		{"megamenu", "any", "✓"},
+		{"halfpublished", "none", "✗"},
+		{"oldreg", "-", "?"},
+	}
+	for _, c := range cases {
+		line := lineContaining(out, c.pkg)
+		if line == "" {
+			t.Errorf("no row for %q\n--- output ---\n%s", c.pkg, out)
+			continue
+		}
+		if !strings.Contains(line, c.genero) {
+			t.Errorf("%s row = %q, want GENERO %q", c.pkg, line, c.genero)
+		}
+		if !strings.Contains(line, c.marker) {
+			t.Errorf("%s row = %q, want marker %q", c.pkg, line, c.marker)
+		}
+	}
+	// The whole point of the ticket: "?" is now the exception, not the rule.
+	if n := strings.Count(out, "?"); n > 2 {
+		t.Errorf("expected at most the header's and oldreg's %q, got %d\n--- output ---\n%s", "?", n, out)
 	}
 }
 
