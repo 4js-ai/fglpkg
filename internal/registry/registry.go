@@ -219,6 +219,12 @@ type SearchResult struct {
 	// constraint (e.g. "^4.0.0"). Empty when the registry does not report one,
 	// in which case compatibility is treated as unknown.
 	GeneroConstraint string `json:"genero,omitempty"`
+	// Variants are the latest version's published build tags, carried on the
+	// listing so search can grade a whole page without a detail fetch per row
+	// (GIS-575). nil means the provider does not report variants (Artifactory,
+	// and GI before it served the field) — which is "unknown", not "none". See
+	// VariantsSupport.
+	Variants []string `json:"variants,omitempty"`
 	// Source is the logical repository this result came from, set by the
 	// multi-provider search fan-out. Empty for single-registry results.
 	Source string `json:"source,omitempty"`
@@ -434,6 +440,7 @@ func Search(term string) ([]SearchResult, error) {
 			Description:      p.Description,
 			Author:           p.Owner.Name,
 			GeneroConstraint: p.Genero,
+			Variants:         p.Variants,
 			Deprecated:       p.Deprecated,
 			MovedTo:          p.MovedTo,
 		})
@@ -867,6 +874,13 @@ type apiListedPackage struct {
 	// surfaced on the browse listing for compatibility annotation. Empty when
 	// the registry does not report one.
 	Genero string `json:"genero,omitempty"`
+	// Variants are the latest version's published build tags (e.g. "genero4",
+	// "webcomponent"), the compatibility signal a publisher cannot forget to
+	// supply (GIS-575). NOT omitempty-decoded: an absent field leaves this nil
+	// ("this registry does not report variants") while `[]` decodes to an empty
+	// non-nil slice ("this version publishes no builds"), and VariantsSupport
+	// reads those two as opposite answers.
+	Variants []string `json:"variants"`
 }
 
 type apiPackageDetail struct {

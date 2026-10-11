@@ -1710,6 +1710,7 @@ func cmdSearch(args []string) error {
 			name:        r.Name,
 			version:     r.LatestVersion,
 			constraint:  r.GeneroConstraint,
+			variants:    r.Variants,
 			description: r.Description,
 			deprecated:  r.Deprecated,
 			movedTo:     r.MovedTo,
@@ -1747,32 +1748,96 @@ func searchVersionSuffix(target *genero.Version) string {
 	return " (Genero version unknown — set FGLPKG_GENERO_VERSION or pass --genero)"
 }
 
-// gradeCompat returns a one-column compatibility marker for a result's Genero
-// constraint against the target version: "✓" compatible, "✗" incompatible, "?"
-// unknown. Unknown covers no resolved target, no declared constraint, and an
-// unparseable constraint — a malformed constraint degrades that one row to "?"
-// rather than aborting the search.
-func gradeCompat(target *genero.Version, constraint string) string {
-	if target == nil || constraint == "" {
+// gradeCompat returns a one-column compatibility marker for a result against
+// the target version: "✓" compatible, "✗" incompatible, "?" unknown.
+//
+// A result carries two independent compatibility signals and both are consulted,
+// through the same registry.Runnable that decides which version `install` picks
+// — so what search promises and what install does cannot drift apart:
+//
+//   - the publisher's declared `genero` constraint, which is precise but
+//     optional, and which 8 of the 9 registry packages leave empty; and
+//   - the set of builds actually published, which the publisher cannot forget
+//     to supply because uploading one is what creates it.
+//
+// Grading on the constraint alone made "?" the answer for nearly every package,
+// including ones that provably could not run — `odatalib` 1.2.0 publishes
+// genero5 and genero6 only, and a user on Genero 4 was told "unknown" rather
+// than "no" (GIS-575).
+//
+// "?" now means what it says: no resolved target, or neither signal present
+// (nil variants is a registry that does not report them, not a package with no
+// builds). A malformed constraint drops that signal for the row rather than
+// aborting the search, and the variants still answer if they can.
+func gradeCompat(target *genero.Version, constraint string, variants []string) string {
+	if target == nil {
 		return "?"
 	}
-	ok, err := target.Satisfies(constraint)
-	if err != nil {
+	if constraint != "" {
+		if _, err := target.Satisfies(constraint); err != nil {
+			constraint = ""
+		}
+	}
+	if constraint == "" && variants == nil {
 		return "?"
 	}
-	if ok {
+	if ok, _ := registry.Runnable(target, constraint, variants); ok {
 		return "✓"
 	}
 	return "✗"
 }
 
-// displayConstraint renders a Genero constraint for the GENERO column, showing
-// "-" when the registry reported none.
-func displayConstraint(constraint string) string {
-	if constraint == "" {
+// universalVariant reports whether a build tag serves every Genero major.
+// "webcomponent" packages ship browser assets rather than p-code, and "default"
+// is the legacy single-build layout. Kept in step with registry.VariantsSupport,
+// which is what actually decides installability — a GENERO column naming majors
+// that the grader then ignores is worse than one that admits it cannot narrow
+// them down.
+func universalVariant(v string) bool {
+	return v == "webcomponent" || v == "default"
+}
+
+// displayGenero renders the GENERO column.
+//
+// A declared constraint wins when there is one: it carries minimum-patch detail
+// a variant list cannot express (qrcode's ">=4.1.3 <7.0.0" is strictly better
+// information than "4, 5, 6"). Otherwise the published build majors stand in,
+// which is what makes the column informative for the packages that declare
+// nothing.
+//
+//	"-"       the provider reports neither signal — unknown
+//	"none"    builds reported, and there are none: nothing to install
+//	"any"     a build that serves every major (webcomponent / legacy default)
+//	"4, 5, 6" the majors with a build
+func displayGenero(constraint string, variants []string) string {
+	// "No builds at all" outranks a declared constraint, which is the one case
+	// where showing the constraint would contradict the row's own verdict: the
+	// grader marks this ✗ whatever the range says, and a column reading
+	// "^4.0.0 ✗" next to it reads as a bug rather than as an unfinished publish.
+	if variants != nil && len(variants) == 0 {
+		return "none"
+	}
+	if constraint != "" {
+		return constraint
+	}
+	if variants == nil {
 		return "-"
 	}
-	return constraint
+	majors := make([]string, 0, len(variants))
+	for _, v := range variants {
+		if universalVariant(v) {
+			return "any"
+		}
+		if m := strings.TrimPrefix(v, "genero"); m != v && m != "" {
+			majors = append(majors, m)
+		}
+	}
+	if len(majors) == 0 {
+		// Only tags we do not recognise. Saying "none" would claim they are
+		// unusable and "any" would vouch for them; neither is known.
+		return "-"
+	}
+	return strings.Join(majors, ", ")
 }
 
 // searchRow is one line of the annotated search table. source is empty in
@@ -1782,6 +1847,7 @@ type searchRow struct {
 	name        string
 	version     string
 	constraint  string
+	variants    []string
 	description string
 	deprecated  bool
 	movedTo     string
@@ -1807,10 +1873,11 @@ func searchRowFormat(generoWidth int, showStatus, showSource bool) string {
 
 // printSearchTable renders the annotated results table shared by the
 // single-registry and multi-provider search paths. The GENERO and verdict
-// columns grade each row against its own constraint (see gradeCompat); rows
-// whose provider supplies no constraint render "-"/"?". showSource adds the
-// SOURCE column (multi-provider mode); the STATUS column appears only when at
-// least one row is deprecated, so the common all-live listing stays narrow.
+// columns grade each row against its own constraint and published builds (see
+// gradeCompat and displayGenero); a row whose provider reports neither renders
+// "-"/"?". showSource adds the SOURCE column (multi-provider mode); the STATUS
+// column appears only when at least one row is deprecated, so the common
+// all-live listing stays narrow.
 func printSearchTable(rows []searchRow, target *genero.Version, showSource bool) {
 	showStatus := false
 	generoWidth := 12 // floor: keeps short constraint lists looking as before
@@ -1818,7 +1885,7 @@ func printSearchTable(rows []searchRow, target *genero.Version, showSource bool)
 		if r.deprecated {
 			showStatus = true
 		}
-		if w := len(displayConstraint(r.constraint)); w > generoWidth {
+		if w := len(displayGenero(r.constraint, r.variants)); w > generoWidth {
 			generoWidth = w
 		}
 	}
@@ -1840,7 +1907,7 @@ func printSearchTable(rows []searchRow, target *genero.Version, showSource bool)
 	fmt.Printf(format, divider...)
 
 	for _, r := range rows {
-		vals := []any{r.name, r.version, displayConstraint(r.constraint), gradeCompat(target, r.constraint)}
+		vals := []any{r.name, r.version, displayGenero(r.constraint, r.variants), gradeCompat(target, r.constraint, r.variants)}
 		if showStatus {
 			vals = append(vals, searchDeprecatedStatus(r.deprecated, r.movedTo))
 		}
@@ -1855,11 +1922,14 @@ func printSearchTable(rows []searchRow, target *genero.Version, showSource bool)
 // searchAcrossProviders fans out a search to every configured provider, tags
 // each result with its source repository, and prints a source-tagged table.
 //
-// Each row is graded against its own Genero constraint: the Genero provider
-// supplies one via registry.Search, while Artifactory leaves it empty until
-// FetchInfo, so those rows render "-"/"?" (unknown). On a name collision the
-// constraint (like the version/description) comes from the highest-priority
-// source. The columns match the single-registry search layout.
+// Each row is graded against its own compatibility signals: the Genero provider
+// supplies a constraint and a published-build list via registry.Search, while
+// Artifactory reports neither (its constraint arrives only at FetchInfo, and it
+// has no variant concept), so those rows render "-"/"?" (unknown). On a name
+// collision both signals — like the version/description — come from the
+// highest-priority source, so a row is never graded from one repository's
+// constraint against another's builds. The columns match the single-registry
+// search layout.
 func searchAcrossProviders(rs *provider.RepositorySet, term string, all bool, target *genero.Version, restrict string) error {
 	// A --registry <name> scopes the fan-out to a single repository. Search
 	// queries providers directly (it does not route through RepositorySet.route),
@@ -1886,6 +1956,7 @@ func searchAcrossProviders(rs *provider.RepositorySet, term string, all bool, ta
 		version     string
 		description string
 		constraint  string
+		variants    []string // published build tags; nil when the provider reports none
 		deprecated  bool     // package-level deprecation, from the highest-priority source
 		movedTo     string   // successor slug when the deprecation is a relocation
 		sources     []string // every repo the name appears in, priority order
@@ -1913,6 +1984,7 @@ func searchAcrossProviders(rs *provider.RepositorySet, term string, all bool, ta
 				version:     r.LatestVersion,
 				description: r.Description,
 				constraint:  r.GeneroConstraint,
+				variants:    r.Variants,
 				deprecated:  r.Deprecated,
 				movedTo:     r.MovedTo,
 				sources:     []string{p.Name()},
@@ -1934,9 +2006,9 @@ func searchAcrossProviders(rs *provider.RepositorySet, term string, all bool, ta
 		fmt.Printf("Results for %q%s:\n", term, searchVersionSuffix(target))
 	}
 	// The GENERO + verdict columns grade each result against its own constraint
-	// (the Genero provider supplies one; Artifactory leaves it empty until
-	// FetchInfo, so those rows render "-"/"?"). The STATUS column only appears
-	// when at least one match is deprecated.
+	// and published builds (the Genero provider supplies both; Artifactory
+	// reports neither, so those rows render "-"/"?"). The STATUS column only
+	// appears when at least one match is deprecated.
 	collisions := 0
 	rows := make([]searchRow, 0, len(order))
 	for _, name := range order {
@@ -1948,6 +2020,7 @@ func searchAcrossProviders(rs *provider.RepositorySet, term string, all bool, ta
 			name:        m.name,
 			version:     m.version,
 			constraint:  m.constraint,
+			variants:    m.variants,
 			description: m.description,
 			deprecated:  m.deprecated,
 			movedTo:     m.movedTo,

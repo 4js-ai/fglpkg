@@ -73,14 +73,21 @@ class Fixtures:
         }
 
     def listed(self, p):
+        # `variants` mirrors the real browse endpoint: the LATEST version's
+        # artifact tags, sorted, and always present — `[]` means that version
+        # publishes no builds, which a client reads differently from the field
+        # being absent on an older registry (GIS-575).
+        latest = p["versions"][-1] if p.get("versions") else {}
+        variants = sorted(a["variant"] for a in latest.get("artifacts", []))
         return {
             "slug": canonical(p["slug"]), "name": p.get("name", p["slug"]),
             "description": p.get("description", ""), "visibility": "public",
             "owner": p.get("owner", {"partner_id": "mock", "name": "mock"}),
             "status": "published",
-            "latest_version": p["versions"][-1]["version"] if p.get("versions") else "",
+            "latest_version": latest.get("version", ""),
             "downloads": 0, "tags": {}, "deprecated": False,
             "deprecation_message": "", "moved_to": "", "genero": p.get("genero", ""),
+            "variants": variants,
         }
 
     def search(self, term):
