@@ -873,7 +873,7 @@ func PackageIsInstalled(packagesDir string, pkg LockedPackage) bool {
 // packagesDir / webcomponentsDir / jarsDir are used to check which BDL
 // installs, webcomponent installs and Java JARs are actually present on disk;
 // pass "" to skip any of those checks.
-func (lf *LockFile) Validate(root *manifest.Manifest, currentGenero, packagesDir, webcomponentsDir, jarsDir string) *ValidationResult {
+func (lf *LockFile) Validate(root *manifest.Manifest, currentGenero, packagesDir, webcomponentsDir, jarsDir string, installedWC map[string]string) *ValidationResult {
 	result := &ValidationResult{}
 
 	// Schema version check.
@@ -920,17 +920,34 @@ func (lf *LockFile) Validate(root *manifest.Manifest, currentGenero, packagesDir
 		}
 	}
 
-	// Webcomponent presence check — a locked webcomponent package is
-	// considered installed if the webcomponents directory exists and is
-	// non-empty (the publisher controls the COMPONENTTYPE subdir names,
-	// not the package name, so we can only verify that *some* extraction
-	// happened — Phase 5 may persist the per-package component list).
+	// Webcomponent presence check. A web component leaves no manifest on disk —
+	// the publisher's is deliberately not extracted, since several widgets would
+	// collide on it — so this cannot work the way the BDL check does. Two things
+	// are required, and both are needed:
+	//
+	//   - the webcomponents directory exists and is non-empty, which catches a
+	//     fresh checkout, and a store whose webcomponents/ was deleted while the
+	//     ownership sidecar NEXT TO it survived;
+	//   - installedWC names the locked version for this package.
+	//
+	// installedWC comes from the installer's ownership sidecar and is passed in
+	// rather than read here, so that file's format stays known to one package
+	// (see Installer.installedWebcomponents). A nil map means the caller cannot
+	// observe the store, so only the directory check applies.
+	//
+	// Checking the version is what stops a pulled widget bump being a silent
+	// no-op: until it did, a replay only asked whether *some* extraction had
+	// ever happened, so "Nothing to install" was reported over a stale bundle
+	// (GIS-579).
 	if webcomponentsDir != "" {
+		entries, err := os.ReadDir(webcomponentsDir)
+		empty := err != nil || len(entries) == 0
 		for _, wc := range lf.Webcomponents {
-			// Treat a totally empty webcomponents directory as "all WC
-			// packages missing" so a fresh checkout triggers re-install.
-			entries, err := os.ReadDir(webcomponentsDir)
-			if err != nil || len(entries) == 0 {
+			if empty {
+				result.MissingWebcomponents = append(result.MissingWebcomponents, wc.Name)
+				continue
+			}
+			if installedWC != nil && installedWC[wc.Name] != wc.Version {
 				result.MissingWebcomponents = append(result.MissingWebcomponents, wc.Name)
 			}
 		}

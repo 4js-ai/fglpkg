@@ -795,8 +795,26 @@ func cmdInstall(args []string) error {
 		}
 	}
 	// A global tool install writes nothing to the current directory — neither the
-	// manifest here nor (via SkipLock below) a lock file (GIS-565).
+	// manifest here nor (via SkipLock below) a lock file (GIS-565), so there is
+	// nothing to snapshot or undo for one.
+	var snapshot *projectSnapshot
+	installed := false
 	if !globalToolInstall {
+		// Captured BEFORE the save: if the install fails, the project must not
+		// be left declaring a version it never got (GIS-579).
+		// "." matches m.Save(".") just below; the lock lands in projectDir.
+		snapshot = snapshotProject(".", projectDir)
+		// Deferred with a success flag rather than undone at each failure
+		// branch: the contract is that a failed `install <pkg>` changes
+		// nothing, and there are several ways out between here and the end —
+		// the repository rebuild, the preinstall hook, the install itself. A
+		// restore written at one of them covers only that one, and the next
+		// `return err` added below would silently not be covered.
+		defer func() {
+			if !installed {
+				snapshot.restore()
+			}
+		}()
 		if err := m.Save("."); err != nil {
 			return err
 		}
@@ -824,6 +842,9 @@ func cmdInstall(args []string) error {
 	if err := inst.InstallAllWithOptions(m, projectDir, true, instOpts); err != nil {
 		return err
 	}
+	// The package is in the store and the lock describes it, so the project's
+	// files are now true and must survive whatever the post-install hook does.
+	installed = true
 	return runHook(m, manifest.HookPostInstall, projectDir)
 }
 
@@ -860,7 +881,7 @@ func checkFrozen(m *manifest.Manifest, projectDir string) error {
 	if err != nil {
 		return fmt.Errorf("--frozen: cannot read %s: %w", lockfile.Filename, err)
 	}
-	if vr := lf.Validate(m, "", "", "", ""); vr.NeedsResolve() {
+	if vr := lf.Validate(m, "", "", "", "", nil); vr.NeedsResolve() {
 		return fmt.Errorf("--frozen: %s is out of date with %s — %s.\n"+
 			"  Run 'fglpkg install' (or 'fglpkg update') and commit the updated lock.",
 			lockfile.Filename, manifest.Filename, vr.StaleReason())

@@ -555,7 +555,7 @@ func (i *Installer) InstallAllWithOptions(m *manifest.Manifest, projectDir strin
 			if err := lf.CheckRegistries(i.configuredRegistries); err != nil {
 				return err
 			}
-			vr := lf.Validate(m, gv.String(), i.packagesDir, i.webcomponentsDir, i.jarsDir)
+			vr := lf.Validate(m, gv.String(), i.packagesDir, i.webcomponentsDir, i.jarsDir, i.installedWebcomponents())
 			if vr.NeedsResolve() {
 				fmt.Printf("Lock file is stale (%s) — re-resolving...\n", vr.StaleReason())
 			} else {
@@ -1115,7 +1115,7 @@ func (i *Installer) installBDL(info *registry.PackageInfo) error {
 	wcInstalled = append(wcInstalled, wcSettings...)
 	// Track any webcomponent bundle this mixed package routed into the shared
 	// webcomponents dir so `remove` can prune it too (GIS-372).
-	if err := recordWCOwnership(i.webcomponentsDir, info.Name, wcInstalled); err != nil {
+	if err := recordWCOwnership(i.webcomponentsDir, info.Name, info.Version, wcInstalled); err != nil {
 		return err
 	}
 
@@ -1175,7 +1175,8 @@ func (i *Installer) installWebcomponent(info *registry.PackageInfo) error {
 	if err != nil {
 		return fmt.Errorf("cannot read manifest from zip: %w", err)
 	}
-	installed, err := extractWebcomponentZip(tmpName, i.webcomponentsDir, componentTypes)
+	installed, err := extractWebcomponentZip(tmpName, i.webcomponentsDir, componentTypes,
+		wcOwnedBy(i.webcomponentsDir, info.Name))
 	if err != nil {
 		return err
 	}
@@ -1188,7 +1189,7 @@ func (i *Installer) installWebcomponent(info *registry.PackageInfo) error {
 	installed = append(installed, wcSettings...)
 	// Record which files this package installed so `remove` can prune them
 	// without deleting files a still-installed package shares (GIS-372).
-	return recordWCOwnership(i.webcomponentsDir, info.Name, installed)
+	return recordWCOwnership(i.webcomponentsDir, info.Name, info.Version, installed)
 }
 
 // InstallJar downloads and verifies a Java JAR into the jars directory.
@@ -1988,7 +1989,13 @@ func extractZip(zipPath, destDir string) error {
 //   - a file already present with DIFFERENT content is a hard conflict — the
 //     install aborts naming every clash and touches nothing, instead of
 //     silently clobbering or dropping it (GIS-298).
-func extractWebcomponentZip(zipPath, destDir string, componentTypes []string) ([]string, error) {
+//
+// ownedPaths is the set of slash-relative paths under destDir that the package
+// being installed already owns, from the ownership sidecar. Those are its own
+// previous files — the ones a widget reinstalls on every version — so they are
+// never mistaken for a different package's and never reported as a clash
+// (GIS-579). Pass nil for a package that owns nothing yet.
+func extractWebcomponentZip(zipPath, destDir string, componentTypes []string, ownedPaths map[string]bool) ([]string, error) {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open zip %s: %w", zipPath, err)
@@ -2034,9 +2041,20 @@ func extractWebcomponentZip(zipPath, destDir string, componentTypes []string) ([
 	// disk, so a clash aborts without leaving a partial install. Files under
 	// an owned COMPONENTTYPE dir are excluded: that dir is cleared in pass 2,
 	// so its current contents are this package's own stale files, not a clash.
+	//
+	// So are files the ownership sidecar attributes to THIS package. A widget
+	// that ships anything outside its COMPONENTTYPE dirs — a BDL wrapper, docs,
+	// examples — reinstalls those paths on every version, and without this the
+	// check could not tell its own previous files from another package's: every
+	// such widget refused to move to another version, reporting a clash whose
+	// only named package was itself (GIS-579). The sidecar is exactly the
+	// record needed, and recordWCOwnership has been writing it all along.
 	var conflicts []string
 	for _, e := range entries {
 		if e.f.FileInfo().IsDir() || ownedTypes[e.top] {
+			continue
+		}
+		if ownedPaths[filepath.ToSlash(e.clean)] {
 			continue
 		}
 		target := filepath.Join(destDir, e.clean)

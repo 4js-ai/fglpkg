@@ -151,7 +151,7 @@ func TestPruneToPlanKeepsMixedPackageWebcomponents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extractZipRouted: %v", err)
 	}
-	if err := recordWCOwnership(inst.webcomponentsDir, "chart-3d", wcInstalled); err != nil {
+	if err := recordWCOwnership(inst.webcomponentsDir, "chart-3d", "1.0.0", wcInstalled); err != nil {
 		t.Fatalf("recordWCOwnership: %v", err)
 	}
 

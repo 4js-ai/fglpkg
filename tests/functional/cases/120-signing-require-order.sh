@@ -40,8 +40,13 @@ _req_leaves_nothing_behind() {
   assert_failure || return 1
   assert_no_file ".fglpkg/packages/demo-pkg/fglpkg.json" || return 1
   assert_no_file "fglpkg-lock.json" || return 1
+  # The project's OWN manifest too. This directory had no fglpkg.json before
+  # the run, and `install <pkg>` generates one as it adds the dependency — so
+  # until the add path learned to roll back (GIS-579), a refused install still
+  # left a project behind declaring the package it had just refused.
+  assert_no_file "fglpkg.json" || return 1
 }
-it "a refused install leaves no package on disk and no lock file" \
+it "a refused install leaves no package, no lock and no project behind" \
   _req_leaves_nothing_behind
 
 # The graph shape resolves from the manifest instead of adding a package, so it

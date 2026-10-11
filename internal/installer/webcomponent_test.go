@@ -119,10 +119,10 @@ func TestExtractWebcomponentZipSharedTreeNoClobber(t *testing.T) {
 		"examples/grid_demo.4gl":       "MAIN END MAIN\n",
 	})
 
-	if _, err := extractWebcomponentZip(mapZip, wcDir, []string{"Map"}); err != nil {
+	if _, err := extractWebcomponentZip(mapZip, wcDir, []string{"Map"}, nil); err != nil {
 		t.Fatalf("install fjs-map: %v", err)
 	}
-	if _, err := extractWebcomponentZip(gridZip, wcDir, []string{"DataGrid"}); err != nil {
+	if _, err := extractWebcomponentZip(gridZip, wcDir, []string{"DataGrid"}, nil); err != nil {
 		t.Fatalf("install fjs-data-grid: %v", err)
 	}
 
@@ -151,7 +151,7 @@ func TestExtractWebcomponentZipDedupIdentical(t *testing.T) {
 			name + "/x.html":   "<" + name + "/>",
 			"docs/LICENSE.txt": shared,
 		})
-		if _, err := extractWebcomponentZip(z, wcDir, []string{name}); err != nil {
+		if _, err := extractWebcomponentZip(z, wcDir, []string{name}, nil); err != nil {
 			t.Fatalf("install %s: %v", name, err)
 		}
 	}
@@ -185,10 +185,10 @@ func TestExtractWebcomponentZipConflictErrors(t *testing.T) {
 		"docs/README.md": "SECOND\n", // same path, different content → conflict
 	})
 
-	if _, err := extractWebcomponentZip(first, wcDir, []string{"First"}); err != nil {
+	if _, err := extractWebcomponentZip(first, wcDir, []string{"First"}, nil); err != nil {
 		t.Fatalf("install first: %v", err)
 	}
-	_, err := extractWebcomponentZip(second, wcDir, []string{"Second"})
+	_, err := extractWebcomponentZip(second, wcDir, []string{"Second"}, nil)
 	if err == nil {
 		t.Fatal("expected a conflict error installing second, got nil")
 	}
@@ -225,10 +225,10 @@ func TestExtractWebcomponentZipReinstallCleansOwned(t *testing.T) {
 		"W/W.html":    "<w2/>",
 	})
 
-	if _, err := extractWebcomponentZip(v1, wcDir, []string{"W"}); err != nil {
+	if _, err := extractWebcomponentZip(v1, wcDir, []string{"W"}, nil); err != nil {
 		t.Fatalf("install v1: %v", err)
 	}
-	if _, err := extractWebcomponentZip(v2, wcDir, []string{"W"}); err != nil {
+	if _, err := extractWebcomponentZip(v2, wcDir, []string{"W"}, nil); err != nil {
 		t.Fatalf("reinstall v2: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(wcDir, "W", "old.html")); err == nil {
