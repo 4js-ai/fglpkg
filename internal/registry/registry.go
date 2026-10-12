@@ -1022,7 +1022,7 @@ func majorOf(gv *genero.Version) string {
 //
 // "webcomponent" matches every major: those packages ship browser assets, not
 // p-code. "default" is the legacy single-build layout and likewise serves any
-// major.
+// major. See UniversalVariant.
 func VariantsSupport(variants []string, major string) bool {
 	if variants == nil {
 		return true
@@ -1032,11 +1032,24 @@ func VariantsSupport(variants []string, major string) bool {
 	}
 	want := "genero" + major
 	for _, v := range variants {
-		if v == want || v == "webcomponent" || v == "default" {
+		if v == want || UniversalVariant(v) {
 			return true
 		}
 	}
 	return false
+}
+
+// UniversalVariant reports whether a build tag serves every Genero major.
+// "webcomponent" packages ship browser assets rather than p-code, and "default"
+// is the legacy single-build layout.
+//
+// Exported because `search` renders this distinction in its GENERO column and
+// must not disagree with VariantsSupport about it — a column naming majors the
+// grader then ignores is worse than one that says it cannot narrow them down.
+// A second copy kept in step by a comment is the drift GIS-574 introduced
+// Runnable to remove.
+func UniversalVariant(v string) bool {
+	return v == "webcomponent" || v == "default"
 }
 
 // DescribeBuilds phrases what one version publishes, e.g.

@@ -33,6 +33,7 @@ import (
 	"github.com/4js-mikefolcher/fglpkg/internal/oauth"
 	"github.com/4js-mikefolcher/fglpkg/internal/provider"
 	"github.com/4js-mikefolcher/fglpkg/internal/registry"
+	"github.com/4js-mikefolcher/fglpkg/internal/resolver"
 	"github.com/4js-mikefolcher/fglpkg/internal/selfupdate"
 	"github.com/4js-mikefolcher/fglpkg/internal/semver"
 	"github.com/4js-mikefolcher/fglpkg/internal/signing"
@@ -1714,10 +1715,35 @@ func cmdSearch(args []string) error {
 			description: r.Description,
 			deprecated:  r.Deprecated,
 			movedTo:     r.MovedTo,
+			versions:    registryCandidates,
 		})
 	}
 	printSearchTable(rows, target, false)
 	return nil
+}
+
+// registryCandidates lists a package's versions with their compatibility
+// signals, for the single-registry step-down check. It is the same call
+// registry.Resolve makes before choosing a version, so search confirms a ✗
+// against exactly the candidate list install would resolve from.
+func registryCandidates(name string) ([]resolver.CandidateVersion, error) {
+	vl, err := registry.FetchVersionList(name)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]resolver.CandidateVersion, 0, len(vl.VersionEntries))
+	for _, ve := range vl.VersionEntries {
+		v, err := semver.Parse(ve.Version)
+		if err != nil {
+			continue // a non-semver tag is not installable either
+		}
+		out = append(out, resolver.CandidateVersion{
+			Version:          v,
+			GeneroConstraint: ve.GeneroConstraint,
+			Variants:         ve.Variants,
+		})
+	}
+	return out, nil
 }
 
 // resolveSearchTarget resolves the Genero version used to grade search results.
@@ -1787,57 +1813,65 @@ func gradeCompat(target *genero.Version, constraint string, variants []string) s
 	return "✗"
 }
 
-// universalVariant reports whether a build tag serves every Genero major.
-// "webcomponent" packages ship browser assets rather than p-code, and "default"
-// is the legacy single-build layout. Kept in step with registry.VariantsSupport,
-// which is what actually decides installability — a GENERO column naming majors
-// that the grader then ignores is worse than one that admits it cannot narrow
-// them down.
-func universalVariant(v string) bool {
-	return v == "webcomponent" || v == "default"
-}
-
-// displayGenero renders the GENERO column.
+// displayGenero renders the GENERO column: the signal that DECIDED this row.
 //
-// A declared constraint wins when there is one: it carries minimum-patch detail
-// a variant list cannot express (qrcode's ">=4.1.3 <7.0.0" is strictly better
-// information than "4, 5, 6"). Otherwise the published build majors stand in,
-// which is what makes the column informative for the packages that declare
-// nothing.
+// A declared constraint is preferred while both signals agree, because it
+// carries minimum-patch detail a build list cannot express (qrcode's
+// ">=4.1.3 <7.0.0" is strictly better information than "4, 5, 6"). When they
+// disagree, showing the constraint would contradict the verdict printed beside
+// it — "^4.0.0 ✗" on Genero 4 reads as a bug — so the builds, which are what
+// ruled the package out, are shown instead.
 //
-//	"-"       the provider reports neither signal — unknown
+//	"-"       neither signal reported — unknown
 //	"none"    builds reported, and there are none: nothing to install
 //	"any"     a build that serves every major (webcomponent / legacy default)
 //	"4, 5, 6" the majors with a build
-func displayGenero(constraint string, variants []string) string {
-	// "No builds at all" outranks a declared constraint, which is the one case
-	// where showing the constraint would contradict the row's own verdict: the
-	// grader marks this ✗ whatever the range says, and a column reading
-	// "^4.0.0 ✗" next to it reads as a bug rather than as an unfinished publish.
-	if variants != nil && len(variants) == 0 {
-		return "none"
-	}
-	if constraint != "" {
+//	"foo"     build tags this fglpkg does not recognise, shown verbatim
+func displayGenero(target *genero.Version, constraint string, variants []string) string {
+	if constraint != "" && !buildsDecided(target, constraint, variants) {
 		return constraint
 	}
 	if variants == nil {
 		return "-"
 	}
+	if len(variants) == 0 {
+		return "none"
+	}
 	majors := make([]string, 0, len(variants))
+	other := make([]string, 0, len(variants))
 	for _, v := range variants {
-		if universalVariant(v) {
+		if registry.UniversalVariant(v) {
 			return "any"
 		}
 		if m := strings.TrimPrefix(v, "genero"); m != v && m != "" {
 			majors = append(majors, m)
+			continue
 		}
+		other = append(other, v)
 	}
 	if len(majors) == 0 {
-		// Only tags we do not recognise. Saying "none" would claim they are
-		// unusable and "any" would vouch for them; neither is known.
-		return "-"
+		// Only tags we do not recognise. registry.VariantsSupport has already
+		// read them as "no build for this major", so the row's verdict is ✗ and
+		// a "-" beside it would claim the opposite — that nothing is known.
+		// Showing them verbatim explains the ✗ without vouching for them.
+		return strings.Join(other, ", ")
 	}
 	return strings.Join(majors, ", ")
+}
+
+// buildsDecided reports whether the published builds, rather than the declared
+// constraint, are what settled this row: the constraint admits the running
+// Genero version and the builds do not. It is the one case where a declared
+// constraint is the wrong thing to show.
+func buildsDecided(target *genero.Version, constraint string, variants []string) bool {
+	if target == nil || variants == nil {
+		return false
+	}
+	ok, err := target.Satisfies(constraint)
+	if err != nil || !ok {
+		return false // the constraint ruled, and explains the row itself
+	}
+	return !registry.VariantsSupport(variants, target.MajorString())
 }
 
 // searchRow is one line of the annotated search table. source is empty in
@@ -1852,6 +1886,19 @@ type searchRow struct {
 	deprecated  bool
 	movedTo     string
 	source      string
+	// genero and grade are the rendered GENERO cell and verdict, filled in by
+	// gradeSearchRows. They are stored rather than computed at print time
+	// because the step-down check can move a row onto a different version, and
+	// a cell recomputed from the row's original fields would then disagree with
+	// the version beside it.
+	genero string
+	grade  string
+	// versions lists this package's versions with their compatibility signals,
+	// from the repository this row came from. nil skips the step-down check.
+	versions func(name string) ([]resolver.CandidateVersion, error)
+	// latest is the version the listing reported, set only when the step-down
+	// moved this row onto an older one.
+	latest string
 }
 
 // searchRowFormat builds the Printf format string for one table line. Columns
@@ -1879,13 +1926,15 @@ func searchRowFormat(generoWidth int, showStatus, showSource bool) string {
 // column appears only when at least one row is deprecated, so the common
 // all-live listing stays narrow.
 func printSearchTable(rows []searchRow, target *genero.Version, showSource bool) {
+	gradeSearchRows(rows, target)
+
 	showStatus := false
 	generoWidth := 12 // floor: keeps short constraint lists looking as before
 	for _, r := range rows {
 		if r.deprecated {
 			showStatus = true
 		}
-		if w := len(displayGenero(r.constraint, r.variants)); w > generoWidth {
+		if w := len(r.genero); w > generoWidth {
 			generoWidth = w
 		}
 	}
@@ -1907,7 +1956,7 @@ func printSearchTable(rows []searchRow, target *genero.Version, showSource bool)
 	fmt.Printf(format, divider...)
 
 	for _, r := range rows {
-		vals := []any{r.name, r.version, displayGenero(r.constraint, r.variants), gradeCompat(target, r.constraint, r.variants)}
+		vals := []any{r.name, searchDisplayVersion(r), r.genero, r.grade}
 		if showStatus {
 			vals = append(vals, searchDeprecatedStatus(r.deprecated, r.movedTo))
 		}
@@ -1916,6 +1965,38 @@ func printSearchTable(rows []searchRow, target *genero.Version, showSource bool)
 		}
 		vals = append(vals, r.description)
 		fmt.Printf(format, vals...)
+	}
+	printStepDownNote(rows, target)
+}
+
+// searchDisplayVersion marks a version the step-down moved the row onto, so the
+// VERSION column never silently stops meaning "the latest published version".
+// The marker is ASCII: the column is padded with %-12s, which counts bytes, and
+// a multi-byte glyph would shift every later column on that row.
+func searchDisplayVersion(r searchRow) string {
+	if r.latest == "" {
+		return r.version
+	}
+	return r.version + "*"
+}
+
+// printStepDownNote explains the * marks, naming each package's latest version
+// so the row's original reading is not lost. It follows the collision note's
+// shape: nothing is printed when nothing was stepped down.
+func printStepDownNote(rows []searchRow, target *genero.Version) {
+	var stepped []searchRow
+	for _, r := range rows {
+		if r.latest != "" {
+			stepped = append(stepped, r)
+		}
+	}
+	if len(stepped) == 0 {
+		return
+	}
+	fmt.Printf("\n* shows the newest version that runs on Genero %s, not the latest published:\n", target)
+	for _, r := range stepped {
+		fmt.Printf("    %s — latest is %s, which does not run here; `fglpkg install %s` gives you %s.\n",
+			r.name, r.latest, r.name, r.version)
 	}
 }
 
@@ -1957,9 +2038,12 @@ func searchAcrossProviders(rs *provider.RepositorySet, term string, all bool, ta
 		description string
 		constraint  string
 		variants    []string // published build tags; nil when the provider reports none
-		deprecated  bool     // package-level deprecation, from the highest-priority source
-		movedTo     string   // successor slug when the deprecation is a relocation
-		sources     []string // every repo the name appears in, priority order
+		// versions is the highest-priority source's version lister, so a
+		// step-down confirms a ✗ against the repository install would route to.
+		versions   func(name string) ([]resolver.CandidateVersion, error)
+		deprecated bool     // package-level deprecation, from the highest-priority source
+		movedTo    string   // successor slug when the deprecation is a relocation
+		sources    []string // every repo the name appears in, priority order
 	}
 	var order []string
 	byName := map[string]*merged{}
@@ -1985,6 +2069,7 @@ func searchAcrossProviders(rs *provider.RepositorySet, term string, all bool, ta
 				description: r.Description,
 				constraint:  r.GeneroConstraint,
 				variants:    r.Variants,
+				versions:    p.FetchVersions,
 				deprecated:  r.Deprecated,
 				movedTo:     r.MovedTo,
 				sources:     []string{p.Name()},
@@ -2021,6 +2106,7 @@ func searchAcrossProviders(rs *provider.RepositorySet, term string, all bool, ta
 			version:     m.version,
 			constraint:  m.constraint,
 			variants:    m.variants,
+			versions:    m.versions,
 			description: m.description,
 			deprecated:  m.deprecated,
 			movedTo:     m.movedTo,

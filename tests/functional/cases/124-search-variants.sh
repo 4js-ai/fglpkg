@@ -78,6 +78,97 @@ _variants_grade_on_genero4() {
 }
 it "search grades each result from the builds that exist" _variants_grade_on_genero4
 
+# The listing names ONE version — the latest — but `install` installs the newest
+# version that RUNS, stepping down past the ones that cannot (GIS-574). A
+# package whose latest version dropped a Genero major therefore graded ✗ while
+# `install` succeeded with an older version. `fglunit` is that shape in the
+# registry today: 1.0.1 publishes genero6 only, 1.0.0 publishes all three.
+#
+# The fixture ships both versions as real zips, so the install at the end is a
+# genuine one — the whole point is that search and install must give the same
+# answer, and only an actual install proves it.
+_stepdown_fixtures() {  # _stepdown_fixtures <dir>
+  local dir="$1"; mkdir -p "$dir"
+  mock_build_fixtures "$dir" || return 1
+
+  local build; build="$(mktemp -d "$_SANDBOX_ROOT/sd.XXXXXX")"
+  (
+    cd "$build"
+    printf 'stub' > mod.42m
+    cat > fglpkg.json <<'EOF'
+{ "name":"stepdown","version":"1.0.0","description":"latest dropped genero4",
+  "license":"MIT","author":"fglpkg tests","files":["*.42m"] }
+EOF
+    "$FGLPKG" pack -o "$dir/stepdown-1.0.0.zip" </dev/null >/dev/null 2>&1 || exit 1
+    sed 's/"version":"1.0.0"/"version":"1.0.1"/' fglpkg.json > f2 && mv f2 fglpkg.json
+    "$FGLPKG" pack -o "$dir/stepdown-1.0.1.zip" </dev/null >/dev/null 2>&1 || exit 1
+  ) || { _diag "_stepdown_fixtures: pack failed"; return 1; }
+
+  python3 - "$dir/packages.json" <<'PY2' || return 1
+import json, sys
+path = sys.argv[1]
+with open(path) as fh:
+    doc = json.load(fh)
+doc["packages"].append({
+    "slug": "stepdown", "name": "stepdown",
+    "description": "latest dropped genero4", "genero": "",
+    "owner": {"partner_id": "mock", "name": "fglpkg tests"},
+    "versions": [
+        {"version": "1.0.0", "genero": "", "author": "fglpkg tests", "license": "MIT",
+         "artifacts": [{"variant": v, "zip": "stepdown-1.0.0.zip"}
+                       for v in ("genero4", "genero5", "genero6")]},
+        {"version": "1.0.1", "genero": "", "author": "fglpkg tests", "license": "MIT",
+         "artifacts": [{"variant": "genero6", "zip": "stepdown-1.0.1.zip"}]},
+    ],
+})
+with open(path, "w") as fh:
+    json.dump(doc, fh, indent=2)
+PY2
+}
+
+_variants_stepdown() {
+  local fx; fx="$(mktemp -d "$_SANDBOX_ROOT/fxsd.XXXXXX")"
+  _stepdown_fixtures "$fx" || return 1
+  mock_registry_start "$fx" || return 1
+
+  run search stepdown --genero 4.01.12
+  assert_success || return 1
+
+  # Every cell describes the version install would hand over, marked * because
+  # it is not the latest published.
+  assert_match 'stepdown +1\.0\.0\* +4, 5, 6 +✓' || return 1
+  assert_contains "* shows the newest version that runs on Genero 4.01.12" || return 1
+  assert_contains "latest is 1.0.1" || return 1
+
+  # The claim the row makes, carried out. A ✓ search must be an install that
+  # works, and on the version the row named. `install` has no --genero flag, so
+  # the runtime is set the way a real Genero 4 machine would report it; the
+  # export is confined to this test's subshell.
+  export FGLPKG_GENERO_VERSION=4.01.12
+  mkdir -p proj && cd proj || return 1
+  run init --yes
+  assert_success || return 1
+  run install stepdown
+  assert_success || return 1
+  assert_contains "stepdown@1.0.0" || return 1
+  assert_file_contains fglpkg-lock.json '"version": "1.0.0"' || return 1
+}
+it "a ✗ on the latest version steps down to the one install gives you" _variants_stepdown
+
+# The other direction: on Genero 6 the latest version runs, so nothing steps
+# down, no row is marked, and the note stays off the output entirely.
+_variants_no_stepdown_when_latest_runs() {
+  local fx; fx="$(mktemp -d "$_SANDBOX_ROOT/fxsd.XXXXXX")"
+  _stepdown_fixtures "$fx" || return 1
+  mock_registry_start "$fx" || return 1
+
+  run search stepdown --genero 6.00.01
+  assert_success || return 1
+  assert_match 'stepdown +1\.0\.1 +6 +✓' || return 1
+  assert_not_contains "shows the newest version that runs" || return 1
+}
+it "nothing is marked when the latest version already runs" _variants_no_stepdown_when_latest_runs
+
 _variants_follow_the_target() {
   local fx; fx="$(mktemp -d "$_SANDBOX_ROOT/fxv.XXXXXX")"
   _variants_fixtures "$fx" || return 1

@@ -159,39 +159,84 @@ func TestGradeCompatMatchesInstall(t *testing.T) {
 	}
 }
 
+// TestDisplayGenero pins the column to one rule: show the signal that DECIDED
+// the row. A constraint is preferred while both agree, because it is the more
+// precise of the two; when they disagree it would contradict the verdict
+// printed beside it, so the builds are shown instead.
 func TestDisplayGenero(t *testing.T) {
+	v4 := genero.MustParse("4.01.12")
 	cases := []struct {
 		name       string
+		target     *genero.Version
 		constraint string
 		variants   []string
 		want       string
 	}{
-		// A declared constraint carries minimum-patch detail a build list
-		// cannot express, so it wins even when both are present.
-		{"declared constraint wins", ">=4.1.3 <7.0.0", []string{"genero4", "genero5", "genero6"}, ">=4.1.3 <7.0.0"},
-		{"neither signal", "", nil, "-"},
-		{"reported and empty", "", []string{}, "none"},
-		// The one case where a declared constraint does NOT win: there is
-		// nothing to install, so showing a range the grader then marks ✗ would
-		// read as a bug rather than as an unfinished publish.
-		{"no builds outranks a declared constraint", "^4.0.0", []string{}, "none"},
-		{"build majors", "", []string{"genero4", "genero5", "genero6"}, "4, 5, 6"},
-		{"single major", "", []string{"genero6"}, "6"},
-		{"web component serves every major", "", []string{"webcomponent"}, "any"},
-		{"legacy default serves every major", "", []string{"default"}, "any"},
+		// Both agree. The constraint carries a minimum patch level a list of
+		// majors cannot express, so it wins.
+		{"declared constraint wins when both agree", &v4, ">=4.1.3 <7.0.0", []string{"genero4", "genero5", "genero6"}, ">=4.1.3 <7.0.0"},
+		// The constraint itself rules the row out and explains it.
+		{"a constraint that excludes you is shown", &v4, "^6.0.0", []string{"genero6"}, "^6.0.0"},
+		// The constraint admits Genero 4 but no genero4 build exists, so the
+		// builds are what produced the ✗. Showing "^4.0.0 ✗" would read as a bug.
+		{"the builds are shown when they are what said no", &v4, "^4.0.0", []string{"genero5", "genero6"}, "5, 6"},
+		{"no builds outranks a constraint that admits you", &v4, "^4.0.0", []string{}, "none"},
+		{"neither signal", &v4, "", nil, "-"},
+		{"reported and empty", &v4, "", []string{}, "none"},
+		{"build majors", &v4, "", []string{"genero4", "genero5", "genero6"}, "4, 5, 6"},
+		{"single major", &v4, "", []string{"genero6"}, "6"},
+		{"web component serves every major", &v4, "", []string{"webcomponent"}, "any"},
+		{"legacy default serves every major", &v4, "", []string{"default"}, "any"},
 		// Naming "6" here would understate it: VariantsSupport would install
 		// this on Genero 4 too, and the column must not contradict the verdict.
-		{"a universal build among majors", "", []string{"genero6", "webcomponent"}, "any"},
-		// Nothing recognisable: "none" would claim they are unusable, "any"
-		// would vouch for them. Neither is known.
-		{"unrecognised tags only", "", []string{"mystery"}, "-"},
+		{"a universal build among majors", &v4, "", []string{"genero6", "webcomponent"}, "any"},
+		// VariantsSupport has already read these as "no build for this major",
+		// so the verdict beside them is ✗. "-" would claim nothing is known;
+		// showing them verbatim explains the ✗ without vouching for them.
+		{"unrecognised tags are shown verbatim", &v4, "", []string{"mystery"}, "mystery"},
+		{"several unrecognised tags", &v4, "", []string{"foo", "bar"}, "foo, bar"},
+		// With no runtime resolved nothing has been decided, so the more
+		// precise signal is shown and the row grades "?".
+		{"no target keeps the constraint", nil, "^4.0.0", []string{"genero6"}, "^4.0.0"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := displayGenero(c.constraint, c.variants); got != c.want {
-				t.Errorf("displayGenero(%q, %v) = %q, want %q", c.constraint, c.variants, got, c.want)
+			if got := displayGenero(c.target, c.constraint, c.variants); got != c.want {
+				t.Errorf("displayGenero(%v, %q, %v) = %q, want %q",
+					c.target, c.constraint, c.variants, got, c.want)
 			}
 		})
+	}
+}
+
+// TestDisplayGeneroNeverContradictsTheVerdict is the rule behind the cases
+// above, asserted directly: a row whose verdict is ✗ must not show a GENERO
+// cell that reads as "unknown", and a ✓ row must not show one that reads as
+// "nothing to install". The column and the marker are the two halves of one
+// sentence, and a reader takes them together.
+func TestDisplayGeneroNeverContradictsTheVerdict(t *testing.T) {
+	v4 := genero.MustParse("4.01.12")
+	variantSets := [][]string{
+		nil, {}, {"genero4"}, {"genero5", "genero6"}, {"webcomponent"},
+		{"default"}, {"genero6", "webcomponent"}, {"mystery"}, {"foo", "bar"},
+	}
+	constraints := []string{"", "^4.0.0", "^6.0.0", ">=4.1.3 <7.0.0", "*"}
+	for _, variants := range variantSets {
+		for _, constraint := range constraints {
+			cell := displayGenero(&v4, constraint, variants)
+			switch gradeCompat(&v4, constraint, variants) {
+			case gradeIncompatible:
+				if cell == "-" {
+					t.Errorf("constraint=%q variants=%v graded ✗ but the column says %q (unknown)",
+						constraint, variants, cell)
+				}
+			case gradeCompatible:
+				if cell == "none" || cell == "-" {
+					t.Errorf("constraint=%q variants=%v graded ✓ but the column says %q",
+						constraint, variants, cell)
+				}
+			}
+		}
 	}
 }
 
@@ -253,12 +298,60 @@ func TestCmdSearchStatusColumnConditional(t *testing.T) {
 	}
 }
 
-// browsePackagesServer returns an httptest server that answers the browse
-// endpoint (`GET /registry/packages?q=…`) with the given listed packages,
-// wrapped in the {"packages":[…],"total":N} envelope registry.Search expects.
+// browsePackagesServer returns an httptest server standing in for a registry:
+// the browse endpoint (`GET /registry/packages?q=…`), wrapped in the
+// {"packages":[…],"total":N} envelope registry.Search expects, and the
+// per-package detail endpoint (`GET /registry/packages/<slug>`) search now
+// consults to confirm a ✗ against the package's other versions.
+//
+// A package may carry a "versions" key — a list of {"version", "genero",
+// "variants"} — to describe more than the one the listing names. Without it the
+// detail view reports exactly the listed version, so a fixture that says
+// nothing about older versions gets a registry where none exist, and the
+// step-down check has nothing to find.
 func browsePackagesServer(t *testing.T, packages []map[string]any) *httptest.Server {
 	t.Helper()
+	detail := func(p map[string]any) map[string]any {
+		raw, ok := p["versions"].([]map[string]any)
+		if !ok {
+			raw = []map[string]any{{
+				"version":  p["latest_version"],
+				"genero":   p["genero"],
+				"variants": p["variants"],
+			}}
+		}
+		versions := make([]map[string]any, 0, len(raw))
+		for _, v := range raw {
+			variants, _ := v["variants"].([]string)
+			artifacts := make([]map[string]any, 0, len(variants))
+			for _, variant := range variants {
+				artifacts = append(artifacts, map[string]any{"variant": variant})
+			}
+			versions = append(versions, map[string]any{
+				"version":   v["version"],
+				"genero":    v["genero"],
+				"status":    "published",
+				"artifacts": artifacts,
+			})
+		}
+		return map[string]any{
+			"slug":           p["slug"],
+			"name":           p["name"],
+			"latest_version": p["latest_version"],
+			"versions":       versions,
+		}
+	}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if slug := strings.TrimPrefix(r.URL.Path, "/registry/packages/"); slug != r.URL.Path && slug != "" {
+			for _, p := range packages {
+				if p["slug"] == slug {
+					_ = json.NewEncoder(w).Encode(detail(p))
+					return
+				}
+			}
+			http.Error(w, `{"error":"Package not found"}`, http.StatusNotFound)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"packages": packages,
 			"total":    len(packages),
@@ -408,6 +501,83 @@ func TestCmdSearchGradesFromPublishedBuilds(t *testing.T) {
 	// The whole point of the ticket: "?" is now the exception, not the rule.
 	if n := strings.Count(out, "?"); n > 2 {
 		t.Errorf("expected at most the header's and oldreg's %q, got %d\n--- output ---\n%s", "?", n, out)
+	}
+}
+
+// TestCmdSearchStepsDownToTheVersionInstallWouldGive is the end-to-end form of
+// the step-down check, with fglunit's real published shape: 1.0.1 ships a
+// genero6 build only, 1.0.0 ships all three. Before this, search answered ✗ on
+// Genero 4 for a package `fglpkg install fglunit` installs without complaint.
+func TestCmdSearchStepsDownToTheVersionInstallWouldGive(t *testing.T) {
+	ts := browsePackagesServer(t, []map[string]any{
+		{"slug": "fglunit", "name": "fglunit", "description": "unit testing",
+			"latest_version": "1.0.1", "owner": map[string]any{"name": "4Js"},
+			"variants": []string{"genero6"},
+			"versions": []map[string]any{
+				{"version": "1.0.1", "genero": "", "variants": []string{"genero6"}},
+				{"version": "1.0.0", "genero": "", "variants": []string{"genero4", "genero5", "genero6"}},
+			}},
+		// No version of this one runs on Genero 4, so its ✗ is confirmed rather
+		// than overturned — and it must not pick up a * marker.
+		{"slug": "odatalib", "name": "odatalib", "description": "OData client",
+			"latest_version": "1.2.0", "owner": map[string]any{"name": "4Js"},
+			"variants": []string{"genero5", "genero6"},
+			"versions": []map[string]any{
+				{"version": "1.2.0", "genero": "", "variants": []string{"genero5", "genero6"}},
+				{"version": "1.1.0", "genero": "", "variants": []string{"genero5"}},
+			}},
+	})
+	t.Setenv("FGLPKG_REGISTRY", ts.URL)
+	t.Setenv("FGLPKG_HOME", t.TempDir())
+
+	out, err := captureStdout(t, func() error {
+		return cmdSearch([]string{"--all", "--genero", "4.01.12"})
+	})
+	if err != nil {
+		t.Fatalf("cmdSearch: %v", err)
+	}
+
+	line := lineContaining(out, "fglunit")
+	for _, want := range []string{"1.0.0*", "4, 5, 6", "✓"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("fglunit row = %q, want %q", line, want)
+		}
+	}
+	if strings.Contains(line, "1.0.1") {
+		t.Errorf("fglunit row = %q, should describe 1.0.0 throughout", line)
+	}
+	// The latest version is not lost — it moves to the note under the table.
+	for _, want := range []string{"* shows the newest version that runs on Genero 4.01.12", "latest is 1.0.1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+
+	odata := lineContaining(out, "odatalib")
+	if !strings.Contains(odata, "✗") || strings.Contains(odata, "*") {
+		t.Errorf("odatalib row = %q, want a confirmed ✗ with no * marker", odata)
+	}
+}
+
+// TestCmdSearchNoNoteWhenNothingSteppedDown keeps the common listing clean: the
+// note is a cost paid only by the rows that needed it.
+func TestCmdSearchNoNoteWhenNothingSteppedDown(t *testing.T) {
+	ts := browsePackagesServer(t, []map[string]any{
+		{"slug": "poiapi", "name": "poiapi", "description": "spreadsheets",
+			"latest_version": "1.9.1", "owner": map[string]any{"name": "4Js"},
+			"variants": []string{"genero4", "genero5", "genero6"}},
+	})
+	t.Setenv("FGLPKG_REGISTRY", ts.URL)
+	t.Setenv("FGLPKG_HOME", t.TempDir())
+
+	out, err := captureStdout(t, func() error {
+		return cmdSearch([]string{"--all", "--genero", "4.01.12"})
+	})
+	if err != nil {
+		t.Fatalf("cmdSearch: %v", err)
+	}
+	if strings.Contains(out, "*") {
+		t.Errorf("unexpected step-down marker or note:\n%s", out)
 	}
 }
 

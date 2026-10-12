@@ -2,6 +2,7 @@ package cli
 
 import (
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/config"
@@ -9,16 +10,29 @@ import (
 	"github.com/4js-mikefolcher/fglpkg/internal/provider"
 	"github.com/4js-mikefolcher/fglpkg/internal/registry"
 	"github.com/4js-mikefolcher/fglpkg/internal/resolver"
+	"github.com/4js-mikefolcher/fglpkg/internal/semver"
 )
 
 // searchStub is a minimal provider.Provider returning canned search results.
+// versions, when set, answers the step-down check's version lookups; fetched
+// records which names this provider was asked about, so a collision can be
+// checked to consult the repository install would route to.
 type searchStub struct {
-	name    string
-	results []registry.SearchResult
+	name     string
+	results  []registry.SearchResult
+	versions map[string][]resolver.CandidateVersion
+	fetched  []string
+	mu       sync.Mutex
 }
 
 func (s *searchStub) Name() string { return s.name }
-func (s *searchStub) FetchVersions(string) ([]resolver.CandidateVersion, error) {
+func (s *searchStub) FetchVersions(name string) ([]resolver.CandidateVersion, error) {
+	s.mu.Lock()
+	s.fetched = append(s.fetched, name)
+	s.mu.Unlock()
+	if v, ok := s.versions[name]; ok {
+		return v, nil
+	}
 	return nil, provider.ErrNotFound
 }
 func (s *searchStub) FetchInfo(string, string, string) (*registry.PackageInfo, error) {
@@ -170,6 +184,66 @@ func TestSearchAcrossProviders_GradesFromPublishedBuilds(t *testing.T) {
 	// are demonstrably from one source rather than merged field by field.
 	if line := lineContaining(out, "utils"); !strings.Contains(line, "gi utils") {
 		t.Errorf("utils row should keep gi's description: %q", line)
+	}
+}
+
+// TestSearchAcrossProviders_StepsDownWithinTheOwningRepository covers the
+// fan-out half of the step-down check. A ✗ is confirmed against the repository
+// the row came from — the one install would route to — so a collided name is
+// never re-graded from a different repository's version history.
+func TestSearchAcrossProviders_StepsDownWithinTheOwningRepository(t *testing.T) {
+	v4 := genero.MustParse("4.01.12")
+	gi := &searchStub{
+		name: "gi",
+		results: []registry.SearchResult{
+			{Name: "utils", LatestVersion: "2.0.0", Description: "gi utils", Variants: []string{"genero6"}},
+		},
+		versions: map[string][]resolver.CandidateVersion{
+			"utils": {
+				{Version: semver.MustParse("1.0.0"), Variants: []string{"genero4", "genero6"}},
+				{Version: semver.MustParse("2.0.0"), Variants: []string{"genero6"}},
+			},
+		},
+	}
+	// acme also carries "utils", at a version that runs here. gi wins on
+	// priority, so acme must never be asked — grading gi's row from acme's
+	// history would describe a package the user is not going to get.
+	acme := &searchStub{
+		name: "acme",
+		results: []registry.SearchResult{
+			{Name: "utils", LatestVersion: "9.9.9", Description: "acme utils", Variants: []string{"genero4"}},
+		},
+		versions: map[string][]resolver.CandidateVersion{
+			"utils": {{Version: semver.MustParse("9.9.9"), Variants: []string{"genero4"}}},
+		},
+	}
+	descs := []config.Registry{
+		{Name: "gi", Type: config.TypeGenero, URL: "https://gi", Priority: 1},
+		{Name: "acme", Type: config.TypeArtifactory, URL: "https://a", RepoKey: "k", Priority: 2},
+	}
+	rs := provider.NewRepositorySet([]provider.Provider{gi, acme}, descs, nil)
+
+	// The term is "x", not "utils": lineContaining would otherwise match the
+	// `Results for "utils"` header before reaching the row.
+	out, err := captureStdout(t, func() error { return searchAcrossProviders(rs, "x", false, &v4, "") })
+	if err != nil {
+		t.Fatalf("searchAcrossProviders: %v", err)
+	}
+
+	line := lineContaining(out, "utils")
+	for _, want := range []string{"1.0.0*", "4, 6", "✓"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("utils row = %q, want %q", line, want)
+		}
+	}
+	if len(gi.fetched) != 1 || gi.fetched[0] != "utils" {
+		t.Errorf("gi fetched %v, want exactly [utils]", gi.fetched)
+	}
+	if len(acme.fetched) != 0 {
+		t.Errorf("acme fetched %v, want nothing — gi owns this row", acme.fetched)
+	}
+	if !strings.Contains(out, "latest is 2.0.0") {
+		t.Errorf("note missing gi's latest version:\n%s", out)
 	}
 }
 
