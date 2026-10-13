@@ -169,6 +169,90 @@ _variants_no_stepdown_when_latest_runs() {
 }
 it "nothing is marked when the latest version already runs" _variants_no_stepdown_when_latest_runs
 
+# The step-down must make the SAME choice `install` makes, and "latest" never
+# resolves to a prerelease (semver.Constraint.Matches skips one unless the
+# constraint names it). A step-down that merely compared versions would announce
+# a beta install does not pick — and where the only runnable version IS a
+# prerelease, it would say ✓ for a package install refuses outright.
+_prerelease_fixtures() {  # _prerelease_fixtures <dir>
+  local dir="$1"; mkdir -p "$dir"
+  mock_build_fixtures "$dir" || return 1
+
+  local build; build="$(mktemp -d "$_SANDBOX_ROOT/pre.XXXXXX")"
+  (
+    cd "$build"
+    printf 'stub' > mod.42m
+    cat > fglpkg.json <<'EOF'
+{ "name":"prerel","version":"1.0.0","description":"a beta sits above the stable",
+  "license":"MIT","author":"fglpkg tests","files":["*.42m"] }
+EOF
+    "$FGLPKG" pack -o "$dir/prerel-1.0.0.zip" </dev/null >/dev/null 2>&1 || exit 1
+  ) || { _diag "_prerelease_fixtures: pack failed"; return 1; }
+
+  python3 - "$dir/packages.json" <<'PY2' || return 1
+import json, sys
+path = sys.argv[1]
+with open(path) as fh:
+    doc = json.load(fh)
+
+def version(v, variants):
+    return {"version": v, "genero": "", "author": "fglpkg tests", "license": "MIT",
+            "artifacts": [{"variant": t, "zip": "prerel-1.0.0.zip"} for t in variants]}
+
+# 2.0.0-beta.1 runs on Genero 4 and outranks 1.0.0 by version order, but
+# "latest" will not select it, so install lands on 1.0.0.
+doc["packages"].append({
+    "slug": "prerel", "name": "prerel", "description": "a beta sits above the stable",
+    "genero": "", "owner": {"partner_id": "mock", "name": "fglpkg tests"},
+    "versions": [version("1.0.0", ["genero4"]),
+                 version("2.0.0-beta.1", ["genero4", "genero6"]),
+                 version("2.0.0", ["genero6"])],
+})
+# Here the ONLY version that runs on Genero 4 is a prerelease, so install has
+# nothing to give and the ✗ must stand.
+doc["packages"].append({
+    "slug": "onlypre", "name": "onlypre", "description": "only a beta runs here",
+    "genero": "", "owner": {"partner_id": "mock", "name": "fglpkg tests"},
+    "versions": [version("1.0.0-beta.1", ["genero4"]),
+                 version("2.0.0", ["genero6"])],
+})
+with open(path, "w") as fh:
+    json.dump(doc, fh, indent=2)
+PY2
+}
+
+_variants_prerelease() {
+  local fx; fx="$(mktemp -d "$_SANDBOX_ROOT/fxpre.XXXXXX")"
+  _prerelease_fixtures "$fx" || return 1
+  mock_registry_start "$fx" || return 1
+
+  run search prerel --genero 4.01.12
+  assert_success || return 1
+  # 1.0.0, not 2.0.0-beta.1, even though the beta runs here and is newer.
+  assert_match 'prerel +1\.0\.0\* +4 +✓' || return 1
+  assert_not_contains "2.0.0-beta.1" || return 1
+
+  run search onlypre --genero 4.01.12
+  assert_success || return 1
+  assert_match 'onlypre +2\.0\.0 +6 +✗' || return 1
+
+  # Both claims, carried out against the real resolver.
+  export FGLPKG_GENERO_VERSION=4.01.12
+  mkdir -p proj && cd proj || return 1
+  run init --yes
+  assert_success || return 1
+
+  run install prerel
+  assert_success || return 1
+  assert_contains "prerel@1.0.0" || return 1
+  assert_file_contains fglpkg-lock.json '"version": "1.0.0"' || return 1
+
+  run install onlypre
+  assert_failure || return 1
+  assert_contains "can run on Genero 4.01.12" || return 1
+}
+it "the step-down skips prereleases, exactly as install does" _variants_prerelease
+
 _variants_follow_the_target() {
   local fx; fx="$(mktemp -d "$_SANDBOX_ROOT/fxv.XXXXXX")"
   _variants_fixtures "$fx" || return 1

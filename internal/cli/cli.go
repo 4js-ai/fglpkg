@@ -1906,7 +1906,7 @@ type searchRow struct {
 // gap after the verdict keeps its single-char column visually distinct. The
 // GENERO width is passed in so a long constraint range (e.g. ">=3.20.00
 // <5.00.00") doesn't spill into the verdict column.
-func searchRowFormat(generoWidth int, showStatus, showSource bool) string {
+func searchRowFormat(versionWidth, generoWidth int, showStatus, showSource bool) string {
 	cols := make([]string, 0, 3)
 	if showStatus {
 		cols = append(cols, "%-24s")
@@ -1915,7 +1915,7 @@ func searchRowFormat(generoWidth int, showStatus, showSource bool) string {
 		cols = append(cols, "%-24s")
 	}
 	cols = append(cols, "%s")
-	return fmt.Sprintf("  %%-28s %%-12s %%-%ds %%s  ", generoWidth) + strings.Join(cols, " ") + "\n"
+	return fmt.Sprintf("  %%-28s %%-%ds %%-%ds %%s  ", versionWidth, generoWidth) + strings.Join(cols, " ") + "\n"
 }
 
 // printSearchTable renders the annotated results table shared by the
@@ -1930,6 +1930,10 @@ func printSearchTable(rows []searchRow, target *genero.Version, showSource bool)
 
 	showStatus := false
 	generoWidth := 12 // floor: keeps short constraint lists looking as before
+	// Same floor, same reason, for VERSION: a long prerelease plus the
+	// step-down marker ("2.0.0-beta.1*") overflows a fixed %-12s and shifts
+	// that row's later columns out of line with every other row.
+	versionWidth := 12
 	for _, r := range rows {
 		if r.deprecated {
 			showStatus = true
@@ -1937,8 +1941,11 @@ func printSearchTable(rows []searchRow, target *genero.Version, showSource bool)
 		if w := len(r.genero); w > generoWidth {
 			generoWidth = w
 		}
+		if w := len(searchDisplayVersion(r)); w > versionWidth {
+			versionWidth = w
+		}
 	}
-	format := searchRowFormat(generoWidth, showStatus, showSource)
+	format := searchRowFormat(versionWidth, generoWidth, showStatus, showSource)
 
 	header := []any{"NAME", "VERSION", "GENERO", "?"}
 	divider := []any{"----", "-------", "------", "-"}

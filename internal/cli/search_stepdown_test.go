@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/genero"
+	"github.com/4js-mikefolcher/fglpkg/internal/registry"
 	"github.com/4js-mikefolcher/fglpkg/internal/resolver"
 	"github.com/4js-mikefolcher/fglpkg/internal/semver"
 )
@@ -77,6 +78,62 @@ func TestStepDownMatchesWhatInstallWouldGive(t *testing.T) {
 // TestStepDownCoversTheConstraintToo: the listing pairs the LATEST version's
 // constraint with the latest version's builds, so a package that tightened its
 // declared range has the same bug through the other signal.
+// TestStepDownSkipsAPrereleaseJustAsInstallDoes: `install <pkg>` resolves
+// "latest" through semver.Constraint.Latest, whose Matches skips a prerelease
+// unless the constraint names one. A step-down that merely compared versions
+// would announce the beta, so search would name a version install does not
+// pick — the exact disagreement this check exists to prevent.
+func TestStepDownSkipsAPrereleaseJustAsInstallDoes(t *testing.T) {
+	v4 := genero.MustParse("4.01.12")
+	rows := []searchRow{{
+		name:     "pre",
+		version:  "2.0.0",
+		variants: []string{"genero6"},
+		versions: candidates(
+			versionSpec{"1.0.0", "", []string{"genero4"}},
+			// Runnable here, and newer than 1.0.0 — but a prerelease, so
+			// "latest" does not resolve to it.
+			versionSpec{"2.0.0-beta.1", "", []string{"genero4", "genero6"}},
+			versionSpec{"2.0.0", "", []string{"genero6"}},
+		),
+	}}
+	gradeSearchRows(rows, &v4)
+
+	if rows[0].version != "1.0.0" {
+		t.Errorf("version = %q, want 1.0.0 — install skips the 2.0.0-beta.1 prerelease",
+			rows[0].version)
+	}
+	if rows[0].grade != gradeCompatible || rows[0].genero != "4" {
+		t.Errorf("grade=%q genero=%q, want ✓ / 4", rows[0].grade, rows[0].genero)
+	}
+}
+
+// TestStepDownRefusesWhenOnlyAPrereleaseRuns is the worse half of the same bug:
+// here the ONLY version that runs is a prerelease, so install refuses outright.
+// A step-down that accepted it would turn a correct ✗ into a ✓ for a package
+// that cannot be installed at all.
+func TestStepDownRefusesWhenOnlyAPrereleaseRuns(t *testing.T) {
+	v4 := genero.MustParse("4.01.12")
+	rows := []searchRow{{
+		name:     "onlypre",
+		version:  "2.0.0",
+		variants: []string{"genero6"},
+		versions: candidates(
+			versionSpec{"1.0.0-beta.1", "", []string{"genero4"}},
+			versionSpec{"2.0.0", "", []string{"genero6"}},
+		),
+	}}
+	gradeSearchRows(rows, &v4)
+
+	if rows[0].grade != gradeIncompatible {
+		t.Errorf("grade = %q, want ✗ — install refuses, nothing stable runs", rows[0].grade)
+	}
+	if rows[0].latest != "" || rows[0].version != "2.0.0" {
+		t.Errorf("version=%q latest=%q, want the row left on 2.0.0 unmarked",
+			rows[0].version, rows[0].latest)
+	}
+}
+
 // TestStepDownTakesTheNewestRunnableNotTheFirst: `install` resolves "latest"
 // to the HIGHEST runnable version, so a search that stopped at the first one it
 // happened to see would name a version install does not give. The list here is
@@ -231,5 +288,62 @@ func TestStepDownWithoutAVersionLister(t *testing.T) {
 	gradeSearchRows(rows, &v4)
 	if rows[0].grade != gradeIncompatible {
 		t.Errorf("grade = %q, want the listing's ✗", rows[0].grade)
+	}
+}
+
+// TestStepDownAgreesWithTheInstallSelector pins the step-down to
+// registry.SelectInstallable over a matrix rather than to a handful of expected
+// strings. Both now call that one function, and this is what notices if a
+// future change gives search its own copy of "newest that works" — the
+// prerelease rule was exactly such a divergence, and it was invisible to tests
+// that only used stable versions.
+func TestStepDownAgreesWithTheInstallSelector(t *testing.T) {
+	v4 := genero.MustParse("4.01.12")
+	sets := [][]versionSpec{
+		{{"1.0.0", "", []string{"genero4"}}, {"2.0.0", "", []string{"genero6"}}},
+		{{"1.0.0", "", []string{"genero4"}}, {"2.0.0-beta.1", "", []string{"genero4"}}, {"2.0.0", "", []string{"genero6"}}},
+		{{"1.0.0-beta.1", "", []string{"genero4"}}, {"2.0.0", "", []string{"genero6"}}},
+		{{"1.0.0", "^3.0.0", []string{"genero4"}}, {"2.0.0", "^4.0.0", []string{"genero4"}}},
+		{{"1.0.0", "", []string{"webcomponent"}}, {"2.0.0", "", []string{"genero6"}}},
+		{{"1.0.0", "", []string{}}, {"2.0.0", "", []string{"genero6"}}},
+		{{"1.0.0", "", nil}},
+	}
+	for _, set := range sets {
+		fetch := candidates(set...)
+		all, _ := fetch("x")
+		want, err := registry.SelectInstallable(all, "latest", &v4)
+		if err != nil {
+			t.Fatalf("SelectInstallable: %v", err)
+		}
+
+		rows := []searchRow{{
+			name:     "x",
+			version:  set[len(set)-1].version, // the listing names the last published
+			variants: set[len(set)-1].variants,
+			versions: fetch,
+		}}
+		gradeSearchRows(rows, &v4)
+
+		// "?" is not a claim. A provider that reports no builds and no
+		// constraint leaves the row unknown, and unknown is allowed to differ
+		// from what install does — it promises nothing in either direction.
+		// Only ✓ and ✗ are assertions, and those must hold.
+		switch rows[0].grade {
+		case gradeUnknown:
+			continue
+		case gradeCompatible:
+			if !want.Found {
+				t.Errorf("%v: search says ✓ but install would refuse", set)
+				continue
+			}
+			if rows[0].version != want.Best.Version.String() {
+				t.Errorf("%v: search names %q, install gives %q",
+					set, rows[0].version, want.Best.Version)
+			}
+		case gradeIncompatible:
+			if want.Found {
+				t.Errorf("%v: search says ✗ but install would give %s", set, want.Best.Version)
+			}
+		}
 	}
 }

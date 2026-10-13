@@ -559,6 +559,54 @@ func TestCmdSearchStepsDownToTheVersionInstallWouldGive(t *testing.T) {
 	}
 }
 
+// TestCmdSearchKeepsColumnsAlignedForALongVersion guards the VERSION column's
+// width: a long version plus the step-down marker overflowed the old fixed
+// %-12s, shifting that one row's GENERO and verdict cells right relative to
+// every other row. Both rows grade ✓, so with a correctly sized column their
+// descriptions start at the same offset.
+//
+// The stepped-down version is stable rather than a prerelease: "latest" never
+// resolves to a prerelease, so one can no longer carry the marker — a long
+// VERSION cell now comes either from a long release or from a listing whose
+// latest_version is itself a prerelease.
+func TestCmdSearchKeepsColumnsAlignedForALongVersion(t *testing.T) {
+	ts := browsePackagesServer(t, []map[string]any{
+		{"slug": "longver", "name": "longver", "description": "LONGDESC",
+			"latest_version": "100.200.3000", "owner": map[string]any{"name": "4Js"},
+			"variants": []string{"genero6"},
+			"versions": []map[string]any{
+				{"version": "100.200.3000", "genero": "", "variants": []string{"genero6"}},
+				{"version": "100.200.2999", "genero": "", "variants": []string{"genero4"}},
+			}},
+		{"slug": "shortver", "name": "shortver", "description": "SHORTDESC",
+			"latest_version": "1.0.0", "owner": map[string]any{"name": "4Js"},
+			"variants": []string{"genero4"}},
+	})
+	t.Setenv("FGLPKG_REGISTRY", ts.URL)
+	t.Setenv("FGLPKG_HOME", t.TempDir())
+
+	out, err := captureStdout(t, func() error {
+		return cmdSearch([]string{"--all", "--genero", "4.01.12"})
+	})
+	if err != nil {
+		t.Fatalf("cmdSearch: %v", err)
+	}
+
+	long := lineContaining(out, "LONGDESC")
+	short := lineContaining(out, "SHORTDESC")
+	if long == "" || short == "" {
+		t.Fatalf("missing rows\n--- output ---\n%s", out)
+	}
+	// The marked version must render in full, not truncated.
+	if !strings.Contains(long, "100.200.2999*") {
+		t.Errorf("long row = %q, want the full marked version", long)
+	}
+	if a, b := strings.Index(long, "LONGDESC"), strings.Index(short, "SHORTDESC"); a != b {
+		t.Errorf("descriptions start at %d and %d — columns are misaligned\n%s\n%s\n%s",
+			a, b, out, long, short)
+	}
+}
+
 // TestCmdSearchNoNoteWhenNothingSteppedDown keeps the common listing clean: the
 // note is a cost paid only by the rows that needed it.
 func TestCmdSearchNoNoteWhenNothingSteppedDown(t *testing.T) {

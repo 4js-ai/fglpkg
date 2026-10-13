@@ -846,7 +846,9 @@ table, as `jsonsteady` is above. Everything else on that row — the GENERO colu
 describes the marked version too.
 
 A `✗` therefore means *no* version of the package runs here, not merely that the newest one
-doesn't.
+doesn't. Prereleases are not candidates — `install` resolves `latest` to the newest stable
+release, so search does too; a beta that happens to run here will not be offered unless you ask
+for it by name.
 
 #### What the GENERO column shows
 

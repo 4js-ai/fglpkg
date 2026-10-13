@@ -5,7 +5,6 @@ import (
 
 	"github.com/4js-mikefolcher/fglpkg/internal/genero"
 	"github.com/4js-mikefolcher/fglpkg/internal/registry"
-	"github.com/4js-mikefolcher/fglpkg/internal/resolver"
 )
 
 // Compatibility markers for the verdict column.
@@ -86,7 +85,7 @@ func confirmIncompatibleRows(rows []searchRow, target *genero.Version) {
 	wg.Wait()
 }
 
-// stepDownRow re-points one condemned row at the newest version that runs here,
+// stepDownRow re-points one condemned row at the version install would pick,
 // leaving it alone when there is none.
 //
 // On a fetch error the provisional grade stands: the listing's answer is what
@@ -102,24 +101,22 @@ func stepDownRow(r *searchRow, target *genero.Version) {
 	if err != nil {
 		return
 	}
-	var best *resolver.CandidateVersion
-	for i := range candidates {
-		if ok, _ := registry.Runnable(target, candidates[i].GeneroConstraint, candidates[i].Variants); !ok {
-			continue
-		}
-		if best == nil || candidates[i].Version.GreaterThan(best.Version) {
-			best = &candidates[i]
-		}
-	}
-	if best == nil {
+	// The same selection `fglpkg install <pkg>` makes, through the same
+	// function: the newest candidate that satisfies "latest" AND runs here.
+	// Comparing versions directly would differ on prereleases — "latest" does
+	// not resolve to a beta — so search would announce a version install skips,
+	// and for a package whose only runnable version is a prerelease it would
+	// say ✓ where install refuses outright.
+	sel, err := registry.SelectInstallable(candidates, "latest", target)
+	if err != nil || !sel.Found {
 		return // nothing runs here: the ✗ was right, and now it is confirmed
 	}
-	if picked := best.Version.String(); picked != r.version {
+	if picked := sel.Best.Version.String(); picked != r.version {
 		r.latest = r.version
 		r.version = picked
 	}
-	r.constraint = best.GeneroConstraint
-	r.variants = best.Variants
+	r.constraint = sel.Best.GeneroConstraint
+	r.variants = sel.Best.Variants
 	r.grade = gradeCompat(target, r.constraint, r.variants)
 	r.genero = displayGenero(target, r.constraint, r.variants)
 }
