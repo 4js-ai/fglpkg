@@ -171,19 +171,11 @@ type constraintSource struct {
 // CandidateVersion pairs a parsed semver version with its Genero constraint
 // and the artifact variants published for it.
 // Exported so test packages can construct fake VersionFetcher responses.
-type CandidateVersion struct {
-	Version          semver.Version
-	GeneroConstraint string
-
-	// Variants lists the artifact variant tags this version publishes
-	// ("genero4", "genero6", "webcomponent", …). It is the ground truth for
-	// Genero compatibility — a version with no build for the running major
-	// cannot be installed however loose its declared constraint is — and most
-	// publishers declare no constraint at all, so this is usually the only
-	// signal available. Empty means the provider does not report variants
-	// (Artifactory, older registries), which is treated as "unknown, allow".
-	Variants []string
-}
+// It is an alias, not a copy: registry.SelectInstallable is the one definition
+// of which version gets installed, and it cannot import this package without a
+// cycle. An alias lets both sides pass the same values around with no
+// conversion, and leaves every existing spelling of the name working.
+type CandidateVersion = registry.VersionCandidate
 
 // VersionFetcher fetches available versions and their Genero constraints.
 type VersionFetcher func(name string) ([]CandidateVersion, error)

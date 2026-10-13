@@ -191,42 +191,42 @@ func (rs *RepositorySet) Resolve(name, constraint string, gv *genero.Version) (*
 	if err != nil {
 		return nil, err
 	}
-	c, err := semver.ParseConstraint(constraint)
-	if err != nil {
-		return nil, fmt.Errorf("invalid version constraint %q: %w", constraint, err)
-	}
-	// Mirror registry.Resolve: a version that cannot run here must not be a
-	// candidate for "latest" (GIS-574). Artifactory reports no variants, so its
-	// versions are not skipped here; its FetchInfo refuses one with no build
-	// for this major instead, and the loop below steps down.
-	candidates := make([]semver.Version, 0, len(d.versions))
-	var skipped []string
-	for _, cv := range d.versions {
-		if ok, reason := registry.Runnable(gv, cv.GeneroConstraint, cv.Variants); !ok {
-			// Only versions the constraint would have accepted explain a Genero
-			// failure; the rest were never wanted.
-			if c.Matches(cv.Version) {
-				skipped = append(skipped, cv.Version.String()+" "+reason)
-			}
-			continue
-		}
-		candidates = append(candidates, cv.Version)
-	}
-	// Step down to the next-best version when the provider reports the chosen
-	// one has no build for this Genero. Artifactory lists no variants, so the
-	// loop above skipped nothing and the per-version fetch is the only signal;
-	// without this, a genero6-only latest release makes `install <pkg>` fail
-	// outright even though an older version has a build for this runtime
-	// (GIS-574). GI never reaches the retry — its versions were filtered above.
+	// The choice is registry.SelectInstallable's, not a local copy: `install`
+	// takes this path whenever a secondary repository is configured and the
+	// single-registry one otherwise, and two implementations of "newest version
+	// that runs here" is how the two paths drift. They agreed when this was
+	// written, and nothing made them keep agreeing — the prerelease rule
+	// ("latest" never resolves to a beta) lives inside the constraint match and
+	// is exactly the kind of detail a copy loses silently (GIS-575).
+	//
+	// d.versions is already []registry.VersionCandidate: resolver.CandidateVersion
+	// is an alias for it.
+	candidates := d.versions
+	// refused collects the versions the PROVIDER turned down after selection,
+	// which is a different thing from the ones SelectInstallable filtered out
+	// up front. Artifactory lists no variants, so a version's build set is
+	// unknown until its metadata is fetched; without stepping down, a
+	// genero6-only latest release makes `install <pkg>` fail outright even
+	// though an older version has a build for this runtime (GIS-574). GI never
+	// reaches the retry — its variants were on the listing and the selection
+	// already used them.
+	var refused []string
 	for {
-		best, err := c.Latest(candidates)
+		sel, err := registry.SelectInstallable(candidates, constraint, gv)
 		if err != nil {
-			if len(skipped) > 0 {
+			return nil, err
+		}
+		if !sel.Found {
+			// Genero-filtered versions first, then the ones refused on fetch,
+			// so the message reads in the order the decisions were made.
+			reasons := append(append([]string{}, sel.Skipped...), refused...)
+			if len(reasons) > 0 {
 				return nil, fmt.Errorf("no version of %q satisfying %q can run on Genero %s (%s)",
-					name, constraint, gv, strings.Join(skipped, "; "))
+					name, constraint, gv, strings.Join(reasons, "; "))
 			}
 			return nil, fmt.Errorf("no version of %q satisfies constraint %q", name, constraint)
 		}
+		best := sel.Best.Version
 		info, err := d.provider.FetchInfo(name, best.String(), registryMajor(gv))
 		if err == nil {
 			return info, nil
@@ -235,9 +235,23 @@ func (rs *RepositorySet) Resolve(name, constraint string, gv *genero.Version) (*
 		if !errors.As(err, &noBuild) {
 			return nil, err
 		}
-		skipped = append(skipped, registry.DescribeBuilds(best.String(), noBuild.Published))
-		candidates = semver.Without(candidates, best)
+		refused = append(refused, registry.DescribeBuilds(best.String(), noBuild.Published))
+		candidates = withoutVersion(candidates, best)
 	}
+}
+
+// withoutVersion returns candidates with v removed, for the step-down retry.
+// semver.Without is its equivalent for a bare version list; this one keeps each
+// candidate's compatibility signals attached, which is what SelectInstallable
+// needs on the next pass.
+func withoutVersion(candidates []registry.VersionCandidate, v semver.Version) []registry.VersionCandidate {
+	out := make([]registry.VersionCandidate, 0, len(candidates))
+	for _, c := range candidates {
+		if c.Version.Compare(v) != 0 {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // configuredNames returns the provider names in priority order, for use in

@@ -300,3 +300,138 @@ func TestRepositorySetResolveBlamesTheConstraintWhenNoVersionMatchesIt(t *testin
 		t.Errorf("error %q blames Genero for a constraint mismatch", err)
 	}
 }
+
+// ── The multi-provider resolve makes the SAME choice as the single-registry one ──
+
+// `fglpkg install <pkg>` takes RepositorySet.Resolve the moment a secondary
+// repository is configured, and registry.Resolve otherwise. Both now select
+// through registry.SelectInstallable; before that each carried its own
+// "filter by Runnable, then pick the latest". The two agreed, but nothing made
+// them keep agreeing, and the prerelease rule — "latest" never resolves to a
+// beta — lives inside the constraint match, exactly the kind of detail a second
+// copy loses in silence (GIS-575).
+
+func TestRepositorySetResolveSkipsAPrerelease(t *testing.T) {
+	gi := &variantProvider{
+		fakeProvider: fakeProvider{name: "gi", versions: map[string][]string{
+			"pre": {"1.0.0", "2.0.0-beta.1", "2.0.0"},
+		}},
+		variants: map[string][]string{
+			"1.0.0":        {"genero4"},
+			"2.0.0-beta.1": {"genero4", "genero6"}, // runs here, and newer
+			"2.0.0":        {"genero6"},
+		},
+	}
+	rs := NewRepositorySet([]Provider{gi}, descriptors(), nil)
+
+	info, err := rs.Resolve("pre", "latest", gvOf("4"))
+	if err != nil {
+		t.Fatalf("Resolve on Genero 4: %v", err)
+	}
+	if info.Version != "1.0.0" {
+		t.Errorf("resolved pre@%s, want 1.0.0 — the beta runs here but \"latest\" does not select it",
+			info.Version)
+	}
+}
+
+// And where the ONLY runnable version is a prerelease, there is nothing to
+// install: a resolve that accepted it would hand over a beta the user never
+// asked for.
+func TestRepositorySetResolveRefusesWhenOnlyAPrereleaseRuns(t *testing.T) {
+	gi := &variantProvider{
+		fakeProvider: fakeProvider{name: "gi", versions: map[string][]string{
+			"onlypre": {"1.0.0-beta.1", "2.0.0"},
+		}},
+		variants: map[string][]string{
+			"1.0.0-beta.1": {"genero4"},
+			"2.0.0":        {"genero6"},
+		},
+	}
+	rs := NewRepositorySet([]Provider{gi}, descriptors(), nil)
+
+	if _, err := rs.Resolve("onlypre", "latest", gvOf("4")); err == nil {
+		t.Fatal("expected an error: nothing stable runs on Genero 4")
+	}
+}
+
+// A constraint that names the prerelease opts into it, here as everywhere else.
+func TestRepositorySetResolveHonoursAnExplicitPrerelease(t *testing.T) {
+	gi := &variantProvider{
+		fakeProvider: fakeProvider{name: "gi", versions: map[string][]string{
+			"pre": {"1.0.0", "2.0.0-beta.1"},
+		}},
+		variants: map[string][]string{
+			"1.0.0":        {"genero4"},
+			"2.0.0-beta.1": {"genero4"},
+		},
+	}
+	rs := NewRepositorySet([]Provider{gi}, descriptors(), nil)
+
+	info, err := rs.Resolve("pre", "2.0.0-beta.1", gvOf("4"))
+	if err != nil {
+		t.Fatalf("Resolve of an explicitly named prerelease: %v", err)
+	}
+	if info.Version != "2.0.0-beta.1" {
+		t.Errorf("resolved pre@%s, want the named prerelease", info.Version)
+	}
+}
+
+// TestRepositorySetResolveAgreesWithSelectInstallable pins the two together
+// over a matrix rather than over expected strings, so a future divergence fails
+// on any selection rule and not only on prereleases. The step-down a provider
+// triggers by refusing a fetch is covered separately above; these fixtures
+// publish their variants, so the selection alone decides.
+func TestRepositorySetResolveAgreesWithSelectInstallable(t *testing.T) {
+	type spec struct {
+		version  string
+		variants []string
+		genero   string
+	}
+	sets := [][]spec{
+		{{"1.0.0", []string{"genero4"}, ""}, {"2.0.0", []string{"genero6"}, ""}},
+		{{"1.0.0", []string{"genero4"}, ""}, {"2.0.0-beta.1", []string{"genero4"}, ""}, {"2.0.0", []string{"genero6"}, ""}},
+		{{"1.0.0-beta.1", []string{"genero4"}, ""}, {"2.0.0", []string{"genero6"}, ""}},
+		{{"1.0.0", []string{"genero4"}, "^3.0.0"}, {"2.0.0", []string{"genero4"}, "^4.0.0"}},
+		{{"1.0.0", []string{"webcomponent"}, ""}, {"2.0.0", []string{"genero6"}, ""}},
+		{{"1.0.0", []string{}, ""}, {"2.0.0", []string{"genero6"}, ""}},
+	}
+	gv := gvOf("4")
+	for _, set := range sets {
+		vp := &variantProvider{
+			fakeProvider: fakeProvider{name: "gi", versions: map[string][]string{"x": {}}},
+			variants:     map[string][]string{},
+			constraints:  map[string]string{},
+		}
+		candidates := make([]registry.VersionCandidate, 0, len(set))
+		for _, sp := range set {
+			vp.versions["x"] = append(vp.versions["x"], sp.version)
+			vp.variants[sp.version] = sp.variants
+			vp.constraints[sp.version] = sp.genero
+			candidates = append(candidates, registry.VersionCandidate{
+				Version:          semver.MustParse(sp.version),
+				Variants:         sp.variants,
+				GeneroConstraint: sp.genero,
+			})
+		}
+		want, err := registry.SelectInstallable(candidates, "latest", gv)
+		if err != nil {
+			t.Fatalf("SelectInstallable: %v", err)
+		}
+
+		info, err := NewRepositorySet([]Provider{vp}, descriptors(), nil).Resolve("x", "latest", gv)
+		if !want.Found {
+			if err == nil {
+				t.Errorf("%v: rs.Resolve returned %s, but the selector refuses", set, info.Version)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%v: rs.Resolve failed (%v), but the selector picks %s", set, err, want.Best.Version)
+			continue
+		}
+		if info.Version != want.Best.Version.String() {
+			t.Errorf("%v: rs.Resolve picked %s, the selector picks %s",
+				set, info.Version, want.Best.Version)
+		}
+	}
+}

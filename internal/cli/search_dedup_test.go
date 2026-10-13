@@ -2,6 +2,7 @@ package cli
 
 import (
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/config"
@@ -9,20 +10,40 @@ import (
 	"github.com/4js-mikefolcher/fglpkg/internal/provider"
 	"github.com/4js-mikefolcher/fglpkg/internal/registry"
 	"github.com/4js-mikefolcher/fglpkg/internal/resolver"
+	"github.com/4js-mikefolcher/fglpkg/internal/semver"
 )
 
 // searchStub is a minimal provider.Provider returning canned search results.
+// versions, when set, answers the step-down check's version lookups; fetched
+// records which names this provider was asked about, so a collision can be
+// checked to consult the repository install would route to.
 type searchStub struct {
-	name    string
-	results []registry.SearchResult
+	name     string
+	results  []registry.SearchResult
+	versions map[string][]resolver.CandidateVersion
+	fetched  []string
+	mu       sync.Mutex
 }
 
 func (s *searchStub) Name() string { return s.name }
-func (s *searchStub) FetchVersions(string) ([]resolver.CandidateVersion, error) {
+func (s *searchStub) FetchVersions(name string) ([]resolver.CandidateVersion, error) {
+	s.mu.Lock()
+	s.fetched = append(s.fetched, name)
+	s.mu.Unlock()
+	if v, ok := s.versions[name]; ok {
+		return v, nil
+	}
 	return nil, provider.ErrNotFound
 }
-func (s *searchStub) FetchInfo(string, string, string) (*registry.PackageInfo, error) {
-	return nil, provider.ErrNotFound
+
+// FetchInfo answers for a name this stub lists versions for, so a
+// RepositorySet.Resolve over the stub can run to completion; everything else is
+// absent, as the routing tests expect.
+func (s *searchStub) FetchInfo(name, version, _ string) (*registry.PackageInfo, error) {
+	if _, ok := s.versions[name]; !ok {
+		return nil, provider.ErrNotFound
+	}
+	return &registry.PackageInfo{Name: name, Version: version, Source: s.name}, nil
 }
 func (s *searchStub) Search(string) ([]registry.SearchResult, error) { return s.results, nil }
 
@@ -112,6 +133,127 @@ func TestSearchAcrossProviders_GradesAgainstTarget(t *testing.T) {
 	}
 }
 
+// TestSearchAcrossProviders_GradesFromPublishedBuilds covers the fan-out half of
+// GIS-575: a result's published builds must survive the per-name merge, and on
+// a collision both compatibility signals must come from the SAME repository as
+// the version and description. Grading one repo's constraint against another's
+// builds would invent a verdict for a package that exists in neither.
+func TestSearchAcrossProviders_GradesFromPublishedBuilds(t *testing.T) {
+	gi := &searchStub{name: "gi", results: []registry.SearchResult{
+		{Name: "modern", LatestVersion: "2.0.0", Description: "builds for here",
+			Variants: []string{"genero4", "genero6"}},
+		{Name: "elsewhere", LatestVersion: "1.0.0", Description: "builds for genero 6 only",
+			Variants: []string{"genero6"}},
+		// Collides with acme's entry below. gi wins on priority, so the ✓ must
+		// come from gi's genero4 build — not from acme's genero6-only one.
+		{Name: "utils", LatestVersion: "1.3.0", Description: "gi utils",
+			Variants: []string{"genero4"}},
+	}}
+	acme := &searchStub{name: "acme", results: []registry.SearchResult{
+		{Name: "utils", LatestVersion: "0.9.0", Description: "acme utils",
+			Variants: []string{"genero6"}},
+		// Artifactory reports no variants at all: nil, meaning "cannot tell",
+		// which must stay "?" rather than becoming "publishes nothing".
+		{Name: "acmeonly", LatestVersion: "3.0.0", Description: "internal"},
+	}}
+	descs := []config.Registry{
+		{Name: "gi", Type: config.TypeGenero, URL: "https://gi", Priority: 1},
+		{Name: "acme", Type: config.TypeArtifactory, URL: "https://a", RepoKey: "k", Priority: 2},
+	}
+	rs := provider.NewRepositorySet([]provider.Provider{gi, acme}, descs, nil)
+	target := genero.MustParse("4.01.12")
+
+	out, err := captureStdout(t, func() error { return searchAcrossProviders(rs, "x", false, &target, "") })
+	if err != nil {
+		t.Fatalf("searchAcrossProviders: %v", err)
+	}
+
+	cases := []struct{ pkg, genero, marker string }{
+		{"modern", "4, 6", "✓"},
+		{"elsewhere", "6", "✗"},
+		{"utils", "4", "✓"},
+		{"acmeonly", "-", "?"},
+	}
+	for _, c := range cases {
+		line := lineContaining(out, c.pkg)
+		if line == "" {
+			t.Errorf("no row for %q\n%s", c.pkg, out)
+			continue
+		}
+		if !strings.Contains(line, c.genero) {
+			t.Errorf("%s row = %q, want GENERO %q", c.pkg, line, c.genero)
+		}
+		if !strings.Contains(line, c.marker) {
+			t.Errorf("%s row = %q, want marker %q", c.pkg, line, c.marker)
+		}
+	}
+	// The collided row keeps gi's description too, so the signals and the text
+	// are demonstrably from one source rather than merged field by field.
+	if line := lineContaining(out, "utils"); !strings.Contains(line, "gi utils") {
+		t.Errorf("utils row should keep gi's description: %q", line)
+	}
+}
+
+// TestSearchAcrossProviders_StepsDownWithinTheOwningRepository covers the
+// fan-out half of the step-down check. A ✗ is confirmed against the repository
+// the row came from — the one install would route to — so a collided name is
+// never re-graded from a different repository's version history.
+func TestSearchAcrossProviders_StepsDownWithinTheOwningRepository(t *testing.T) {
+	v4 := genero.MustParse("4.01.12")
+	gi := &searchStub{
+		name: "gi",
+		results: []registry.SearchResult{
+			{Name: "utils", LatestVersion: "2.0.0", Description: "gi utils", Variants: []string{"genero6"}},
+		},
+		versions: map[string][]resolver.CandidateVersion{
+			"utils": {
+				{Version: semver.MustParse("1.0.0"), Variants: []string{"genero4", "genero6"}},
+				{Version: semver.MustParse("2.0.0"), Variants: []string{"genero6"}},
+			},
+		},
+	}
+	// acme also carries "utils", at a version that runs here. gi wins on
+	// priority, so acme must never be asked — grading gi's row from acme's
+	// history would describe a package the user is not going to get.
+	acme := &searchStub{
+		name: "acme",
+		results: []registry.SearchResult{
+			{Name: "utils", LatestVersion: "9.9.9", Description: "acme utils", Variants: []string{"genero4"}},
+		},
+		versions: map[string][]resolver.CandidateVersion{
+			"utils": {{Version: semver.MustParse("9.9.9"), Variants: []string{"genero4"}}},
+		},
+	}
+	descs := []config.Registry{
+		{Name: "gi", Type: config.TypeGenero, URL: "https://gi", Priority: 1},
+		{Name: "acme", Type: config.TypeArtifactory, URL: "https://a", RepoKey: "k", Priority: 2},
+	}
+	rs := provider.NewRepositorySet([]provider.Provider{gi, acme}, descs, nil)
+
+	// The term is "x", not "utils": lineContaining would otherwise match the
+	// `Results for "utils"` header before reaching the row.
+	out, err := captureStdout(t, func() error { return searchAcrossProviders(rs, "x", false, &v4, "") })
+	if err != nil {
+		t.Fatalf("searchAcrossProviders: %v", err)
+	}
+
+	line := lineContaining(out, "utils")
+	for _, want := range []string{"1.0.0*", "4, 6", "✓"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("utils row = %q, want %q", line, want)
+		}
+	}
+	if len(gi.fetched) != 1 || gi.fetched[0] != "utils" {
+		t.Errorf("gi fetched %v, want exactly [utils]", gi.fetched)
+	}
+	if len(acme.fetched) != 0 {
+		t.Errorf("acme fetched %v, want nothing — gi owns this row", acme.fetched)
+	}
+	if !strings.Contains(out, "latest is 2.0.0") {
+		t.Errorf("note missing gi's latest version:\n%s", out)
+	}
+}
+
 // TestSearchAcrossProviders_GeneroColumnWidensToFit guards the dynamic GENERO
 // column width: a constraint longer than the 12-char floor must not push its
 // row's later columns out of alignment with a short-constraint row (the "spill
@@ -178,5 +320,67 @@ func TestSearchAcrossProviders_StatusColumn(t *testing.T) {
 	}
 	if line := lineContaining(out, "moved"); !strings.Contains(line, "deprecated -> newpkg") {
 		t.Errorf("moved row = %q, want STATUS relocation", line)
+	}
+}
+
+// TestSearchAndMultiProviderInstallPickTheSameVersion is the cross-path pin.
+//
+// `fglpkg install <pkg>` has two resolve paths: RepositorySet.Resolve whenever
+// a secondary repository is configured, registry.Resolve otherwise. The
+// step-down only ever claimed to match the second. This drives BOTH halves of
+// the multi-provider path off one fixture — the search table and the resolve
+// install would actually perform — and asserts they name the same version.
+//
+// The fixture is a prerelease, because that is where they came closest to
+// disagreeing: the beta runs on Genero 4 and outranks the stable release, but
+// "latest" does not select it.
+func TestSearchAndMultiProviderInstallPickTheSameVersion(t *testing.T) {
+	v4 := genero.MustParse("4.01.12")
+	newStub := func() *searchStub {
+		return &searchStub{
+			name: "gi",
+			results: []registry.SearchResult{
+				{Name: "pre", LatestVersion: "2.0.0", Description: "PREDESC", Variants: []string{"genero6"}},
+			},
+			versions: map[string][]resolver.CandidateVersion{
+				"pre": {
+					{Version: semver.MustParse("1.0.0"), Variants: []string{"genero4"}},
+					{Version: semver.MustParse("2.0.0-beta.1"), Variants: []string{"genero4", "genero6"}},
+					{Version: semver.MustParse("2.0.0"), Variants: []string{"genero6"}},
+				},
+			},
+		}
+	}
+	descs := []config.Registry{
+		{Name: "gi", Type: config.TypeGenero, URL: "https://gi", Priority: 1},
+		{Name: "acme", Type: config.TypeArtifactory, URL: "https://a", RepoKey: "k", Priority: 2},
+	}
+
+	// What the search table says.
+	searchSet := provider.NewRepositorySet([]provider.Provider{newStub()}, descs, nil)
+	out, err := captureStdout(t, func() error { return searchAcrossProviders(searchSet, "x", false, &v4, "") })
+	if err != nil {
+		t.Fatalf("searchAcrossProviders: %v", err)
+	}
+	line := lineContaining(out, "PREDESC")
+	if line == "" {
+		t.Fatalf("no row for the fixture\n%s", out)
+	}
+
+	// What `install` would actually do on this configuration.
+	installSet := provider.NewRepositorySet([]provider.Provider{newStub()}, descs, nil)
+	info, err := installSet.Resolve("pre", "latest", &v4)
+	if err != nil {
+		t.Fatalf("rs.Resolve: %v", err)
+	}
+	if info.Version != "1.0.0" {
+		t.Fatalf("rs.Resolve picked %s, want 1.0.0", info.Version)
+	}
+	if !strings.Contains(line, info.Version+"*") {
+		t.Errorf("search row = %q, but install resolves %s — the two paths disagree",
+			line, info.Version)
+	}
+	if strings.Contains(line, "2.0.0-beta.1") {
+		t.Errorf("search row = %q names a prerelease install would not install", line)
 	}
 }

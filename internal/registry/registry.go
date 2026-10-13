@@ -219,6 +219,12 @@ type SearchResult struct {
 	// constraint (e.g. "^4.0.0"). Empty when the registry does not report one,
 	// in which case compatibility is treated as unknown.
 	GeneroConstraint string `json:"genero,omitempty"`
+	// Variants are the latest version's published build tags, carried on the
+	// listing so search can grade a whole page without a detail fetch per row
+	// (GIS-575). nil means the provider does not report variants (Artifactory,
+	// and GI before it served the field) — which is "unknown", not "none". See
+	// VariantsSupport.
+	Variants []string `json:"variants,omitempty"`
 	// Source is the logical repository this result came from, set by the
 	// multi-provider search fan-out. Empty for single-registry results.
 	Source string `json:"source,omitempty"`
@@ -368,6 +374,81 @@ func AbsoluteDownloadURL(raw string) string {
 	return registryBase() + "/" + strings.TrimPrefix(raw, "/")
 }
 
+// VersionCandidate is one published version's inputs to version selection: the
+// two independent Genero compatibility signals, plus the version itself.
+//
+// It lives here, rather than beside the resolver that consumes it, so that
+// SelectInstallable — the one definition of which version gets installed — can
+// take it without importing the resolver back.
+type VersionCandidate struct {
+	Version          semver.Version
+	GeneroConstraint string
+
+	// Variants lists the artifact variant tags this version publishes
+	// ("genero4", "genero6", "webcomponent", …). It is the ground truth for
+	// Genero compatibility — a version with no build for the running major
+	// cannot be installed however loose its declared constraint is — and most
+	// publishers declare no constraint at all, so this is usually the only
+	// signal available. NIL means the provider does not report variants
+	// (Artifactory, older registries), which is "unknown, allow"; an empty
+	// non-nil slice is the opposite claim, that this version published no
+	// builds at all. See VariantsSupport.
+	Variants []string
+}
+
+// VersionSelection is the outcome of choosing a version to install.
+type VersionSelection struct {
+	// Best is the chosen version, valid only when Found.
+	Best  VersionCandidate
+	Found bool
+	// Skipped names the versions the constraint accepted but Genero rejected,
+	// each with its reason ("1.0.1 has builds for Genero 5, 6"). It is what
+	// separates "nothing matches your constraint" from "nothing can run here",
+	// which are very different things to act on. Empty when the constraint is
+	// what excluded everything.
+	Skipped []string
+}
+
+// SelectInstallable picks the version `fglpkg install` would resolve: the
+// newest candidate that both satisfies the version constraint and can run on
+// the given Genero runtime.
+//
+// This is the single definition of that choice. `install` goes through it, and
+// so does `search` when confirming a refusal — a search that named a version
+// install would not pick is the failure the step-down exists to prevent, and
+// two implementations of "newest that works" is how that comes back. The
+// prerelease rule is the subtle half: semver.Constraint.Matches skips a
+// prerelease unless the constraint names one, so "latest" never resolves to a
+// beta, and a selector that merely compared versions would announce one.
+//
+// A nil gv (no Genero runtime resolved) makes Runnable permissive, so selection
+// falls back to the constraint alone.
+func SelectInstallable(candidates []VersionCandidate, constraint string, gv *genero.Version) (VersionSelection, error) {
+	c, err := semver.ParseConstraint(constraint)
+	if err != nil {
+		return VersionSelection{}, fmt.Errorf("invalid version constraint %q: %w", constraint, err)
+	}
+	var sel VersionSelection
+	for i := range candidates {
+		cand := candidates[i]
+		if !c.Matches(cand.Version) {
+			continue
+		}
+		if ok, reason := Runnable(gv, cand.GeneroConstraint, cand.Variants); !ok {
+			// Only a version the constraint would otherwise have accepted
+			// explains a Genero failure. Recording the rest would blame Genero
+			// for `install fx@^3.0.0` when no 3.x was ever published.
+			sel.Skipped = append(sel.Skipped, cand.Version.String()+" "+reason)
+			continue
+		}
+		if !sel.Found || cand.Version.GreaterThan(sel.Best.Version) {
+			sel.Best = cand
+			sel.Found = true
+		}
+	}
+	return sel, nil
+}
+
 // Resolve fetches the best matching version of name for the given constraint.
 // constraint may be "latest", "*", or any semver constraint string (e.g.
 // "^1.2.0"). generoMajor selects the variant; "" picks the default.
@@ -376,42 +457,32 @@ func Resolve(name, constraint string, gv *genero.Version) (*PackageInfo, error) 
 	if err != nil {
 		return nil, err
 	}
-	c, err := semver.ParseConstraint(constraint)
-	if err != nil {
-		return nil, fmt.Errorf("invalid version constraint %q: %w", constraint, err)
-	}
-	// Skip versions that cannot run here, so `install <pkg>` lands on the newest
-	// version that actually works rather than the newest that exists (GIS-574).
 	// Iterating VersionEntries rather than Versions is what makes the declared
-	// constraint and the variants available.
-	candidates := make([]semver.Version, 0, len(vl.VersionEntries))
-	var skipped []string
+	// constraint and the variants available to the selection (GIS-574).
+	candidates := make([]VersionCandidate, 0, len(vl.VersionEntries))
 	for _, ve := range vl.VersionEntries {
 		v, err := semver.Parse(ve.Version)
 		if err != nil {
 			continue
 		}
-		if ok, reason := Runnable(gv, ve.GeneroConstraint, ve.Variants); !ok {
-			// Only a version the constraint would otherwise have accepted
-			// explains a Genero failure. Recording the rest would blame Genero
-			// for `install fx@^3.0.0` when no 3.x was ever published.
-			if c.Matches(v) {
-				skipped = append(skipped, ve.Version+" "+reason)
-			}
-			continue
-		}
-		candidates = append(candidates, v)
+		candidates = append(candidates, VersionCandidate{
+			Version:          v,
+			GeneroConstraint: ve.GeneroConstraint,
+			Variants:         ve.Variants,
+		})
 	}
-	best, err := c.Latest(candidates)
+	sel, err := SelectInstallable(candidates, constraint, gv)
 	if err != nil {
-		// Distinguish "nothing matches your constraint" from "nothing can run
-		// here", which are very different things to act on.
-		if len(skipped) > 0 {
+		return nil, err
+	}
+	if !sel.Found {
+		if len(sel.Skipped) > 0 {
 			return nil, fmt.Errorf("no version of %q satisfying %q can run on Genero %s (%s)",
-				name, constraint, gv, strings.Join(skipped, "; "))
+				name, constraint, gv, strings.Join(sel.Skipped, "; "))
 		}
 		return nil, fmt.Errorf("no version of %q satisfies constraint %q", name, constraint)
 	}
+	best := sel.Best.Version
 	return FetchInfoForGenero(name, best.String(), majorOf(gv))
 }
 
@@ -434,6 +505,7 @@ func Search(term string) ([]SearchResult, error) {
 			Description:      p.Description,
 			Author:           p.Owner.Name,
 			GeneroConstraint: p.Genero,
+			Variants:         p.Variants,
 			Deprecated:       p.Deprecated,
 			MovedTo:          p.MovedTo,
 		})
@@ -867,6 +939,13 @@ type apiListedPackage struct {
 	// surfaced on the browse listing for compatibility annotation. Empty when
 	// the registry does not report one.
 	Genero string `json:"genero,omitempty"`
+	// Variants are the latest version's published build tags (e.g. "genero4",
+	// "webcomponent"), the compatibility signal a publisher cannot forget to
+	// supply (GIS-575). NOT omitempty-decoded: an absent field leaves this nil
+	// ("this registry does not report variants") while `[]` decodes to an empty
+	// non-nil slice ("this version publishes no builds"), and VariantsSupport
+	// reads those two as opposite answers.
+	Variants []string `json:"variants"`
 }
 
 type apiPackageDetail struct {
@@ -1008,7 +1087,7 @@ func majorOf(gv *genero.Version) string {
 //
 // "webcomponent" matches every major: those packages ship browser assets, not
 // p-code. "default" is the legacy single-build layout and likewise serves any
-// major.
+// major. See UniversalVariant.
 func VariantsSupport(variants []string, major string) bool {
 	if variants == nil {
 		return true
@@ -1018,11 +1097,24 @@ func VariantsSupport(variants []string, major string) bool {
 	}
 	want := "genero" + major
 	for _, v := range variants {
-		if v == want || v == "webcomponent" || v == "default" {
+		if v == want || UniversalVariant(v) {
 			return true
 		}
 	}
 	return false
+}
+
+// UniversalVariant reports whether a build tag serves every Genero major.
+// "webcomponent" packages ship browser assets rather than p-code, and "default"
+// is the legacy single-build layout.
+//
+// Exported because `search` renders this distinction in its GENERO column and
+// must not disagree with VariantsSupport about it — a column naming majors the
+// grader then ignores is worse than one that says it cannot narrow them down.
+// A second copy kept in step by a comment is the drift GIS-574 introduced
+// Runnable to remove.
+func UniversalVariant(v string) bool {
+	return v == "webcomponent" || v == "default"
 }
 
 // DescribeBuilds phrases what one version publishes, e.g.

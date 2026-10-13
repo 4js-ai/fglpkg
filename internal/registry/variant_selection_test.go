@@ -7,6 +7,7 @@ import (
 
 	"github.com/4js-mikefolcher/fglpkg/internal/genero"
 	"github.com/4js-mikefolcher/fglpkg/internal/registry"
+	"github.com/4js-mikefolcher/fglpkg/internal/semver"
 )
 
 // GIS-574. pickArtifact used to end in `return &arts[0]`, so a caller asking
@@ -239,5 +240,98 @@ func TestVariantsSupportDistinguishesUnreportedFromNone(t *testing.T) {
 	}
 	if registry.VariantsSupport([]string{}, "4") {
 		t.Error("an empty-but-present variant list means no builds exist — must be refused")
+	}
+}
+
+// cand is a VersionCandidate built from a version string, for selection tests.
+func cand(version, constraint string, variants []string) registry.VersionCandidate {
+	return registry.VersionCandidate{
+		Version:          semver.MustParse(version),
+		GeneroConstraint: constraint,
+		Variants:         variants,
+	}
+}
+
+// TestSelectInstallableSkipsPrereleases pins the rule that made search and
+// install disagree: `install <pkg>` resolves "latest" through a constraint
+// whose Matches rejects a prerelease unless the constraint names one. Any
+// caller that selected by version comparison alone would pick the beta.
+func TestSelectInstallableSkipsPrereleases(t *testing.T) {
+	v4 := genero.MustParse("4.01.12")
+	sel, err := registry.SelectInstallable([]registry.VersionCandidate{
+		cand("1.0.0", "", []string{"genero4"}),
+		cand("2.0.0-beta.1", "", []string{"genero4"}),
+		cand("2.0.0", "", []string{"genero6"}),
+	}, "latest", &v4)
+	if err != nil {
+		t.Fatalf("SelectInstallable: %v", err)
+	}
+	if !sel.Found || sel.Best.Version.String() != "1.0.0" {
+		t.Errorf("found=%v best=%v, want 1.0.0 — the beta is newer but not selectable",
+			sel.Found, sel.Best.Version)
+	}
+}
+
+// A constraint that names a prerelease opts into them, and the selection must
+// follow — otherwise `install pkg@2.0.0-beta.1` could not resolve at all.
+func TestSelectInstallableHonoursAnExplicitPrereleaseConstraint(t *testing.T) {
+	v4 := genero.MustParse("4.01.12")
+	sel, err := registry.SelectInstallable([]registry.VersionCandidate{
+		cand("1.0.0", "", []string{"genero4"}),
+		cand("2.0.0-beta.1", "", []string{"genero4"}),
+	}, "2.0.0-beta.1", &v4)
+	if err != nil {
+		t.Fatalf("SelectInstallable: %v", err)
+	}
+	if !sel.Found || sel.Best.Version.String() != "2.0.0-beta.1" {
+		t.Errorf("found=%v best=%v, want the named prerelease", sel.Found, sel.Best.Version)
+	}
+}
+
+// Both compatibility signals still gate the choice, and the version that wins
+// carries its own constraint and builds with it.
+func TestSelectInstallableStepsPastWhatCannotRun(t *testing.T) {
+	v4 := genero.MustParse("4.01.12")
+	sel, err := registry.SelectInstallable([]registry.VersionCandidate{
+		cand("1.0.0", "", []string{"genero4", "genero5"}),
+		cand("1.5.0", "^6.0.0", []string{"genero4"}), // constraint excludes Genero 4
+		cand("2.0.0", "", []string{"genero6"}),       // no genero4 build
+	}, "latest", &v4)
+	if err != nil {
+		t.Fatalf("SelectInstallable: %v", err)
+	}
+	if !sel.Found || sel.Best.Version.String() != "1.0.0" {
+		t.Fatalf("found=%v best=%v, want 1.0.0", sel.Found, sel.Best.Version)
+	}
+	if got := sel.Best.Variants; len(got) != 2 || got[0] != "genero4" {
+		t.Errorf("best.Variants = %v, want 1.0.0's own builds", got)
+	}
+	// Both were excluded by Genero, not by the version constraint, so both are
+	// explainable — that is what separates "nothing matches" from "nothing runs".
+	if len(sel.Skipped) != 2 {
+		t.Errorf("Skipped = %v, want both rejected versions named", sel.Skipped)
+	}
+}
+
+// A version the version-constraint never admitted is NOT reported as a Genero
+// failure: `install fx@^3.0.0` must not be told that 4.x "has builds for
+// Genero 5, 6" when no 3.x was ever published.
+func TestSelectInstallableBlamesGeneroOnlyForVersionsTheConstraintAccepted(t *testing.T) {
+	v4 := genero.MustParse("4.01.12")
+	sel, err := registry.SelectInstallable([]registry.VersionCandidate{
+		cand("4.0.0", "", []string{"genero6"}),
+	}, "^3.0.0", &v4)
+	if err != nil {
+		t.Fatalf("SelectInstallable: %v", err)
+	}
+	if sel.Found || len(sel.Skipped) != 0 {
+		t.Errorf("found=%v skipped=%v, want no match and nothing blamed on Genero",
+			sel.Found, sel.Skipped)
+	}
+}
+
+func TestSelectInstallableRejectsABadConstraint(t *testing.T) {
+	if _, err := registry.SelectInstallable(nil, "not-a-constraint", nil); err == nil {
+		t.Error("want an error for an unparseable constraint")
 	}
 }

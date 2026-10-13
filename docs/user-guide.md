@@ -814,9 +814,9 @@ you are running. The version is detected automatically (honoring `FGLPKG_GENERO_
 and can be overridden with `--genero <version>`. The marker is advisory — nothing is hidden
 or reordered:
 
-- `✓` — the package's latest version is compatible with your Genero version
-- `✗` — the latest version requires a different Genero version
-- `?` — unknown: the registry reports no constraint, or no Genero version could be resolved
+- `✓` — the package's latest version runs on your Genero version
+- `✗` — it does not
+- `?` — unknown: the registry reports nothing to judge by, or no Genero version could be resolved
 
 ```bash
 $ fglpkg search json
@@ -825,8 +825,57 @@ Results for "json" (Genero 4.01):
   ----                           -------      ------       -  -----------
   jsonutils                      2.0.1        ^4.0.0       ✓  JSON utility functions for BDL
   legacyjson                     1.4.0        ^3.0.0       ✗  JSON helpers for Genero 3
-  mystery                        0.9.0        -            ?  registry reports no constraint
+  jsonfast                       1.1.0        4, 5, 6      ✓  no constraint declared
+  jsonmodern                     3.0.0        5, 6         ✗  no Genero 4 build published
+  jsonsteady                     1.4.0*       4, 5, 6      ✓  latest dropped Genero 4
+  mystery                        0.9.0        -            ?  nothing to judge by
+
+* shows the newest version that runs on Genero 4.01, not the latest published:
+    jsonsteady — latest is 2.0.0, which does not run here; `fglpkg install jsonsteady` gives you 1.4.0.
 ```
+
+#### Every row describes the version you would get
+
+`fglpkg install <pkg>` does not install the latest version — it installs the newest version that
+*runs* on your Genero, stepping down past any that cannot. Search follows the same rule, so a `✓`
+is a package `install` will accept and a `✗` is one it will refuse.
+
+That means the VERSION column is not always the latest published version. When search had to step
+down to find a version that runs, the version is marked `*` and the latest is named under the
+table, as `jsonsteady` is above. Everything else on that row — the GENERO column, the verdict —
+describes the marked version too.
+
+A `✗` therefore means *no* version of the package runs here, not merely that the newest one
+doesn't. Prereleases are not candidates — `install` resolves `latest` to the newest stable
+release, so search does too; a beta that happens to run here will not be offered unless you ask
+for it by name.
+
+#### What the GENERO column shows
+
+Two independent things decide whether a version runs on your Genero, and the column shows the one
+that **decided this row**:
+
+- **A declared constraint**, like `^4.0.0` — what the publisher wrote in their `fglpkg.json`.
+  It is optional, and most publishers leave it out. It is preferred while both signals agree,
+  because it carries a minimum patch level that a list of majors cannot express.
+- **The builds that exist**, shown as the Genero majors a build was published for — `4, 5, 6`.
+  A publisher cannot forget to supply this, since uploading a build is what creates it.
+
+Either can rule a version out. When they disagree — the constraint admits your Genero but no
+build exists for it — the builds are what produced the `✗`, so the builds are what you see.
+
+Three other values appear in this column:
+
+- `any` — the package publishes a build that serves every major. Web components ship browser
+  assets rather than p-code, and older packages were published as a single build.
+- `none` — the registry reports the version's builds, and there are none. Usually a publish that
+  did not finish; there is nothing to install.
+- Unrecognised build tags are shown verbatim, since fglpkg cannot install them but will not claim
+  to know what they are.
+
+`-` means the registry reported neither signal. That is what a secondary (non-GI) repository
+reports — those results are never graded and always show `?` — and what the GI registry itself
+reported before it began serving the published build list.
 
 Grade against a specific version instead of the detected one:
 
@@ -835,8 +884,7 @@ $ fglpkg search json --genero 3.20
 ```
 
 If no Genero version can be detected (no `fglcomp`, no `$FGLDIR`, no override), search still
-runs — every result shows `?` and the header explains how to set the version. Results from
-secondary (non-GI) repositories are not graded and always show `?`.
+runs — every result shows `?` and the header explains how to set the version.
 
 When you have [secondary repositories](#secondary-repositories-jfrog-artifactory) configured,
 `fglpkg search` fans out to all of them by default. Scope it to a single source with
