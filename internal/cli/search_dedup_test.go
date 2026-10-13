@@ -35,8 +35,15 @@ func (s *searchStub) FetchVersions(name string) ([]resolver.CandidateVersion, er
 	}
 	return nil, provider.ErrNotFound
 }
-func (s *searchStub) FetchInfo(string, string, string) (*registry.PackageInfo, error) {
-	return nil, provider.ErrNotFound
+
+// FetchInfo answers for a name this stub lists versions for, so a
+// RepositorySet.Resolve over the stub can run to completion; everything else is
+// absent, as the routing tests expect.
+func (s *searchStub) FetchInfo(name, version, _ string) (*registry.PackageInfo, error) {
+	if _, ok := s.versions[name]; !ok {
+		return nil, provider.ErrNotFound
+	}
+	return &registry.PackageInfo{Name: name, Version: version, Source: s.name}, nil
 }
 func (s *searchStub) Search(string) ([]registry.SearchResult, error) { return s.results, nil }
 
@@ -313,5 +320,67 @@ func TestSearchAcrossProviders_StatusColumn(t *testing.T) {
 	}
 	if line := lineContaining(out, "moved"); !strings.Contains(line, "deprecated -> newpkg") {
 		t.Errorf("moved row = %q, want STATUS relocation", line)
+	}
+}
+
+// TestSearchAndMultiProviderInstallPickTheSameVersion is the cross-path pin.
+//
+// `fglpkg install <pkg>` has two resolve paths: RepositorySet.Resolve whenever
+// a secondary repository is configured, registry.Resolve otherwise. The
+// step-down only ever claimed to match the second. This drives BOTH halves of
+// the multi-provider path off one fixture — the search table and the resolve
+// install would actually perform — and asserts they name the same version.
+//
+// The fixture is a prerelease, because that is where they came closest to
+// disagreeing: the beta runs on Genero 4 and outranks the stable release, but
+// "latest" does not select it.
+func TestSearchAndMultiProviderInstallPickTheSameVersion(t *testing.T) {
+	v4 := genero.MustParse("4.01.12")
+	newStub := func() *searchStub {
+		return &searchStub{
+			name: "gi",
+			results: []registry.SearchResult{
+				{Name: "pre", LatestVersion: "2.0.0", Description: "PREDESC", Variants: []string{"genero6"}},
+			},
+			versions: map[string][]resolver.CandidateVersion{
+				"pre": {
+					{Version: semver.MustParse("1.0.0"), Variants: []string{"genero4"}},
+					{Version: semver.MustParse("2.0.0-beta.1"), Variants: []string{"genero4", "genero6"}},
+					{Version: semver.MustParse("2.0.0"), Variants: []string{"genero6"}},
+				},
+			},
+		}
+	}
+	descs := []config.Registry{
+		{Name: "gi", Type: config.TypeGenero, URL: "https://gi", Priority: 1},
+		{Name: "acme", Type: config.TypeArtifactory, URL: "https://a", RepoKey: "k", Priority: 2},
+	}
+
+	// What the search table says.
+	searchSet := provider.NewRepositorySet([]provider.Provider{newStub()}, descs, nil)
+	out, err := captureStdout(t, func() error { return searchAcrossProviders(searchSet, "x", false, &v4, "") })
+	if err != nil {
+		t.Fatalf("searchAcrossProviders: %v", err)
+	}
+	line := lineContaining(out, "PREDESC")
+	if line == "" {
+		t.Fatalf("no row for the fixture\n%s", out)
+	}
+
+	// What `install` would actually do on this configuration.
+	installSet := provider.NewRepositorySet([]provider.Provider{newStub()}, descs, nil)
+	info, err := installSet.Resolve("pre", "latest", &v4)
+	if err != nil {
+		t.Fatalf("rs.Resolve: %v", err)
+	}
+	if info.Version != "1.0.0" {
+		t.Fatalf("rs.Resolve picked %s, want 1.0.0", info.Version)
+	}
+	if !strings.Contains(line, info.Version+"*") {
+		t.Errorf("search row = %q, but install resolves %s — the two paths disagree",
+			line, info.Version)
+	}
+	if strings.Contains(line, "2.0.0-beta.1") {
+		t.Errorf("search row = %q names a prerelease install would not install", line)
 	}
 }

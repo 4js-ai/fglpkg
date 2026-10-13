@@ -253,6 +253,44 @@ _variants_prerelease() {
 }
 it "the step-down skips prereleases, exactly as install does" _variants_prerelease
 
+# `fglpkg install <pkg>` has two resolve paths: RepositorySet.Resolve whenever a
+# secondary repository is configured, registry.Resolve otherwise. Every case
+# above takes the second. This one configures a secondary so install routes
+# through the first, and checks it makes the same choice — that path used to
+# carry its own copy of "newest version that runs here", and nothing compared
+# the two.
+#
+# The secondary points at the mock itself, which answers 404 for Artifactory's
+# storage paths. That is deliberate: it only has to EXIST for the routing to
+# switch, and 404 means "not here" so routing moves on. An unreachable host
+# would not do — a dial failure is not evidence a package is absent, so install
+# aborts on it rather than guessing, which is the right behaviour and the wrong
+# test.
+_variants_prerelease_multiprovider() {
+  local fx; fx="$(mktemp -d "$_SANDBOX_ROOT/fxmp.XXXXXX")"
+  _prerelease_fixtures "$fx" || return 1
+  mock_registry_start "$fx" || return 1
+
+  export FGLPKG_GENERO_VERSION=4.01.12
+  mkdir -p proj && cd proj || return 1
+  run init --yes
+  assert_success || return 1
+  run registry add secondary "$FGLPKG_REGISTRY" --repo-key generic-local
+  assert_success || return 1
+
+  # Same answer as the single-registry path: the beta runs here and is newer,
+  # and "latest" still does not select it.
+  run install prerel
+  assert_success || return 1
+  assert_contains "prerel@1.0.0" || return 1
+  assert_file_contains fglpkg-lock.json '"version": "1.0.0"' || return 1
+
+  run install onlypre
+  assert_failure || return 1
+  assert_contains "can run on Genero 4.01.12" || return 1
+}
+it "the multi-provider install path picks the same version" _variants_prerelease_multiprovider
+
 _variants_follow_the_target() {
   local fx; fx="$(mktemp -d "$_SANDBOX_ROOT/fxv.XXXXXX")"
   _variants_fixtures "$fx" || return 1
