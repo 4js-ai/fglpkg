@@ -483,7 +483,7 @@ fglpkg bump minor --git                  # Bump, then commit and tag v<version> 
 # Misc
 fglpkg self-update                       # Update fglpkg to the latest release
 fglpkg self-update --check               # Report whether an update is available
-fglpkg version                           # Print the fglpkg tool version (also: fglpkg --version, -v)
+fglpkg version                           # Print the fglpkg tool version (also: fglpkg --version, -v, -V)
 fglpkg help                              # Show help
 ```
 

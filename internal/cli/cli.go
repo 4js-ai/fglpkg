@@ -132,10 +132,11 @@ func Execute() error {
 		return nil
 	}
 
-	// Top-level version flags: `fglpkg --version` / `-v` print the tool version
-	// (the universal CLI convention) and exit, mirroring `fglpkg version`. Handled
-	// here, before the dispatch switch, so they are not routed as subcommands.
-	if cmd == "--version" || cmd == "-v" {
+	// Top-level version flags print the tool version and exit, mirroring
+	// `fglpkg version`. Handled here, before the dispatch switch, so they are
+	// not routed as subcommands. See isVersionFlag for the spellings and why
+	// `-V` is among them (SUPASIA-3231).
+	if isVersionFlag(cmd) {
 		fmt.Println(toolVersionLine())
 		return nil
 	}
@@ -5299,6 +5300,10 @@ COMMANDS:
 	}
 	fmt.Print(`
 Run 'fglpkg <command> --help' for command-specific options.
+
+GLOBAL FLAGS:
+  -h, --help               Show this help
+  -V, -v, --version        Print the fglpkg tool version
 
 ENVIRONMENT:
   FGLPKG_HOME              Override ~/.fglpkg (user config + credentials; also the

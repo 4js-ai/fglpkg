@@ -58,7 +58,8 @@ var completionFlags = []string{
 	// cyclonedx" and "--format=cyclonedx" (GIS-540).
 	"--format", "--format=",
 	"--help", "-h",
-	"--version", "-v",
+	// All three spellings, as isVersionFlag accepts them (SUPASIA-3231).
+	"--version", "-v", "-V",
 	"--yes", "-y",
 }
 

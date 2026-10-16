@@ -7,9 +7,12 @@ import (
 	"strings"
 	"testing"
 
+	"time"
+
 	"github.com/4js-mikefolcher/fglpkg/internal/lockfile"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 	"github.com/4js-mikefolcher/fglpkg/internal/semver"
+	"github.com/4js-mikefolcher/fglpkg/internal/updatecheck"
 )
 
 func TestBumpVersion(t *testing.T) {
@@ -457,12 +460,14 @@ func TestVersionPrintsToolVersion(t *testing.T) {
 	}
 }
 
-// TestVersionFlags: `fglpkg --version` and `fglpkg -v` print the tool version
-// via the top-level flag path in Execute (GIS-288).
+// TestVersionFlags: every spelling isVersionFlag accepts prints the tool
+// version via the top-level flag path in Execute (GIS-288; `-V` SUPASIA-3231).
+// Driven off the predicate rather than a copied list, so a spelling added there
+// cannot reach users untested.
 func TestVersionFlags(t *testing.T) {
 	origArgs := os.Args
 	t.Cleanup(func() { os.Args = origArgs })
-	for _, flag := range []string{"--version", "-v"} {
+	for _, flag := range versionFlagSpellings {
 		t.Run(flag, func(t *testing.T) {
 			out, err := captureStdout(t, func() error {
 				os.Args = []string{"fglpkg", flag}
@@ -475,5 +480,57 @@ func TestVersionFlags(t *testing.T) {
 				t.Errorf("%s output %q missing tool-version banner", flag, out)
 			}
 		})
+	}
+}
+
+// versionFlagSpellings is every argument isVersionFlag accepts, asserted
+// exhaustive by TestIsVersionFlagSpellings so the tables below stay honest.
+var versionFlagSpellings = []string{"--version", "-v", "-V"}
+
+// TestIsVersionFlagSpellings pins the accepted set — both that each spelling is
+// accepted and that nothing adjacent is. `-version` and `--v` are the near
+// misses a loosened predicate would start swallowing, and `version` is the
+// subcommand, which must stay a subcommand so `fglpkg version --help` works.
+func TestIsVersionFlagSpellings(t *testing.T) {
+	for _, flag := range versionFlagSpellings {
+		if !isVersionFlag(flag) {
+			t.Errorf("isVersionFlag(%q) = false, want true", flag)
+		}
+	}
+	for _, flag := range []string{"version", "-version", "--v", "--Version", "-VV", "", "-h"} {
+		if isVersionFlag(flag) {
+			t.Errorf("isVersionFlag(%q) = true, want false", flag)
+		}
+	}
+}
+
+// TestVersionFlagsSkipTheUpdateCheck guards the drift that produced
+// SUPASIA-3231: updatecheck.Allowed already listed "-V" while Execute did not
+// accept it, so the two halves disagreed about what a version request looks
+// like. A `fglpkg -V` must not emit an "update available" notice — it is the
+// one command a user runs to read a version, and advisory chatter on stderr is
+// exactly what a script scraping it does not want.
+func TestVersionFlagsSkipTheUpdateCheck(t *testing.T) {
+	base := updatecheck.Env{
+		Version:     "4.2.8",
+		Enabled:     true,
+		StdoutIsTTY: true,
+		StderrIsTTY: true,
+		Interval:    24 * time.Hour,
+		Now:         time.Now(),
+	}
+	for _, flag := range append([]string{"version"}, versionFlagSpellings...) {
+		e := base
+		e.Command = flag
+		if updatecheck.Allowed(e) {
+			t.Errorf("updatecheck.Allowed(Command=%q) = true, want false", flag)
+		}
+	}
+	// A control: an ordinary command on the same Env is still allowed, so the
+	// assertions above are about the command and not a mis-built Env.
+	e := base
+	e.Command = "install"
+	if !updatecheck.Allowed(e) {
+		t.Fatal("updatecheck.Allowed(Command=\"install\") = false; the Env, not the command, is disabling the check")
 	}
 }
