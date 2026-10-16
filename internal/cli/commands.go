@@ -636,8 +636,9 @@ specific doc.
 		Name:    "version",
 		Summary: "Print the fglpkg tool version",
 		Usage:   "fglpkg version",
-		Long: `Prints the fglpkg tool version. Equivalent to 'fglpkg --version' and
-'fglpkg -v'. This command only reports the tool version and never touches
+		Long: `Prints the fglpkg tool version. Equivalent to 'fglpkg --version',
+'fglpkg -v' and 'fglpkg -V' (the Genero convention, as used by fglrun and
+fglcomp). This command only reports the tool version and never touches
 fglpkg.json — to change the package version, use 'fglpkg bump'.
 `,
 	},
@@ -705,6 +706,21 @@ var commandIndex = func() map[string]*command {
 // isHelpFlag reports whether an argument is a help request.
 func isHelpFlag(a string) bool {
 	return a == "-h" || a == "--help"
+}
+
+// isVersionFlag reports whether a top-level argument asks for the tool version.
+//
+// Three spellings, two conventions. `--version` and `-v` are the universal CLI
+// ones, added with `fglpkg version` in GIS-288. `-V` is the Genero house one —
+// fglrun, fglcomp and the rest all answer `-V` — so a Genero developer reaches
+// for the uppercase form first and, until SUPASIA-3231, was told `unknown
+// command: "-V"`. fglpkg answers all three identically; unlike fglrun it has no
+// short/long version output to distinguish.
+//
+// Only Execute's top-level dispatch consults this. A `-V` after a command name
+// belongs to that command, not to the version path.
+func isVersionFlag(a string) bool {
+	return a == "--version" || a == "-v" || a == "-V"
 }
 
 // helpRequested reports whether args ask for this command's help. For
