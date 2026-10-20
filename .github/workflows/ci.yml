@@ -16,11 +16,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # setup-go v6+ sets GOTOOLCHAIN=local, so the go command can no longer
-      # silently download a newer toolchain than the one installed here. With
-      # go-version-file that is the version go.mod names (1.20), which is what
-      # we want pinned — the newer toolchains compile stdlib API that 1.20
-      # rejects.
+      # go-version-file installs the version go.mod's `go` line names; that is
+      # the toolchain pin. (setup-go v6+ also exports GOTOOLCHAIN=local, which
+      # go < 1.21 ignores.)
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod

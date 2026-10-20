@@ -25,6 +25,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # go-version-file installs the version go.mod's `go` line names; that is
+      # the toolchain pin. (setup-go v6+ also exports GOTOOLCHAIN=local, which
+      # go < 1.21 ignores.)
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
