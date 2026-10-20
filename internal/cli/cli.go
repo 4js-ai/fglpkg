@@ -1327,10 +1327,41 @@ func removeFromGlobalStore(globalHome string, pkgArgs []string) error {
 
 // ─── update ───────────────────────────────────────────────────────────────────
 
+// updateArgError explains a rejected `fglpkg update` argument. An unrecognised
+// flag and a package name both arrive as positionals, but they are different
+// mistakes: the flag is a typo, while the package name is someone asking to
+// move one package — which is what `install` is for. Only the latter gets the
+// redirect, and a name that already carries a version keeps it rather than
+// growing a second @.
+func updateArgError(a string) error {
+	if strings.HasPrefix(a, "-") {
+		return fmt.Errorf("unknown argument %q", a)
+	}
+	want := a + "@<version>"
+	if strings.Contains(a, "@") {
+		want = a
+	}
+	return fmt.Errorf("unknown argument %q: 'update' takes no package argument, it re-resolves every dependency.\nTo move one package, use 'fglpkg install %s'", a, want)
+}
+
 func cmdUpdate(args []string) error {
 	flags, err := parseInstallFlags(args)
 	if err != nil {
 		return err
+	}
+	// update takes no package argument — it re-resolves the whole manifest.
+	// parseInstallFlags exists for `install`, so it collects positionals, and
+	// anything it does not recognise as a flag lands there too; one check
+	// therefore catches both `fglpkg update fglunit` and `fglpkg update
+	// --bogus`. Both were previously accepted and silently ignored, which is
+	// worse than refusing: a package name reads as a scope that was never
+	// applied, while every dependency on a range constraint moves (GIS-593).
+	//
+	// Checked before --frozen so the first thing on the command line is the
+	// thing reported. Same ExitError{2} as `list`, which made this same change
+	// for the same reason (see parseListFlags).
+	if len(flags.pkgs) > 0 {
+		return &ExitError{Code: 2, Err: updateArgError(flags.pkgs[0])}
 	}
 	// --frozen pins the lock; update exists to move it. Refusing beats silently
 	// ignoring the flag.

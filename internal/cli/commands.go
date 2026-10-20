@@ -147,6 +147,10 @@ directory.
 Ignores fglpkg-lock.json and re-resolves every dependency to the newest version
 allowed by the manifest constraints.
 
+Takes no package argument: it is all-or-nothing, and a name is refused rather
+than ignored. To move one package, use 'fglpkg install <package>@<version>',
+which rewrites that one constraint in fglpkg.json.
+
 Like install, update then converges .fglpkg/ on the resolved graph: anything it
 no longer requires is deleted from disk. Local (.fglpkg/) installs only — a
 global ~/.fglpkg/ is shared across projects.
