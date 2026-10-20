@@ -151,6 +151,10 @@ Takes no package argument: it is all-or-nothing, and a name is refused rather
 than ignored. To move one package, use 'fglpkg install <package>@<version>',
 which rewrites that one constraint in fglpkg.json.
 
+install's own flags (--force, --no-verify-signature, --save-dev/-optional/-prod)
+are refused too: they apply to installing a named package, which update does not
+do. They used to be parsed and silently dropped.
+
 Like install, update then converges .fglpkg/ on the resolved graph: anything it
 no longer requires is deleted from disk. Local (.fglpkg/) installs only — a
 global ~/.fglpkg/ is shared across projects.

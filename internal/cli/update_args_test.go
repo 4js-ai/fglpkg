@@ -25,7 +25,7 @@ func TestUpdateRejectsAPackageArgument(t *testing.T) {
 	}{
 		{"package name", []string{"fglunit"}, `unknown argument "fglunit"`},
 		{"name that does not exist", []string{"no-such-pkg-xyz"}, `unknown argument "no-such-pkg-xyz"`},
-		{"unknown flag", []string{"--bogus"}, `unknown argument "--bogus"`},
+		{"unknown flag", []string{"--bogus"}, `unknown flag "--bogus"`},
 		{"name among valid flags", []string{"--local", "fglunit"}, `unknown argument "fglunit"`},
 	}
 	for _, tc := range cases {
@@ -89,31 +89,95 @@ func TestUpdateStillAcceptsItsOwnFlags(t *testing.T) {
 	}
 }
 
-// TestUpdateArgErrorRedirectsOnlyPackageNames: a typo'd flag and a package name
-// are different mistakes, and only the second one has an `install` to point at.
-func TestUpdateArgErrorRedirectsOnlyPackageNames(t *testing.T) {
-	cases := []struct {
-		arg         string
-		wantInstall string // "" = no redirect expected
-	}{
+// TestUpdateArgErrorRedirectsToInstall: the redirect names the package, and a
+// name that already carries a version does not grow a second @.
+func TestUpdateArgErrorRedirectsToInstall(t *testing.T) {
+	for _, tc := range []struct{ arg, want string }{
 		{"fglunit", "fglpkg install fglunit@<version>"},
 		{"fglunit@1.0.1", "fglpkg install fglunit@1.0.1"},
-		{"--bogus", ""},
-		{"-x", ""},
-	}
-	for _, tc := range cases {
+	} {
 		got := updateArgError(tc.arg).Error()
-		if tc.wantInstall == "" {
-			if strings.Contains(got, "fglpkg install") {
-				t.Errorf("updateArgError(%q) = %q; a flag typo should not suggest an install", tc.arg, got)
-			}
-			continue
+		if !strings.Contains(got, tc.want) {
+			t.Errorf("updateArgError(%q) = %q; want it to suggest %q", tc.arg, got, tc.want)
 		}
-		if !strings.Contains(got, tc.wantInstall) {
-			t.Errorf("updateArgError(%q) = %q; want it to suggest %q", tc.arg, got, tc.wantInstall)
-		}
-		if strings.Contains(got, "@<version>") && strings.Contains(tc.arg, "@") {
+		if strings.Contains(tc.arg, "@") && strings.Contains(got, "@<version>") {
 			t.Errorf("updateArgError(%q) = %q; a pinned name must not grow a second @", tc.arg, got)
 		}
+	}
+}
+
+// GIS-583, the part GIS-593 did not cover: parseInstallFlags turned any
+// unrecognised token into a package name, so `fglpkg install --genero 6.00`
+// became a registry lookup for "--genero" — and the error even suggested
+// `fglpkg login`. A slug always starts alphanumeric, so a leading "-" is a
+// flag. This is asserted on the parser because it fixes `install` too, not
+// only `update`.
+func TestParseInstallFlagsRejectsUnknownFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"--genero", "6.00"},
+		{"--bogus-flag"},
+		{"-x"},
+		{"fglunit", "--genero"},
+	} {
+		f, err := parseInstallFlags(args)
+		if err == nil {
+			t.Errorf("parseInstallFlags(%q) = nil error, pkgs=%q; want an unknown-flag error", args, f.pkgs)
+			continue
+		}
+		if !strings.Contains(err.Error(), "unknown flag") {
+			t.Errorf("parseInstallFlags(%q) error = %q; want it to name it an unknown flag", args, err)
+		}
+	}
+}
+
+// TestParseInstallFlagsStillAcceptsPackageNames is the control for the check
+// above: a version pin and a scoped name must not be mistaken for flags.
+func TestParseInstallFlagsStillAcceptsPackageNames(t *testing.T) {
+	args := []string{"fglunit@1.0.1", "megamenu", "--save-dev"}
+	f, err := parseInstallFlags(args)
+	if err != nil {
+		t.Fatalf("parseInstallFlags(%q): %v", args, err)
+	}
+	if len(f.pkgs) != 2 || f.pkgs[0] != "fglunit@1.0.1" || f.pkgs[1] != "megamenu" {
+		t.Errorf("parseInstallFlags(%q) pkgs = %q; want both package names", args, f.pkgs)
+	}
+}
+
+// GIS-583: update parsed install-only flags and dropped them, exit 0. The worst
+// of them is --no-verify-signature: a user who passed it believed they had
+// turned verification off for that run, and nothing said otherwise.
+func TestUpdateRefusesInstallOnlyFlags(t *testing.T) {
+	for _, flag := range []string{
+		"--force", "-f",
+		"--no-verify-signature",
+		"--save-dev", "-D",
+		"--save-optional", "-O",
+		"--save-prod", "-P",
+	} {
+		t.Run(flag, func(t *testing.T) {
+			err := cmdUpdate([]string{flag})
+			if err == nil {
+				t.Fatalf("cmdUpdate(%q) = nil; want a refusal", flag)
+			}
+			if !strings.Contains(err.Error(), flag) {
+				t.Errorf("cmdUpdate(%q) error = %q; it must name the flag the user typed", flag, err)
+			}
+			if !strings.Contains(err.Error(), "not valid for 'update'") {
+				t.Errorf("cmdUpdate(%q) error = %q; want the same wording --frozen uses", flag, err)
+			}
+			var exitErr *ExitError
+			if !errors.As(err, &exitErr) || exitErr.Code != 2 {
+				t.Errorf("cmdUpdate(%q) should exit 2 like the other usage errors; got %v", flag, err)
+			}
+		})
+	}
+}
+
+// TestUpdateFrozenStillRefused guards the pre-existing --frozen policy, whose
+// message is deliberately more specific than the generic install-only one.
+func TestUpdateFrozenStillRefused(t *testing.T) {
+	err := cmdUpdate([]string{"--frozen"})
+	if err == nil || !strings.Contains(err.Error(), "--frozen is not valid for 'update'") {
+		t.Fatalf("cmdUpdate(--frozen) = %v; want the bespoke --frozen refusal", err)
 	}
 }
