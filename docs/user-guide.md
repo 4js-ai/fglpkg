@@ -717,6 +717,14 @@ To re-resolve all dependencies to their latest compatible versions (ignoring the
 fglpkg update
 ```
 
+`update` re-resolves everything or nothing: it takes no package argument, and a package name is refused, so `fglpkg update fglunit` is an error rather than a scoped update:
+
+```bash
+fglpkg install fglunit@1.0.1        # move one package's constraint
+```
+
+That rewrites just that one constraint in `fglpkg.json`. It is not a scoped resolve, though: the install that follows re-resolves the whole graph exactly as `update` does, so any other dependency on a range constraint can move with it. What you are choosing is which constraint changes, not how much of the graph is reconsidered.
+
 This rewrites `fglpkg-lock.json` with whatever versions the registry now resolves to, and re-installs anything that changed — BDL packages, Java JARs, and webcomponent packages alike. Whenever an install has work to do, webcomponent bundles are re-extracted rather than skipped (there's no "already installed, skip" fast path for them like there is for BDL packages), so an `update` that picks up a new webcomponent version reliably overwrites the old files in `.fglpkg/webcomponents/<COMPONENTTYPE>/`, and files the new version no longer ships are removed with it. See [Publishing an Update](#publishing-an-update) for the publisher side of this flow.
 
 A pulled commit that bumps *only* a web component is picked up by plain `fglpkg install`, the same as a BDL package. An installed web component leaves no manifest behind — the publisher's is deliberately not extracted, since several widgets would collide on it — so fglpkg records the version it installed in `.fglpkg/webcomponent-owners.json` and compares against that. A store written by an older fglpkg has no such record, so its web components re-extract once on the first install after the upgrade and are a no-op from then on.

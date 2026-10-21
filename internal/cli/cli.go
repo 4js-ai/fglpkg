@@ -1082,6 +1082,12 @@ type installFlags struct {
 	scope              manifest.Scope
 	registry           string // --registry <name>: restrict resolution to one repo and pin it
 	pkgs               []string
+
+	// installOnly records the install-only flags this parse saw, in the
+	// spelling the user typed, so `update` can refuse them by name (GIS-583).
+	// A list of names rather than booleans because --save-prod sets the scope
+	// the default already has, so the field alone cannot say it was passed.
+	installOnly []string
 }
 
 // parseInstallFlags extends parseFlags with --save-dev/-D, --save-optional/-O,
@@ -1102,12 +1108,14 @@ func parseInstallFlags(args []string) (installFlags, error) {
 			f.global = true
 		case "--force", "-f":
 			f.force = true
+			f.installOnly = append(f.installOnly, a)
 		case "--production", "--prod":
 			f.production = true
 		case "--no-manifest-fallback":
 			f.noManifestFallback = true
 		case "--no-verify-signature":
 			f.noVerifySignature = true
+			f.installOnly = append(f.installOnly, a)
 		case "--no-prune":
 			f.noPrune = true
 		case "--frozen", "--frozen-lockfile":
@@ -1115,11 +1123,14 @@ func parseInstallFlags(args []string) (installFlags, error) {
 		case "--save-dev", "-D":
 			devSeen = true
 			f.scope = manifest.ScopeDev
+			f.installOnly = append(f.installOnly, a)
 		case "--save-optional", "-O":
 			optSeen = true
 			f.scope = manifest.ScopeOptional
+			f.installOnly = append(f.installOnly, a)
 		case "--save-prod", "-P":
 			f.scope = manifest.ScopeProd
+			f.installOnly = append(f.installOnly, a)
 		case "--registry":
 			if i+1 >= len(args) {
 				return f, fmt.Errorf("--registry requires a value")
@@ -1127,6 +1138,14 @@ func parseInstallFlags(args []string) (installFlags, error) {
 			i++
 			f.registry = args[i]
 		default:
+			// A package slug always starts alphanumeric (internal/slug), so a
+			// leading "-" is a flag — a typo or a flag that belongs to another
+			// command. Treating it as a package name turned `fglpkg install
+			// --genero 6.00` into a registry lookup for "--genero", complete
+			// with a "run fglpkg login" hint (GIS-583).
+			if strings.HasPrefix(a, "-") {
+				return f, fmt.Errorf("unknown flag %q", a)
+			}
 			f.pkgs = append(f.pkgs, a)
 		}
 	}
@@ -1327,15 +1346,49 @@ func removeFromGlobalStore(globalHome string, pkgArgs []string) error {
 
 // ─── update ───────────────────────────────────────────────────────────────────
 
+// updateArgError explains a rejected `fglpkg update` package argument. Only a
+// package name can reach here — parseInstallFlags rejects a leading "-" as an
+// unknown flag — so this always redirects to `install`, which is the command
+// that moves one package. A name that already carries a version keeps it
+// rather than growing a second @.
+func updateArgError(a string) error {
+	want := a + "@<version>"
+	if strings.Contains(a, "@") {
+		want = a
+	}
+	return fmt.Errorf("unknown argument %q: 'update' takes no package argument, it re-resolves every dependency.\nTo move one package, use 'fglpkg install %s'", a, want)
+}
+
 func cmdUpdate(args []string) error {
 	flags, err := parseInstallFlags(args)
 	if err != nil {
-		return err
+		return &ExitError{Code: 2, Err: err}
+	}
+	// update takes no package argument — it re-resolves the whole manifest.
+	// parseInstallFlags exists for `install`, so it collects positionals, which
+	// cmdUpdate then never read: the name was accepted and silently ignored,
+	// and it reads as a scope that was never applied (GIS-593).
+	//
+	// A package argument is reported ahead of --frozen and the install-only
+	// flags, so a command carrying both is answered on the argument. Same
+	// ExitError{2} as `list`, which made this same change for the same reason
+	// (see parseListFlags).
+	if len(flags.pkgs) > 0 {
+		return &ExitError{Code: 2, Err: updateArgError(flags.pkgs[0])}
 	}
 	// --frozen pins the lock; update exists to move it. Refusing beats silently
 	// ignoring the flag.
 	if flags.frozen {
-		return fmt.Errorf("--frozen is not valid for 'update' (update re-resolves by design); use 'fglpkg install --frozen'")
+		return &ExitError{Code: 2, Err: fmt.Errorf("--frozen is not valid for 'update' (update re-resolves by design); use 'fglpkg install --frozen'")}
+	}
+	// The rest of install's flags are about installing a NAMED package: --force
+	// and --no-verify-signature apply to that install, and the --save-* flags
+	// choose the scope a new dependency is recorded under. update adds nothing
+	// and names nothing, so all of them were parsed and dropped — including
+	// --no-verify-signature, which left a user believing they had turned
+	// verification off (GIS-583). Same policy as --frozen above.
+	if len(flags.installOnly) > 0 {
+		return &ExitError{Code: 2, Err: fmt.Errorf("%s is not valid for 'update' (it applies to installing a named package, which update does not do); use it on 'fglpkg install'", strings.Join(flags.installOnly, ", "))}
 	}
 	home, isLocal, err := resolveHome(flags.local, flags.global)
 	if err != nil {

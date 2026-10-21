@@ -18,3 +18,24 @@ it "-h shows usage" _help_flag
 # in the usage page rather than guessing (SUPASIA-3231).
 _global_flags() { run help; assert_success; assert_contains "GLOBAL FLAGS:"; assert_contains "-V, -v, --version"; }
 it "help documents the global flags" _global_flags
+
+# GIS-593: `update` borrows install's flag parser, which collects positionals,
+# and cmdUpdate never read them — so a package name, a nonexistent name and an
+# unknown flag were all accepted and exited 0 while the whole graph re-resolved.
+_update_rejects_pkg() { run update fglunit; assert_failure; assert_contains 'unknown argument "fglunit"'; }
+it "update refuses a package argument" _update_rejects_pkg
+
+_update_redirects_to_install() { run update fglunit; assert_contains "fglpkg install fglunit@<version>"; }
+it "update points at install for moving one package" _update_redirects_to_install
+
+_update_rejects_unknown_flag() { run update --bogus; assert_failure; assert_contains 'unknown flag "--bogus"'; }
+it "update refuses an unknown flag" _update_rejects_unknown_flag
+
+# GIS-583, the parts beyond the package argument: update parsed install-only
+# flags and dropped them (exit 0), and install turned any unknown token into a
+# package name — `install --genero 6.00` became a registry lookup for "--genero".
+_update_rejects_install_only() { run update --no-verify-signature; assert_failure; assert_contains "not valid for 'update'"; }
+it "update refuses an install-only flag instead of dropping it" _update_rejects_install_only
+
+_install_rejects_unknown_flag() { run install --genero 6.00; assert_failure; assert_contains 'unknown flag "--genero"'; }
+it "install refuses an unknown flag instead of resolving it as a package" _install_rejects_unknown_flag
