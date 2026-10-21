@@ -69,22 +69,32 @@ func TestUpdateRejectsBeforeDoingAnything(t *testing.T) {
 	}
 }
 
-// TestUpdateStillAcceptsItsOwnFlags is the control: the guard must not make
-// `update` refuse the arguments it documents. Without this, deleting the
-// positional collection entirely would still pass the tests above.
+// TestUpdateStillAcceptsItsOwnFlags is the control for every refusal above,
+// and GIS-593's third acceptance criterion: update with its documented flags
+// must behave as it always did.
+//
+// It asserts on cmdUpdate rather than on parseInstallFlags. There are now two
+// ways update can wrongly refuse its own flag — the positional slice and the
+// installOnly list — and a parser-level check that looks only at f.pkgs sees
+// neither: adding --production to installOnly makes `fglpkg update
+// --production` exit 2 while every test still passes.
+//
+// Running with no fglpkg.json present turns "got past the argument checks"
+// into an observable result: the manifest error is how a flag reports that it
+// was accepted.
 func TestUpdateStillAcceptsItsOwnFlags(t *testing.T) {
+	t.Setenv("FGLPKG_HOME", t.TempDir())
+	chdir(t, t.TempDir())
 	for _, args := range [][]string{
-		{"--production"},
-		{"--no-prune"},
-		{"--registry", "gi"},
+		{"--local"}, {"-l"}, {"--global"}, {"-g"},
+		{"--production"}, {"--prod"},
+		{"--no-manifest-fallback"}, {"--no-prune"},
+		{"--registry", "gi"}, {"--registry=gi"},
 		{"--local", "--prod"},
 	} {
-		f, err := parseInstallFlags(args)
-		if err != nil {
-			t.Fatalf("parseInstallFlags(%q): %v", args, err)
-		}
-		if len(f.pkgs) != 0 {
-			t.Errorf("parseInstallFlags(%q) collected %q as positionals; cmdUpdate would now refuse its own flags", args, f.pkgs)
+		err := cmdUpdate(args)
+		if err == nil || !strings.Contains(err.Error(), manifest.Filename) {
+			t.Errorf("cmdUpdate(%q) = %v; want it past the argument checks, failing only on the missing %s", args, err, manifest.Filename)
 		}
 	}
 }
@@ -175,9 +185,15 @@ func TestUpdateRefusesInstallOnlyFlags(t *testing.T) {
 
 // TestUpdateFrozenStillRefused guards the pre-existing --frozen policy, whose
 // message is deliberately more specific than the generic install-only one.
+// This PR also moved it from exit 1 to exit 2, so the code is asserted as it
+// is for every other usage error — otherwise reverting that one line passes.
 func TestUpdateFrozenStillRefused(t *testing.T) {
 	err := cmdUpdate([]string{"--frozen"})
 	if err == nil || !strings.Contains(err.Error(), "--frozen is not valid for 'update'") {
 		t.Fatalf("cmdUpdate(--frozen) = %v; want the bespoke --frozen refusal", err)
+	}
+	var exitErr *ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 2 {
+		t.Errorf("cmdUpdate(--frozen) should exit 2 like the other usage errors; got %v", err)
 	}
 }

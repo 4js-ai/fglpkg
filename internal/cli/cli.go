@@ -1365,16 +1365,14 @@ func cmdUpdate(args []string) error {
 		return &ExitError{Code: 2, Err: err}
 	}
 	// update takes no package argument — it re-resolves the whole manifest.
-	// parseInstallFlags exists for `install`, so it collects positionals, and
-	// anything it does not recognise as a flag lands there too; one check
-	// therefore catches both `fglpkg update fglunit` and `fglpkg update
-	// --bogus`. Both were previously accepted and silently ignored, which is
-	// worse than refusing: a package name reads as a scope that was never
-	// applied, while every dependency on a range constraint moves (GIS-593).
+	// parseInstallFlags exists for `install`, so it collects positionals, which
+	// cmdUpdate then never read: the name was accepted and silently ignored,
+	// and it reads as a scope that was never applied (GIS-593).
 	//
-	// Checked before --frozen so the first thing on the command line is the
-	// thing reported. Same ExitError{2} as `list`, which made this same change
-	// for the same reason (see parseListFlags).
+	// A package argument is reported ahead of --frozen and the install-only
+	// flags, so a command carrying both is answered on the argument. Same
+	// ExitError{2} as `list`, which made this same change for the same reason
+	// (see parseListFlags).
 	if len(flags.pkgs) > 0 {
 		return &ExitError{Code: 2, Err: updateArgError(flags.pkgs[0])}
 	}

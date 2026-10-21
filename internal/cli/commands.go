@@ -147,13 +147,14 @@ directory.
 Ignores fglpkg-lock.json and re-resolves every dependency to the newest version
 allowed by the manifest constraints.
 
-Takes no package argument: it is all-or-nothing, and a name is refused rather
-than ignored. To move one package, use 'fglpkg install <package>@<version>',
-which rewrites that one constraint in fglpkg.json.
+Takes no package argument; a package name is refused. To move one package, use
+'fglpkg install <package>@<version>', which rewrites that one constraint in
+fglpkg.json. Note that it then re-resolves the graph as update does, so other
+dependencies on a range constraint can move with it.
 
 install's own flags (--force, --no-verify-signature, --save-dev/-optional/-prod)
 are refused too: they apply to installing a named package, which update does not
-do. They used to be parsed and silently dropped.
+do.
 
 Like install, update then converges .fglpkg/ on the resolved graph: anything it
 no longer requires is deleted from disk. Local (.fglpkg/) installs only — a
