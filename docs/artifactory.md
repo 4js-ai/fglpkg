@@ -144,7 +144,7 @@ the URL carries a key, they must agree or the add is rejected.
 
 ```
 NAME   TYPE         PRIO  AUTH    LOGIN  SOURCE   DEFAULT  URL
-gi     genero       1     bearer  env    builtin  -        https://service.generointelligence.ai
+gi     genero       1     bearer  env    builtin  publish* https://service.generointelligence.ai
 acme   artifactory  2     bearer  no     project  -        https://artifactory.acme.example/artifactory
 ```
 
@@ -152,6 +152,10 @@ The three derived columns are worth reading:
 
 - **SOURCE** — which layer defined the row: `builtin`, `global`, or `project`.
 - **DEFAULT** — the default role it serves: `consume`, `publish`, `both`, or `-`.
+  A trailing `*` marks the **built-in fallback** rather than a configured default:
+  with no `defaultRegistry` set anywhere, the `gi` row reads `publish*`, because a
+  bare `fglpkg publish` would go there — and it asks before it does. Set your own
+  target with `fglpkg registry add <name> <url> --publish-default`.
 - **LOGIN** — credential state: `yes` (stored), `no` (none), `anon` (anonymous
   scheme), or `env` (the GI registry authenticated by `FGLPKG_TOKEN` — this only
   ever applies to `gi`, never to an Artifactory repo).
