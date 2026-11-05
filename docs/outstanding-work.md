@@ -199,7 +199,14 @@ the registry. fglpkg does not need a registry build for this.
 
 - **Manifest + publish already support it:** `manifest.Manifest.Visibility` exists
   and `publishPackage` sends it on package create.
-- **Default stays `public` (confirmed decision).** Note the intentional mismatch:
+- ⚠️ **Default stays `public` — REOPENED by [GIS-600](https://4js.atlassian.net/browse/GIS-600).**
+  A package was submitted to the public GI registry by following the documented
+  bare `fglpkg publish`, and a submitted version cannot be withdrawn from the
+  command line. The *silent fallback to the GI target* is fixed (publish now
+  asks at a terminal and refuses under `--ci`; see `confirmPublishTarget`), but
+  the **public-by-default visibility below is unchanged and still open** —
+  reversing it is a breaking change that needs an explicit R&D decision.
+- **Default stays `public` (confirmed decision — see the warning above).** Note the intentional mismatch:
   `publishPackage` sets `visibility = "public"` when the manifest omits it
   ([cli.go:762-764](../internal/cli/cli.go)), which **overrides** the registry's
   private-by-default. This is deliberate (npm-like, public-by-default); publishing
