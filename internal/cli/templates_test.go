@@ -205,3 +205,77 @@ func TestParsePublishFlagsRegistryAndForce(t *testing.T) {
 		t.Fatalf("parsed = %+v", pf)
 	}
 }
+
+// The scaffolded README is where a new package author reads how to publish, so
+// it must not scaffold an instruction that now refuses. `fglpkg init
+// --template library` used to write a bare `fglpkg publish` into README.md;
+// with GIS-600 that command refuses outside a terminal and asks inside one, so
+// every publish command a template hands out names its target.
+//
+// The check is on the COMMAND BLOCKS, not the prose: the surrounding text does
+// mention a bare `fglpkg publish` on purpose, when explaining what the
+// fallback does.
+func TestTemplateReadmesNeverScaffoldABarePublish(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"library", libraryReadme},
+		{"app", appReadme},
+		{"webcomponent", webcomponentReadme},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, cmd := range fencedCommands(tc.body) {
+				if !strings.HasPrefix(cmd, "fglpkg publish") {
+					continue
+				}
+				if !strings.Contains(cmd, "--registry") {
+					t.Errorf("scaffolded command %q has no target; GIS-600 makes a bare publish refuse", cmd)
+				}
+			}
+		})
+	}
+}
+
+// ...and the templates that DO publish point at the ways out, or the author is
+// left with a command that asks on every run and no idea how to stop it.
+func TestPublishingTemplatesNameTheOptIn(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"library", libraryReadme},
+		{"webcomponent", webcomponentReadme},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, want := range []string{
+				"fglpkg publish --registry gi", // the explicit opt-in
+				"registry list",                // how to find the alternatives
+			} {
+				if !strings.Contains(tc.body, want) {
+					t.Errorf("the %s README should mention %q, got:\n%s", tc.name, want, tc.body)
+				}
+			}
+		})
+	}
+}
+
+// fencedCommands returns the command lines inside ``` fences, stripped of any
+// trailing comment. Templates are written both as raw strings and as
+// concatenated quoted strings, so this works on the rendered text rather than
+// on the Go source.
+func fencedCommands(body string) []string {
+	var cmds []string
+	inFence := false
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			inFence = !inFence
+			continue
+		}
+		if !inFence {
+			continue
+		}
+		cmd := strings.TrimSpace(line)
+		if i := strings.Index(cmd, "#"); i >= 0 {
+			cmd = strings.TrimSpace(cmd[:i])
+		}
+		if cmd != "" {
+			cmds = append(cmds, cmd)
+		}
+	}
+	return cmds
+}
