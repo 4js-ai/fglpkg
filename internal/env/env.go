@@ -746,7 +746,7 @@ func (p *envPlan) finalWarnings() []string {
 // The shell and the path separator are independent: the shell is whoever will
 // execute these lines, the separator is what the Genero runtime that parses the
 // values expects. See internal/env/shell.go's header.
-func (g *Generator) renderShell(p *envPlan, alwaysLD bool) []string {
+func (g *Generator) renderShell(p *envPlan) []string {
 	sh, sep := g.targetShell(), pathSeparator()
 	var lines []string
 
@@ -761,8 +761,7 @@ func (g *Generator) renderShell(p *envPlan, alwaysLD bool) []string {
 		lines = append(lines, prependLine(sh, string(v), value, sep))
 	}
 
-	ld := strings.Join(p.ldpath, sep)
-	if ld != "" || alwaysLD {
+	if ld := strings.Join(p.ldpath, sep); ld != "" {
 		emit(varLD, ld)
 	}
 	if cp := strings.Join(p.classpath, sep); cp != "" {
@@ -957,9 +956,16 @@ func (g *Generator) Generate() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	// FGLLDPATH is emitted even when empty here, preserving the historical
-	// behaviour of the default mode.
-	lines := g.renderShell(p, true)
+	// Emits nothing for an empty FGLLDPATH, like GenerateLocal/GenerateGlobal.
+	// The default mode used to emit it regardless ("the historical behaviour"),
+	// which produced `export FGLLDPATH="${FGLLDPATH:+:$FGLLDPATH}"` with
+	// nothing installed: a line that adds no package path, turns an existing
+	// FGLLDPATH=/opt/app/lib into :/opt/app/lib, and exports an empty value
+	// when it was unset. Worse than the corruption was the silent success —
+	// running from a project SUBDIRECTORY takes this path, printed something
+	// that looked like a path export, and the failure surfaced much later as
+	// -8403 Module does not exist (GIS-588).
+	lines := g.renderShell(p)
 	g.warnings = p.finalWarnings()
 	return lines, nil
 }
@@ -970,7 +976,7 @@ func (g *Generator) GenerateLocal() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	lines := g.renderShell(p, false)
+	lines := g.renderShell(p)
 	g.warnings = p.finalWarnings()
 	return lines, nil
 }
@@ -984,7 +990,7 @@ func (g *Generator) GenerateGlobal() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	lines := g.renderShell(p, false)
+	lines := g.renderShell(p)
 	g.warnings = p.finalWarnings()
 	return lines, nil
 }

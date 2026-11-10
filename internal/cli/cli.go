@@ -1568,10 +1568,71 @@ func cmdEnv(args []string) error {
 	// list Genero Studio can parse. Emitting them here — after the switch —
 	// covers every output mode, --gst included.
 	printEnvWarnings(g)
+	if len(exports) == 0 {
+		// Nothing to export is a result the user must SEE. stdout is consumed
+		// by `eval "$(fglpkg env)"`, so an empty stdout plus exit 0 is
+		// indistinguishable from success — the compile then fails much later
+		// with -8403 Module does not exist, far from the cause (GIS-588).
+		printEnvNothingFound(home, useLocal, f.global)
+		return nil
+	}
 	for _, line := range exports {
 		fmt.Println(line)
 	}
 	return nil
+}
+
+// printEnvNothingFound explains an empty `fglpkg env` on stderr, so stdout
+// stays safe to eval.
+//
+// The single most likely way to reach it is running from a SUBDIRECTORY of a
+// project: isProjectDir() looks only at the current directory, so a
+// subdirectory falls through to the merged default mode and finds nothing
+// local. Naming the parent that does hold a manifest turns a silent no-op into
+// a one-line fix.
+func printEnvNothingFound(globalRoot string, useLocal, global bool) {
+	scope := "no installed packages found"
+	switch {
+	case global:
+		scope += " in the global root"
+	case useLocal:
+		scope += " in this project"
+	}
+	fmt.Fprintf(os.Stderr, "fglpkg env: %s; nothing to export\n", scope)
+	if !global {
+		if dir, ok := findProjectAncestor(); ok {
+			fmt.Fprintf(os.Stderr,
+				"  The current directory is not a project, but %s is.\n"+
+					"  Run fglpkg env from there, or 'cd %s' first.\n", dir, dir)
+		}
+	}
+	if !useLocal {
+		fmt.Fprintf(os.Stderr, "  Global package root: %s\n", globalRoot)
+	}
+}
+
+// findProjectAncestor walks up from the working directory looking for the
+// nearest parent that is a project (holds fglpkg.json or a project .fglpkg/).
+// The working directory itself is not considered — the caller already knows it
+// is not one.
+func findProjectAncestor() (string, bool) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", false
+	}
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false // reached the filesystem root
+		}
+		dir = parent
+		if _, err := os.Stat(filepath.Join(dir, manifest.Filename)); err == nil {
+			return dir, true
+		}
+		if fi, err := os.Stat(filepath.Join(dir, ".fglpkg")); err == nil && !isFglpkgOwnDir(fi) {
+			return dir, true
+		}
+	}
 }
 
 // printEnvWarnings writes an env Generator's diagnostics (basename collisions
