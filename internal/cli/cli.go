@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -479,11 +480,20 @@ func normalizeGitRemoteURL(raw string) string {
 // from git it is offered as the default (Enter accepts it); otherwise a value
 // is required, since ValidateForPublish needs it and there is nothing to
 // default to.
+//
+// The label names the field's meaning — the package's public SOURCE-CODE URL,
+// as the manifest reference defines it — because a bare "Repository" invites a
+// local checkout path, which is then published to the registry listing where it
+// reaches nobody. `publish` warns about such a value (warnNonURLRepository),
+// but saying so at the prompt is what stops it being entered (GIS-600).
 func promptRepository(detected string) (string, error) {
 	if detected != "" {
+		// The detected git remote doubles as the worked example, so no hint is
+		// needed; promptWithDefault appends it in parentheses.
 		return promptWithDefault("Repository", detected)
 	}
-	return promptNonEmptyString("Repository")
+	return promptNonEmptyStringWithHint("Repository",
+		"  The package's public source-code URL, e.g. https://github.com/owner/repo")
 }
 
 // promptGeneroConstraint prompts for the optional Genero version constraint,
@@ -2545,6 +2555,160 @@ func parsePublishFlags(args []string) (publishFlags, error) {
 	return pf, nil
 }
 
+// confirmPublishTarget guards the built-in fallback to the PUBLIC Genero
+// Intelligence registry (GIS-600).
+//
+// `publish` used to fall back to GI silently when --registry,
+// FGLPKG_PUBLISH_REGISTRY and defaultRegistry were all unset — the state right
+// after installing fglpkg, since `gi` is the only registry configured. Anyone
+// following the documented bare `fglpkg publish` therefore submitted to the
+// registry shared by every partner, and a submitted version cannot be withdrawn
+// from the command line (`unpublish` is gone, and `deprecate` does not hide a
+// package). Internal code reached the public review queue that way.
+//
+// The fallback itself stays — it is what makes `gi` usable — but reaching it is
+// now the user's decision: an interactive terminal is asked, defaulting to NO,
+// and a non-interactive run is refused with the ways to say where it should go.
+// Only `publish` is guarded. install/search/info and the other consumer
+// commands keep their silent fallback: they download, they do not disclose.
+//
+// --dry-run is deliberately NOT blocked. It uploads nothing by definition, and
+// failing it would break pipelines that use it as a validation step; it states
+// the target instead, which is the other half of the complaint — that the
+// fallback target was never shown.
+func confirmPublishTarget(pf publishFlags, m *manifest.Manifest) error {
+	if pf.registry != "" {
+		// An explicit --registry, FGLPKG_PUBLISH_REGISTRY or defaultRegistry:
+		// the user named a target, so there is nothing to confirm.
+		return nil
+	}
+	target := config.BuiltinGI(os.Getenv("FGLPKG_REGISTRY")).URL
+	// FGLPKG_REGISTRY repoints what `gi` means. Someone running an on-premise
+	// GI registry (or the functional suite's mock) has already said where the
+	// fallback goes, and it is not the public service — there is nothing to
+	// disclose and nothing to confirm. Guarding it anyway would force
+	// --registry gi on every publish for no safety gain. addressesPublicGI
+	// settles that question, and it fails safe.
+	if !addressesPublicGI(target) {
+		return nil
+	}
+	if pf.dryRun {
+		fmt.Fprintf(os.Stderr,
+			"warning: no publish target is configured — a real publish would submit to the\n"+
+				"  PUBLIC registry at %s. Pass --registry gi to choose it\n"+
+				"  explicitly, or run 'fglpkg registry list' to see the alternatives.\n",
+			target)
+		return nil
+	}
+	if pf.ci || !stdinIsTerminal() {
+		return fmt.Errorf(
+			"no publish target is configured, and this is not an interactive terminal.\n"+
+				"  A bare 'fglpkg publish' would submit to the PUBLIC registry at\n"+
+				"  %s, where a submitted version cannot be\n"+
+				"  withdrawn from the command line.\n"+
+				"  Name the target explicitly:\n"+
+				"    fglpkg publish --registry gi        submit to the public registry\n"+
+				"    fglpkg publish --registry <name>    publish to your own repository\n"+
+				"  'fglpkg registry list' shows the configured repositories; "+
+				"'fglpkg registry add <name> <url> --publish-default' makes one the default.",
+			target)
+	}
+	fmt.Printf("No publish target is configured.\n")
+	fmt.Printf("  This submits %s@%s to the PUBLIC registry at\n    %s\n", m.Name, m.Version, target)
+	fmt.Printf("  A submitted version cannot be withdrawn from the command line.\n")
+	if !promptYesNo("Publish there?", false) {
+		return fmt.Errorf("publish cancelled — nothing was uploaded.\n" +
+			"  Name a target with --registry <name>, or see 'fglpkg registry list'.")
+	}
+	return nil
+}
+
+// warnNonURLRepository flags a "repository" that is not an http(s) URL. The
+// field is the package's SOURCE-CODE location and is published to the registry
+// listing, so a local path or a bare git path there reaches nobody. It is the
+// value `fglpkg init` accepts without comment, which is how it gets filled in
+// wrongly (GIS-600). A warning, not an error: the field is optional metadata
+// and a publish must not fail over it.
+func warnNonURLRepository(m *manifest.Manifest) {
+	repo := strings.TrimSpace(m.Repository)
+	if repo == "" || isHTTPURL(repo) {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"warning: \"repository\" is %q, which is not an http(s) URL.\n"+
+			"  It is published as the package's source-code location, so a local path or a\n"+
+			"  bare git path is not reachable by anyone reading the registry listing.\n",
+		repo)
+}
+
+// isHTTPURL reports whether s is an absolute http(s) URL with a host.
+func isHTTPURL(s string) bool {
+	// "git+https://github.com/owner/repo.git" is the npm-style spelling of a
+	// perfectly reachable URL, so strip the VCS prefix before parsing rather
+	// than warning that it "is not reachable by anyone".
+	s = strings.TrimPrefix(s, "git+")
+	u, err := neturl.Parse(s)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+// addressesPublicGI reports whether target reaches the PUBLIC Genero
+// Intelligence service. This is the question the publish guard asks of
+// FGLPKG_REGISTRY, and the one branch where a wrong answer silently re-opens
+// GIS-600, so it is deliberately blunt.
+//
+// It compares HOST NAMES, not strings. An exact string comparison stood the
+// guard down for ":443", for mixed case, for a trailing "/.", for a plain
+// http:// scheme, for a trailing-dot FQDN and for Cloudflare's alternative
+// HTTPS ports — every one of those still reaches the public service, and the
+// http:// spelling would additionally put the bearer token on the wire in
+// cleartext.
+//
+// It fails safe: a value whose host cannot be determined is guarded rather
+// than waved through. The guard stands down only for a target it can SEE is
+// something else. Nothing is lost by that, because a URL with no usable host
+// (no scheme, no authority, unbalanced brackets) cannot be published to in any
+// case — the HTTP client cannot dial it.
+func addressesPublicGI(target string) bool {
+	host, ok := comparableHost(target)
+	if !ok {
+		return true
+	}
+	public, _ := comparableHost(config.BuiltinGI("").URL)
+	return host == public
+}
+
+// comparableHost reduces a URL to the host name that every spelling of the
+// same service shares, and reports whether one could be determined at all.
+//
+// Lower-cased, because host names are case-insensitive. Any trailing "." is
+// trimmed, because "example.com." is the absolute spelling of the same name
+// and Go's TLS verification accepts it.
+//
+// Neither the SCHEME nor the PORT is part of the result, because neither
+// selects a service on the host this is asked about. http:// and https:// on
+// one host are one service. And Cloudflare, which proxies the public
+// registry, answers HTTPS on several alternative ports for a proxied
+// hostname: verified anonymously against the public host, ":443", ":8443" and
+// ":2053" all return the same registry API (a 404
+// {"error":"Package not found"} for the same absent package). Treating
+// ":8443" as a different service would therefore have let a publish through
+// to the real registry.
+//
+// The cost of dropping the port is nil for the case it might have protected:
+// an on-premise registry on any port is a different HOST, so it still stands
+// the guard down.
+func comparableHost(raw string) (string, bool) {
+	u, err := neturl.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", false
+	}
+	host := strings.TrimRight(strings.ToLower(u.Hostname()), ".")
+	if host == "" {
+		return "", false
+	}
+	return host, true
+}
+
 func cmdPublish(args []string) error {
 	pf, err := parsePublishFlags(args)
 	if err != nil {
@@ -2563,6 +2727,16 @@ func cmdPublish(args []string) error {
 	if err := m.ValidateForPublish(); err != nil {
 		return err
 	}
+	// Settle the publish target BEFORE packing, so an unconfigured target is
+	// confirmed (or refused) without first building an archive. --registry, when
+	// given, always wins — it is already in pf.registry. (GIS-600)
+	if pf.registry == "" {
+		pf.registry = resolveDefaultPublishRegistry(home, m)
+	}
+	if err := confirmPublishTarget(pf, m); err != nil {
+		return err
+	}
+	warnNonURLRepository(m)
 	built, err := enforceLint(m, ".")
 	if err != nil {
 		return err
@@ -2589,14 +2763,9 @@ func cmdPublish(args []string) error {
 	}
 	generoMajor := gv.MajorString()
 
-	// With no explicit --registry, fall back to the configured default publish
-	// target (FGLPKG_PUBLISH_REGISTRY, then the project/global defaultRegistry),
-	// so a team publishing to their own Artifactory need not pass --registry
-	// every time. An empty result keeps the historical default of publishing to
-	// GI. --registry, when given, always wins (it is already in pf.registry).
-	if pf.registry == "" {
-		pf.registry = resolveDefaultPublishRegistry(home, m)
-	}
+	// pf.registry was resolved and confirmed above, before the package was built
+	// (GIS-600). An empty value here means the built-in GI target, which
+	// confirmPublishTarget has already had the user agree to.
 
 	// Publishing to a secondary (Artifactory) repository takes a distinct,
 	// direct-PUT path — no GI variant pre-check, no submit/approval step.
@@ -4167,11 +4336,12 @@ type registryEditFlags struct {
 	packages       []string
 	project        bool // write to the project fglpkg.json instead of the global config
 	consumeDefault bool // also make this the default consume registry (GIS-364)
+	publishDefault bool // also make this the default publish target (GIS-600)
 }
 
 const registryAddUsage = "usage: fglpkg registry add <name> <url> " +
 	"[--type genero|artifactory] [--repo-key K] [--auth bearer|basic|apikey|anonymous] " +
-	"[--priority N] [--packages 'acme-*,foo-*'] [--local] [--consume-default]\n" +
+	"[--priority N] [--packages 'acme-*,foo-*'] [--local] [--consume-default] [--publish-default]\n" +
 	"       writes ~/.fglpkg/config.json by default; --local writes the project fglpkg.json\n" +
 	"       <url> may include the Artifactory repo key (https://acme.jfrog.io/artifactory/GeneroBDL), " +
 	"in which case --repo-key is optional"
@@ -4192,6 +4362,8 @@ func parseRegistryAddFlags(args []string) (registryEditFlags, error) {
 			globalSeen = true
 		case a == "--consume-default":
 			f.consumeDefault = true
+		case a == "--publish-default":
+			f.publishDefault = true
 		case a == "--type" || strings.HasPrefix(a, "--type="):
 			v, err := flagValue(a, &i, args)
 			if err != nil {
@@ -4482,15 +4654,26 @@ func cmdRegistryAdd(args []string) error {
 		// --consume-default records the new repository as the sticky source for
 		// install/update/search/info/outdated, in the same file the descriptor
 		// landed in, so "clone → install" needs no per-developer setup (GIS-364).
+		// Read what each default held BEFORE overwriting it, so the
+		// confirmation can say what was replaced instead of asserting it was
+		// the built-in fallback.
+		prevConsume, prevPublish := m.DefaultConsumeRegistry, m.DefaultRegistry
 		if f.consumeDefault {
 			m.DefaultConsumeRegistry = f.name
+		}
+		// --publish-default steers `fglpkg publish` here, so a team that adds its
+		// own repository stops depending on the built-in fallback to the public
+		// GI registry (GIS-600).
+		if f.publishDefault {
+			m.DefaultRegistry = f.name
 		}
 		if err := m.Save("."); err != nil {
 			return err
 		}
 		fmt.Printf("✓ Added registry %q to %s\n", f.name, manifest.Filename)
 		noteRepoKeySplit()
-		noteConsumeDefaultSet(f, manifest.Filename)
+		noteConsumeDefaultSet(f, manifest.Filename, prevConsume)
+		notePublishDefaultSet(f, manifest.Filename, prevPublish)
 		return nil
 	}
 
@@ -4503,15 +4686,20 @@ func cmdRegistryAdd(args []string) error {
 		return err
 	}
 	g.Registries = global
+	prevConsume, prevPublish := g.DefaultConsumeRegistry, g.DefaultRegistry
 	if f.consumeDefault {
 		g.DefaultConsumeRegistry = f.name
+	}
+	if f.publishDefault {
+		g.DefaultRegistry = f.name
 	}
 	if err := config.WriteGlobalFile(home, g); err != nil {
 		return err
 	}
 	fmt.Printf("✓ Added registry %q to %s\n", f.name, filepath.Join(home, config.GlobalFilename))
 	noteRepoKeySplit()
-	noteConsumeDefaultSet(f, config.GlobalFilename)
+	noteConsumeDefaultSet(f, config.GlobalFilename, prevConsume)
+	notePublishDefaultSet(f, config.GlobalFilename, prevPublish)
 	if r.Auth != config.AuthAnonymous {
 		fmt.Printf("  Run 'fglpkg login --registry %s' to store credentials.\n", f.name)
 	}
@@ -4521,12 +4709,34 @@ func cmdRegistryAdd(args []string) error {
 // noteConsumeDefaultSet confirms that --consume-default rewired where packages
 // are consumed from — a bigger change than adding a repository, so it is stated
 // explicitly rather than left to be discovered on the next install.
-func noteConsumeDefaultSet(f registryEditFlags, file string) {
+func noteConsumeDefaultSet(f registryEditFlags, file, previous string) {
 	if !f.consumeDefault {
 		return
 	}
 	fmt.Printf("  Set as the default consume registry in %s — install/update/search/info/outdated\n", file)
 	fmt.Printf("  now resolve from %q alone (override per command with --registry <name>).\n", f.name)
+	if previous != "" && previous != f.name {
+		fmt.Printf("  This replaced the previous default, %q.\n", previous)
+	}
+}
+
+// notePublishDefaultSet confirms that --publish-default rewired where packages
+// are published to — the change that stops `publish` falling back to the public
+// GI registry, so it is stated rather than left to be discovered (GIS-600).
+func notePublishDefaultSet(f registryEditFlags, file, previous string) {
+	if !f.publishDefault {
+		return
+	}
+	// Name what was actually replaced. Claiming "instead of the public GI
+	// registry" is false once a default is already set — and silently
+	// overwriting another target is exactly the kind of change that should be
+	// stated.
+	replaced := "the public GI registry"
+	if previous != "" && previous != f.name {
+		replaced = fmt.Sprintf("%q", previous)
+	}
+	fmt.Printf("  Set as the default publish target in %s — 'fglpkg publish' now\n", file)
+	fmt.Printf("  targets %q instead of %s (override with --registry <name>).\n", f.name, replaced)
 }
 
 func cmdRegistryRemove(args []string) error {
@@ -4672,19 +4882,30 @@ func cmdRegistryList() error {
 
 // registryDefaultRole labels a registry's role in the DEFAULT column of
 // `registry list`: which commands fall back to it when no --registry is given.
-// An empty consume/publish default means "no default configured", which for
-// publish means GI — but that is the built-in fallback, not a declared default,
-// so it is left blank rather than implied on the gi row.
+//
+// An empty publish default used to leave the gi row blank, on the reasoning
+// that the built-in fallback is not a "declared" default. That hid the one
+// thing a user checking this table wants to know — where `publish` would
+// actually go — and reading "-" as "nothing points here" is exactly how a
+// package reaches the public registry by accident (GIS-600). The fallback is
+// now shown, with a trailing "*" marking it as built-in rather than configured.
 func registryDefaultRole(name, consumeDef, publishDef string) string {
 	consume := consumeDef != "" && consumeDef == name
 	publish := publishDef != "" && publishDef == name
+	// No declared publish default anywhere: `publish` falls back to the built-in
+	// GI registry, so that row is the effective target.
+	fallback := publishDef == "" && name == config.GIName
 	switch {
+	case consume && fallback:
+		return "both*"
 	case consume && publish:
 		return "both"
-	case consume:
-		return "consume"
+	case fallback:
+		return "publish*"
 	case publish:
 		return "publish"
+	case consume:
+		return "consume"
 	}
 	return "-"
 }
@@ -5991,6 +6212,22 @@ func promptPackageVersion() (string, error) {
 // echoed back in the error line, so callers should pass it in display case
 // (e.g. "Description" yields "Invalid description - cannot be empty").
 func promptNonEmptyString(prompt string) (string, error) {
+	return promptNonEmptyStringWithHint(prompt, "")
+}
+
+// promptNonEmptyStringWithHint is promptNonEmptyString with guidance printed
+// on its OWN line above the prompt.
+//
+// The hint is deliberately not part of the label: the label is reused verbatim
+// in the "Invalid %s - cannot be empty" error (lower-cased), so folding the
+// guidance into it produced `error: Invalid repository (source-code url, e.g.
+// https://github.com/owner/repo) - cannot be empty`, with the URL lower-cased
+// too. It also doubled the parentheses when promptWithDefault appended a
+// detected value.
+func promptNonEmptyStringWithHint(prompt, hint string) (string, error) {
+	if hint != "" {
+		fmt.Printf("%s\n", hint)
+	}
 	str, err := promptWithDefault(prompt, "")
 	if err != nil {
 		return "", err

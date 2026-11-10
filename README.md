@@ -498,10 +498,21 @@ indirection and no per-repo setup. Any authenticated user can publish:
 # Log in once (OAuth in the browser, or a PAT for CI — see Authentication above)
 fglpkg login
 
-# From the package directory
-fglpkg publish
+# From the package directory. Name the target: with none configured, publish
+# asks before falling back to the PUBLIC registry (and refuses under --ci).
+fglpkg publish --registry gi
 fglpkg publish --dry-run    # preview the calls without touching the network
 ```
+
+> **The public registry is a deliberate choice.** `https://service.generointelligence.ai`
+> is shared by every partner, and a submitted version cannot be withdrawn from
+> the command line. With no `--registry`, no `FGLPKG_PUBLISH_REGISTRY` and no
+> `defaultRegistry`, `publish` therefore asks for confirmation at an interactive
+> terminal and **fails** under `--ci` or with no terminal, rather than
+> submitting. Set your own target once with
+> `fglpkg registry add <name> <url> --publish-default`, or pass `--registry gi`
+> to choose the public registry on purpose. `install`, `search`, `info` and
+> `outdated` are unaffected — reading from GI discloses nothing.
 
 Publishing is **additive and reviewed**: a freshly published version is marked
 *pending* and only becomes installable once a registry admin approves it.
@@ -700,13 +711,13 @@ Inspect the effective set and login status:
 ```bash
 fglpkg registry list
 # NAME   TYPE         PRIO  AUTH    LOGIN  SOURCE   DEFAULT  URL
-# gi     genero       1     bearer  env    builtin  -        https://service.generointelligence.ai
+# gi     genero       1     bearer  env    builtin  publish* https://service.generointelligence.ai
 # acme   artifactory  2     bearer  yes    project  consume  https://artifactory.acme.example/artifactory
 ```
 
 `LOGIN` values: `yes` (credentials stored), `env` (GI authenticated by `FGLPKG_TOKEN`), `no` (none), `anon` (no auth needed).
 `SOURCE` values: `builtin` (the always-present GI entry), `global` (from `~/.fglpkg/config.json`), `project` (from the committed `fglpkg.json`) — so you can see at a glance which registries a clone inherited from the repo.
-`DEFAULT` values: `consume` (the sole source consulted for `install`/`update`/`search`/`info`/`outdated` — see [Choosing where packages come from](#choosing-where-packages-come-from)), `publish` (the default `publish` target), `both`, or `-`.
+`DEFAULT` values: `consume` (the sole source consulted for `install`/`update`/`search`/`info`/`outdated` — see [Choosing where packages come from](#choosing-where-packages-come-from)), `publish` (the default `publish` target), `both`, or `-`. A trailing `*` (`publish*`, `both*`) marks the **built-in fallback** rather than a configured default: with no `defaultRegistry` set anywhere, the `gi` row carries `publish*`, because that is where a bare `fglpkg publish` would go — and it asks first when that fallback is the **public** service. Repointed with `FGLPKG_REGISTRY` at your own GI registry it does not ask, because you have already said where it goes.
 
 ### Authentication
 
@@ -765,14 +776,22 @@ fglpkg publish --registry acme --force    # overwrite an existing variant (guard
 
 To avoid typing `--registry` every time, set a **default publish target**. It is
 resolved in decreasing precedence: `FGLPKG_PUBLISH_REGISTRY` → the project's
-`defaultRegistry` → the global `defaultRegistry` → GI:
+`defaultRegistry` → the global `defaultRegistry`. With none of them set,
+`publish` falls back to GI — but asks first (see
+[Publishing a Package](#publishing-a-package)).
+
+```bash
+fglpkg registry add acme https://artifactory.acme.example/artifactory/GeneroBDL --publish-default
+```
+
+which records the same thing the manifest field does:
 
 ```json
 { "defaultRegistry": "acme", "registries": [ … ] }
 ```
 
-With that, a bare `fglpkg publish` deploys to `acme`; `--registry gi` still
-reaches GI on demand.
+With that, a bare `fglpkg publish` deploys to `acme` with no prompt;
+`--registry gi` still reaches GI on demand.
 
 ### Choosing where packages come from
 

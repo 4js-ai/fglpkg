@@ -199,12 +199,27 @@ the registry. fglpkg does not need a registry build for this.
 
 - **Manifest + publish already support it:** `manifest.Manifest.Visibility` exists
   and `publishPackage` sends it on package create.
-- **Default stays `public` (confirmed decision).** Note the intentional mismatch:
-  `publishPackage` sets `visibility = "public"` when the manifest omits it
-  ([cli.go:762-764](../internal/cli/cli.go)), which **overrides** the registry's
-  private-by-default. This is deliberate (npm-like, public-by-default); publishing
-  private is explicit via `"visibility": "private"` in `fglpkg.json`. Document this
-  clearly in the README so it is not surprising to customers.
+- ⚠️ **Public-by-default is REVERSED — [GIS-600](https://4js.atlassian.net/browse/GIS-600).**
+  A package was submitted to the public GI registry by following the documented
+  bare `fglpkg publish`, and a submitted version cannot be withdrawn from the
+  command line. This ticket has two halves:
+  - ✅ **Silent fallback to the GI target — fixed.** `publish` now asks at a
+    terminal and refuses under `--ci`; see `confirmPublishTarget` (PR #105).
+  - ⏳ **Public-by-default visibility — decision taken 2026-11-09, not yet
+    implemented.** `publish` will prompt for visibility when the manifest omits
+    it, persist the answer to `fglpkg.json`, and **refuse** under `--ci`/no-tty
+    naming `--public`/`--private`. The full design and acceptance criteria are
+    in the GIS-600 comment of that date. This supersedes the "confirmed
+    decision" recorded below, which the bullet keeps only as history.
+- **~~Default stays `public`~~ (superseded — see above).** The mismatch this
+  recorded was deliberate at the time: `publishPackage` sets
+  `visibility = "public"` when the manifest omits it
+  ([cli.go:2892-2898](../internal/cli/cli.go#L2892-L2898)), which **overrides**
+  the registry's private-by-default, on npm-like grounds. GIS-600 reverses it:
+  choosing the unrecoverable direction on the publisher's behalf, against the
+  server's own safer default, is the defect. Note there is a **second** default
+  to remove with it, at
+  [registry.go:542-543](../internal/registry/registry.go#L542-L543).
 - **Consuming private packages requires login.** The OAuth bearer carries the
   user→partner association, and `install`/`search`/`info` already send it, so a
   logged-in tenant user resolves private packages automatically. Remaining work:
