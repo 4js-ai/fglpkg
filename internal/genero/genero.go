@@ -243,3 +243,97 @@ func normaliseVersionString(s string) string {
 	}
 	return strings.Join(parts, ".")
 }
+
+// RuntimeInfo reports the character encoding and length semantics the local
+// Genero runtime is configured with, as `fglrun -i` prints them:
+//
+//	Charmap          : UTF-8
+//	Multibyte        : yes
+//	Stateless        : yes
+//	Length Semantics : CHAR
+//
+// Note this needs fglrun, not fglcomp: `fglcomp -i` reports Charmap but NOT
+// Length Semantics (measured for GIS-285). fglpkg otherwise only ever locates
+// fglrun (FglrunPath) and detects the version through fglcomp, so running it
+// is new here.
+type RuntimeInfo struct {
+	// Charmap is the IANA-ish charset name the runtime reports, e.g. "UTF-8",
+	// "ASCII", "ISO-8859-15". Compare it with the charmap package, which folds
+	// case and the ASCII/US-ASCII alias.
+	Charmap string
+	// LengthSemantics is "CHAR" or "BYTE" as reported. Note the runtime
+	// silently reports CHAR as BYTE under a single-byte charmap, so this is
+	// the EFFECTIVE value, not merely the environment variable.
+	LengthSemantics string
+}
+
+// charmapLineRe and lengthSemanticsLineRe match the two `fglrun -i` lines of
+// interest. The label-to-colon spacing is not fixed, so neither is matched
+// by column.
+var (
+	charmapLineRe         = regexp.MustCompile(`(?mi)^\s*Charmap\s*:\s*(\S+)`)
+	lengthSemanticsLineRe = regexp.MustCompile(`(?mi)^\s*Length\s+Semantics\s*:\s*(\S+)`)
+)
+
+// DetectRuntimeInfo returns the local runtime's charmap and length semantics.
+//
+// FGLPKG_CHARMAP and FGLPKG_LENGTH_SEMANTICS override the respective values,
+// mirroring the FGLPKG_GENERO_VERSION escape hatch. Without them the result
+// depends on the machine's locale, which would make the functional suite
+// unrunnable in CI and locale-dependent everywhere else. When BOTH are set,
+// fglrun is never executed — so a test host needs no Genero toolchain at all.
+func DetectRuntimeInfo() (RuntimeInfo, error) {
+	envCharmap := strings.TrimSpace(os.Getenv("FGLPKG_CHARMAP"))
+	envLength := strings.TrimSpace(os.Getenv("FGLPKG_LENGTH_SEMANTICS"))
+	if envCharmap != "" && envLength != "" {
+		return RuntimeInfo{Charmap: envCharmap, LengthSemantics: strings.ToUpper(envLength)}, nil
+	}
+
+	info, err := runFglrunInfo()
+	if err != nil {
+		// A partial override still answers when the other half was all the
+		// caller needed; the error only surfaces if it must consult fglrun.
+		if envCharmap != "" || envLength != "" {
+			return RuntimeInfo{
+				Charmap:         envCharmap,
+				LengthSemantics: strings.ToUpper(envLength),
+			}, nil
+		}
+		return RuntimeInfo{}, err
+	}
+	if envCharmap != "" {
+		info.Charmap = envCharmap
+	}
+	if envLength != "" {
+		info.LengthSemantics = strings.ToUpper(envLength)
+	}
+	return info, nil
+}
+
+// runFglrunInfo executes `fglrun -i` and parses the two lines of interest.
+func runFglrunInfo() (RuntimeInfo, error) {
+	path, err := FglrunPath()
+	if err != nil {
+		return RuntimeInfo{}, fmt.Errorf(
+			"cannot determine the Genero character encoding: %w.\n"+
+				"Set FGLPKG_CHARMAP (e.g. FGLPKG_CHARMAP=UTF-8) and FGLPKG_LENGTH_SEMANTICS to override", err)
+	}
+	out, err := exec.Command(path, "-i").CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return RuntimeInfo{}, fmt.Errorf("%s -i failed: %w", path, err)
+	}
+	text := string(out)
+	var info RuntimeInfo
+	if m := charmapLineRe.FindStringSubmatch(text); m != nil {
+		info.Charmap = m[1]
+	}
+	if m := lengthSemanticsLineRe.FindStringSubmatch(text); m != nil {
+		info.LengthSemantics = strings.ToUpper(m[1])
+	}
+	if info.Charmap == "" {
+		return RuntimeInfo{}, fmt.Errorf(
+			"%s -i did not report a Charmap line.\n"+
+				"Set FGLPKG_CHARMAP (e.g. FGLPKG_CHARMAP=UTF-8) to override", path)
+	}
+	return info, nil
+}

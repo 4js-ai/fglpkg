@@ -604,6 +604,9 @@ func cmdInstall(args []string) error {
 			globalHome, _ := fglpkgHome()
 			i.WithSigning(signing.EnforceOff, globalHome, defaultRegistry())
 		}
+		if flags.forceCharacterEncoding {
+			i.WithForceCharacterEncoding(true)
+		}
 	}
 	// buildInstaller (not newInstaller) so the graph-install path below can scope
 	// the resolver to the configured consume default (GIS-364). Re-resolution only
@@ -1077,11 +1080,14 @@ type installFlags struct {
 	production         bool
 	noManifestFallback bool
 	noVerifySignature  bool
-	noPrune            bool // --no-prune: keep artifacts the graph no longer requires
-	frozen             bool // --frozen: fail instead of re-resolving a stale lock
-	scope              manifest.Scope
-	registry           string // --registry <name>: restrict resolution to one repo and pin it
-	pkgs               []string
+	// forceCharacterEncoding: install a package whose build charset or length
+	// semantics do not match this Genero environment (GIS-285).
+	forceCharacterEncoding bool
+	noPrune                bool // --no-prune: keep artifacts the graph no longer requires
+	frozen                 bool // --frozen: fail instead of re-resolving a stale lock
+	scope                  manifest.Scope
+	registry               string // --registry <name>: restrict resolution to one repo and pin it
+	pkgs                   []string
 
 	// installOnly records the install-only flags this parse saw, in the
 	// spelling the user typed, so `update` can refuse them by name (GIS-583).
@@ -1115,6 +1121,9 @@ func parseInstallFlags(args []string) (installFlags, error) {
 			f.noManifestFallback = true
 		case "--no-verify-signature":
 			f.noVerifySignature = true
+			f.installOnly = append(f.installOnly, a)
+		case "--force-character-encoding":
+			f.forceCharacterEncoding = true
 			f.installOnly = append(f.installOnly, a)
 		case "--no-prune":
 			f.noPrune = true
@@ -3116,6 +3125,12 @@ func stagePackage(stageDir string, m *manifest.Manifest) (empty bool, err error)
 		return false, err
 	}
 	if err := recordGeneroPackages(pub, staged, m.Programs); err != nil {
+		return false, err
+	}
+	// Derive the character encoding from the artifacts about to ship, so the
+	// shipped manifest states it as a fact rather than as the author's claim
+	// (GIS-285). Runs here, after every stager, so it sees the final tree.
+	if err := recordCharacterEncoding(pub, staged); err != nil {
 		return false, err
 	}
 	mfData, err := json.MarshalIndent(pub, "", "  ")

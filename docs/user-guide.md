@@ -24,6 +24,7 @@ This guide covers the day-to-day usage of fglpkg, the package manager for Genero
 - [Workspaces (Monorepos)](#workspaces-monorepos)
 - [Lock Files](#lock-files)
 - [Package Signature Verification](#package-signature-verification)
+- [Character Encoding Compatibility](#character-encoding-compatibility)
 - [Auditing dependencies for vulnerabilities](#auditing-dependencies-for-vulnerabilities)
 - [Software Bill of Materials (SBOM)](#software-bill-of-materials-sbom)
 - [Package Ownership](#package-ownership)
@@ -2181,6 +2182,67 @@ Under `require`, verification runs **before** the artifact is downloaded — the
 This matters for pipelines that retry. Under `require`, the **lock record** of an already-installed package is re-verified on every run, so a second attempt cannot accept what the first one refused. Note what that does and does not establish: the record is re-checked, but installed files are matched to it by package name, so it is not a proof that the files on disk are the version the lock names. (Under `warn` an already-installed package is not re-checked, since the warning was issued when it was installed; use `fglpkg audit signatures` to audit the store on demand.)
 
 `fglpkg install --no-verify-signature` skips verification for a single run (discouraged; for emergencies).
+
+## Character Encoding Compatibility
+
+`fglcomp` and `fglform` write string literals into `.42m`, `.42f` and `.42s` in the encoding of the **build locale**. A package compiled under UTF-8 and consumed under ISO-8859-15 therefore displays mojibake — and, less visibly but more dangerously, reports wrong string lengths. Nothing in the artifacts stops you installing such a package; it simply misbehaves at runtime.
+
+fglpkg records what a package was built with, and refuses a verified mismatch.
+
+### What `pack` records
+
+`fglpkg pack` **derives** `characterEncoding` from the artifacts it stages and writes it into the shipped manifest — you do not normally declare it:
+
+| Evidence | Recorded |
+|---|---|
+| A `.42f` XML prolog naming an encoding | that encoding (authoritative) |
+| No byte ≥ `0x80` in any artifact | `US-ASCII` |
+| High bytes that decode as UTF-8 | `UTF-8` |
+| High bytes that do not decode as UTF-8 | your declaration, else the build charmap with a warning |
+
+This is deliberately *not* a check against your shell's locale. Checking the environment would fail in both directions: a CI job usually runs under `LANG=C`, which would reject a genuinely UTF-8 package, while an all-ASCII package built on a UTF-8 workstation would be forced to declare `UTF-8` and needlessly locked out of every ISO-8859 consumer. Reading the bytes has neither failure mode.
+
+If you *do* declare a value, `pack` cross-checks it and fails when the artifacts prove it wrong:
+
+```console
+$ fglpkg pack
+error: declared characterEncoding "US-ASCII" contradicts the package's artifacts:
+  lib/Util.42m contains bytes >= 0x80, so the package is not pure ASCII
+```
+
+The one thing only you can supply is which 8-bit charset it is — `ISO-8859-1` and `ISO-8859-15` are indistinguishable from bytes. A declaration that narrows that is accepted silently.
+
+### What `install` enforces
+
+```console
+$ fglpkg install acme-widget
+error: acme-widget is not compatible with this Genero environment:
+  - built with character encoding ISO-8859-15, but this environment uses UTF-8
+  Install it under a matching environment, or pass --force-character-encoding to install anyway (at your own risk).
+```
+
+Two cases are deliberately quiet:
+
+- **`US-ASCII` is never checked.** ASCII-7 is a subset of every charset Genero supports, so such a package is portable by construction.
+- **A package that declares nothing installs without comment.** Every package published before this field existed declares nothing; the field populates itself as packages are republished.
+
+### Best practice for a published package
+
+**Keep your `.4gl` and `.per` sources pure ASCII-7**, so the compiled artifacts are too and `pack` records `US-ASCII`. Such a package installs everywhere with no check at all. Put translatable text in `.str` / `.42s` string resources instead, in whichever languages and encodings you need, and let the consumer select them at runtime.
+
+That advice predates this feature; what deriving the field adds is that following it is now **provable** rather than merely claimed.
+
+### Length semantics
+
+`lengthSemantics` (`"char"` or `"byte"`) declares the `FGL_LENGTH_SEMANTICS` a consumer must use. Unlike the encoding it cannot be derived — it is a property of your code's behaviour, not its bytes. A loop over `getCharAt`, or a sorting routine, can produce nonsense under the wrong setting while the bytes look identical.
+
+Declare it only when your code genuinely depends on it. It restricts who can use the package: an application on Informix uses BYTE semantics even under UTF-8, so a package pinned to `"char"` cannot be used there. Omitting it means "no constraint", which is the right answer for most packages.
+
+Note that `"char"` cannot be combined with a single-byte `characterEncoding` — the runtime reports `CHAR` as `BYTE` under a single-byte charmap, so the combination could never be satisfied, and `pack` rejects it.
+
+### Testing and CI
+
+`FGLPKG_CHARMAP` and `FGLPKG_LENGTH_SEMANTICS` override detection, mirroring `FGLPKG_GENERO_VERSION`. With both set, `fglrun` is never run, so a build container with no Genero toolchain can still pack and install.
 
 ## Auditing dependencies for vulnerabilities
 

@@ -1,6 +1,6 @@
 # Spec: character encoding and length semantics for packages
 
-**Status:** 📋 Not started — GIS-285 (spec ready; ticket was *Require More Analysis*)
+**Status:** ✅ Implemented 2026-11-10 — GIS-285 (branch `feat/gis-285-character-encoding`)
 **Date:** 2026-09-28
 **Author:** Mike Folcher
 **Motivation:** `fglcomp`/`fglform` write string literals into `.42m`/`.42f`/`.42s` in the encoding

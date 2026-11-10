@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/4js-mikefolcher/fglpkg/internal/charmap"
 	"github.com/4js-mikefolcher/fglpkg/internal/config"
 	"github.com/4js-mikefolcher/fglpkg/internal/jsonutil"
 	"github.com/4js-mikefolcher/fglpkg/internal/semver"
@@ -51,6 +52,23 @@ type Manifest struct {
 	// "private" — only members of the owning partner can see it.
 	// Set when creating a new package; ignored on subsequent publishes.
 	Visibility string `json:"visibility,omitempty"`
+	// CharacterEncoding records the IANA character set the package's compiled
+	// artifacts were built with, e.g. "US-ASCII", "UTF-8", "ISO-8859-15".
+	// fglcomp/fglform write string literals into .42m/.42f/.42s in the
+	// encoding of the build locale, so consuming a package under a different
+	// charset yields mojibake or silently wrong string lengths (GIS-285).
+	//
+	// `pack` DERIVES this from the staged artifacts and writes it into the
+	// shipped manifest, cross-checking any value the author wrote rather than
+	// trusting it. Absent means unknown, which stays silent on install — every
+	// package published before this field existed declares nothing.
+	CharacterEncoding string `json:"characterEncoding,omitempty"`
+	// LengthSemantics declares the FGL_LENGTH_SEMANTICS a consumer must use,
+	// "char" or "byte". Unlike CharacterEncoding it cannot be derived: it is a
+	// property of the code's behaviour (a FOR loop over getCharAt, a sorting
+	// routine), not of its bytes, so it is author-declared only. Absent means
+	// no constraint.
+	LengthSemantics string `json:"lengthSemantics,omitempty"`
 	// GeneroConstraint declares which Genero BDL runtime versions this package
 	// is compatible with, using standard semver constraint syntax.
 	// Examples: "^4.0.0", ">=3.20.0 <5.0.0", "^3.20.0 || ^4.0.0"
@@ -925,6 +943,9 @@ func (m *Manifest) Validate() error {
 			return fmt.Errorf("invalid genero constraint %q: %w", m.GeneroConstraint, err)
 		}
 	}
+	if err := m.validateEncoding(); err != nil {
+		return err
+	}
 	for _, scope := range []Scope{ScopeProd, ScopeDev, ScopeOptional} {
 		for _, dep := range m.bucket(scope).Java {
 			if dep.GroupID == "" || dep.ArtifactID == "" || dep.Version == "" {
@@ -1199,4 +1220,53 @@ func pathWithin(base, target string) bool {
 	}
 	rel = filepath.ToSlash(rel)
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, "../"))
+}
+
+// LengthSemanticsChar and LengthSemanticsByte are the two accepted
+// lengthSemantics values, in the spelling written to the manifest. Reads are
+// case-insensitive (the environment variable is spelled in upper case).
+const (
+	LengthSemanticsChar = "char"
+	LengthSemanticsByte = "byte"
+)
+
+// validateEncoding checks the characterEncoding / lengthSemantics pair.
+//
+// Two rules. An unknown lengthSemantics is rejected outright, because the only
+// alternative is to ignore it — and a typo'd "chars" that silently means "no
+// constraint" is exactly the failure this field exists to prevent.
+//
+// The second rule is why the pair is validated together rather than
+// separately: the runtime reports FGL_LENGTH_SEMANTICS=CHAR as BYTE under a
+// single-byte charmap (measured for GIS-285: LANG=C with CHAR set reports
+// Charmap ASCII, Length Semantics BYTE). The two properties are therefore not
+// independent, and a package declaring "char" alongside a single-byte charset
+// is stating a constraint no consumer environment could ever satisfy. Rejecting
+// it here turns a silent downgrade at runtime into an error at pack time.
+func (m *Manifest) validateEncoding() error {
+	switch strings.ToLower(strings.TrimSpace(m.LengthSemantics)) {
+	case "", LengthSemanticsChar, LengthSemanticsByte:
+		// ok
+	default:
+		return fmt.Errorf(
+			"invalid lengthSemantics %q (expected %q or %q)",
+			m.LengthSemantics, LengthSemanticsChar, LengthSemanticsByte,
+		)
+	}
+	if strings.EqualFold(strings.TrimSpace(m.LengthSemantics), LengthSemanticsChar) &&
+		m.CharacterEncoding != "" && charmap.IsSingleByte(m.CharacterEncoding) {
+		return fmt.Errorf(
+			"lengthSemantics %q cannot hold with the single-byte characterEncoding %q: "+
+				"the Genero runtime reports CHAR as BYTE under a single-byte charmap, "+
+				"so no consumer environment could satisfy this combination",
+			m.LengthSemantics, m.CharacterEncoding,
+		)
+	}
+	return nil
+}
+
+// NormalizedLengthSemantics returns the lengthSemantics in its canonical
+// lower-case spelling, or "" when the package declares none.
+func (m *Manifest) NormalizedLengthSemantics() string {
+	return strings.ToLower(strings.TrimSpace(m.LengthSemantics))
 }

@@ -297,6 +297,77 @@ against your running Genero version — override the compared version with
 is hidden or reordered, and a package with no `genero` constraint simply grades
 `?`.
 
+#### `characterEncoding` — string (IANA charset name)
+Records the character set the package's **compiled artifacts** were built with,
+for example `"US-ASCII"`, `"UTF-8"` or `"ISO-8859-15"`.
+
+This matters because `fglcomp` and `fglform` write string literals into
+`.42m` / `.42f` / `.42s` in the encoding of the build locale. A package built
+under UTF-8 and consumed under ISO-8859-15 produces mojibake — or, worse,
+silently wrong string lengths.
+
+**You do not normally write this field.** `fglpkg pack` *derives* it from the
+artifacts it stages and writes it into the shipped manifest:
+
+| Evidence in the staged artifacts | Recorded |
+|---|---|
+| A `.42f` XML prolog naming an encoding | that encoding (authoritative) |
+| No byte ≥ `0x80` anywhere | `US-ASCII` |
+| High bytes that decode as UTF-8 | `UTF-8` |
+| High bytes that do not decode as UTF-8 | undecidable — see below |
+
+Only sources are exempt: a `.4gl` may carry UTF-8 comments and still compile to
+pure-ASCII p-code, so sources are never scanned.
+
+A value you *do* write is **cross-checked, not trusted**, and `pack` fails when
+the artifacts prove it wrong — declaring `US-ASCII` when a staged `.42m`
+contains high bytes, or declaring one charset when a form's prolog names
+another. The error names the offending file.
+
+There is one case where your declaration is the only possible answer:
+`ISO-8859-1` and `ISO-8859-15` are indistinguishable from bytes alone. A
+declaration that merely *narrows* such an undecidable result is accepted in
+silence. With no declaration there, `pack` falls back to the build
+environment's charmap and says so — the only point at which the environment is
+consulted, and it never overrides evidence.
+
+On the consuming side, `fglpkg install` refuses a package whose
+`characterEncoding` differs from the local Genero charmap (`fglrun -i`), naming
+both. Two cases are deliberately quiet:
+
+- **`US-ASCII`** is never checked. ASCII-7 is a subset of every charset Genero
+  supports, which is why shipping pure-ASCII artifacts is the recommended
+  practice for a public package — and why deriving the field makes that
+  practice *provable* rather than merely advised.
+- **An absent field** installs without comment. Every package published before
+  this field existed declares nothing; it populates itself as packages are
+  republished.
+
+`--force-character-encoding` installs a mismatch anyway, with a warning.
+
+#### `lengthSemantics` — string (`"char"` | `"byte"`)
+Declares the `FGL_LENGTH_SEMANTICS` a consumer must use. Unlike
+`characterEncoding` this **cannot be derived** — it is a property of the code's
+behaviour, not of its bytes. A `FOR` loop over `getCharAt`, or a sorting
+routine, may produce nonsense under the wrong setting while the bytes look
+identical. So it is author-declared only, and omitting it means "no
+constraint".
+
+Two validation rules:
+
+- An unrecognised value is rejected rather than ignored, because a typo that
+  silently degraded to "no constraint" is exactly what this field exists to
+  prevent.
+- `"char"` cannot be combined with a single-byte `characterEncoding`. The
+  Genero runtime reports `FGL_LENGTH_SEMANTICS=CHAR` as `BYTE` under a
+  single-byte charmap, so such a declaration states a constraint that no
+  consumer environment could ever satisfy.
+
+Note the interaction this implies: declaring `"char"` restricts your package to
+multibyte-charset consumers. That is sometimes exactly right, and sometimes an
+unintended lockout — an application on Informix uses BYTE semantics even under
+UTF-8, so a package pinned to `"char"` cannot be used there.
+
 ### 6.3 Entry points & runnable content
 
 #### `main` — string
@@ -924,6 +995,8 @@ authority (see [§5](#5-parsing--validation-rules)).
 | `keywords` | string[] | No | Search/discovery tags. |
 | `visibility` | `"public"`\|`"private"` | No | Registry visibility (first publish only). |
 | `genero` | string | No | Genero runtime semver constraint. |
+| `characterEncoding` | string | No | IANA charset the compiled artifacts were built with. Derived by `pack`; an author value is cross-checked. |
+| `lengthSemantics` | string | No | `"char"` or `"byte"` — the `FGL_LENGTH_SEMANTICS` a consumer must use. Author-declared only. |
 | `main` | string | No | Primary `.42m` entry point. |
 | `programs` | string[] | No | Modules with `MAIN`, runnable via `fglpkg bdl`. |
 | `webcomponents` | string[] | No | `COMPONENTTYPE` names provided. |

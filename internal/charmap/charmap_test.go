@@ -1,0 +1,204 @@
+package charmap
+
+import (
+	"bytes"
+	"io"
+	"strings"
+	"testing"
+)
+
+func TestClassify(t *testing.T) {
+	cases := []struct {
+		name string
+		data []byte
+		want Tier
+	}{
+		// An empty artifact has no high bytes, so it is trivially portable.
+		// It must not land in Undecidable, or a package of empty stubs would
+		// be refused by every consumer.
+		{"empty", nil, TierASCII},
+		{"pure ascii", []byte("DISPLAY \"hello\""), TierASCII},
+		{"ascii with control bytes", []byte{0x00, 0x01, 0x7F, 'A'}, TierASCII},
+		// The spec's measurement: DISPLAY "café naïve €" compiled under each
+		// locale. UTF-8 gives 7 high bytes that decode; ISO-8859-15 gives 3
+		// that do not.
+		{"utf-8 literal", []byte("caf\xc3\xa9 na\xc3\xafve \xe2\x82\xac"), TierUTF8},
+		{"iso-8859-15 literal", []byte("caf\xe9 na\xefve \xa4"), TierUndecidable},
+		{"lone continuation byte", []byte{'A', 0x80, 'B'}, TierUndecidable},
+		{"truncated sequence at eof", []byte{'A', 0xC3}, TierUndecidable},
+		{"overlong encoding", []byte{0xC0, 0xAF}, TierUndecidable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Classify(tc.data); got != tc.want {
+				t.Errorf("Classify(%q) = %v, want %v", tc.data, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestClassifyReaderSplitSequence is the reason the classifier streams with a
+// carry buffer instead of validating each read in isolation. A multi-byte rune
+// that straddles a chunk boundary is still valid UTF-8; judging the two halves
+// separately would call a good artifact "unknown 8-bit" purely because of
+// where the buffer ended, and the package would then be refused by every
+// consumer whose charmap is not byte-identical.
+func TestClassifyReaderSplitSequence(t *testing.T) {
+	// Land the 3-byte € so that it begins one byte before the chunk boundary.
+	pad := bytes.Repeat([]byte("a"), chunkSize-1)
+	data := append(append([]byte{}, pad...), []byte("\xe2\x82\xac")...)
+	data = append(data, bytes.Repeat([]byte("b"), 10)...)
+
+	got, err := ClassifyReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("ClassifyReader: %v", err)
+	}
+	if got != TierUTF8 {
+		t.Fatalf("a UTF-8 rune split across the chunk boundary classified as %v, want %v", got, TierUTF8)
+	}
+}
+
+// oneByteReader hands back a single byte per Read, the pathological case for
+// a boundary-sensitive scanner: every multi-byte rune straddles a boundary.
+type oneByteReader struct{ data []byte }
+
+func (r *oneByteReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	p[0] = r.data[0]
+	r.data = r.data[1:]
+	return 1, nil
+}
+
+func TestClassifyReaderOneByteAtATime(t *testing.T) {
+	got, err := ClassifyReader(&oneByteReader{data: []byte("caf\xc3\xa9 \xe2\x82\xac")})
+	if err != nil {
+		t.Fatalf("ClassifyReader: %v", err)
+	}
+	if got != TierUTF8 {
+		t.Fatalf("byte-at-a-time UTF-8 classified as %v, want %v", got, TierUTF8)
+	}
+}
+
+func TestPrologEncoding(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		// The three prologs the spec measured from fglform.
+		{"fglform utf-8", `<?xml version='1.0' encoding='UTF-8'?><Form/>`, "UTF-8"},
+		{"fglform iso-8859-15", `<?xml version='1.0' encoding='ISO-8859-15'?><Form/>`, "ISO-8859-15"},
+		{"fglform ascii canonicalized", `<?xml version='1.0' encoding='ASCII'?><Form/>`, ASCII},
+		{"double quotes", `<?xml version="1.0" encoding="UTF-8"?><Form/>`, "UTF-8"},
+		{"spaces around equals", `<?xml version='1.0' encoding = 'UTF-8'?><Form/>`, "UTF-8"},
+		{"lowercase name canonicalized", `<?xml version='1.0' encoding='utf-8'?>`, "UTF-8"},
+		{"with byte order mark", "\xef\xbb\xbf<?xml version='1.0' encoding='UTF-8'?>", "UTF-8"},
+		{"no encoding attribute", `<?xml version='1.0'?><Form/>`, ""},
+		{"no prolog at all", `<Form/>`, ""},
+		{"empty", ``, ""},
+		// A .42m is a binary container. If the declaration is not at the very
+		// start it is not a declaration, and a p-code file that happens to
+		// contain these bytes further in must not be read as a form.
+		{"prolog not at start", strings.Repeat("\x00", 600) + `<?xml version='1.0' encoding='UTF-8'?>`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PrologEncoding([]byte(tc.in)); got != tc.want {
+				t.Errorf("PrologEncoding(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCanonical(t *testing.T) {
+	cases := []struct{ in, want string }{
+		// Genero reports "ASCII"; IANA prefers "US-ASCII".
+		{"ASCII", ASCII},
+		{"ascii", ASCII},
+		{"US-ASCII", ASCII},
+		{"us-ascii", ASCII},
+		{"UTF-8", UTF8},
+		{"utf8", UTF8},
+		// Genero reports "SHIFT_JIS"; IANA prefers "Shift_JIS".
+		{"SHIFT_JIS", "Shift_JIS"},
+		{"Shift_JIS", "Shift_JIS"},
+		{"ISO-8859-15", "ISO-8859-15"},
+		{"  UTF-8  ", UTF8},
+		{"", ""},
+		// An unknown charset is still a usable declaration; it compares by its
+		// own spelling rather than being rejected or rewritten.
+		{"X-SOMETHING", "X-SOMETHING"},
+	}
+	for _, tc := range cases {
+		if got := Canonical(tc.in); got != tc.want {
+			t.Errorf("Canonical(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestEqual(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"ASCII", "US-ASCII", true},
+		{"ascii", "US-ASCII", true},
+		{"us-ascii", "ASCII", true},
+		{"SHIFT_JIS", "Shift_JIS", true},
+		{"UTF-8", "utf-8", true},
+		{"UTF-8", "ISO-8859-15", false},
+		{"US-ASCII", "UTF-8", false},
+		// An absent declaration means "unknown", never "matches" — otherwise
+		// a package with no encoding would silently pass every consumer check
+		// by comparing equal to an unset environment.
+		{"", "", false},
+		{"UTF-8", "", false},
+		{"", "UTF-8", false},
+	}
+	for _, tc := range cases {
+		if got := Equal(tc.a, tc.b); got != tc.want {
+			t.Errorf("Equal(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+func TestIsSingleByte(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"US-ASCII", true},
+		{"ASCII", true},
+		{"ISO-8859-1", true},
+		{"ISO-8859-15", true},
+		{"KOI8-R", true},
+		{"UTF-8", false},
+		{"Big5", false},
+		{"SHIFT_JIS", false},
+		{"EUC-JP", false},
+		// Unknown charsets are treated as single-byte: the conservative answer
+		// for Validate, which then rejects a "char" declaration fglpkg cannot
+		// vouch for rather than letting through one the runtime would downgrade.
+		{"X-SOMETHING", true},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := IsSingleByte(tc.in); got != tc.want {
+			t.Errorf("IsSingleByte(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestTierString(t *testing.T) {
+	if got := TierASCII.String(); got != ASCII {
+		t.Errorf("TierASCII.String() = %q, want %q", got, ASCII)
+	}
+	if got := TierUTF8.String(); got != UTF8 {
+		t.Errorf("TierUTF8.String() = %q, want %q", got, UTF8)
+	}
+	if got := TierUndecidable.String(); got == ASCII || got == UTF8 {
+		t.Errorf("TierUndecidable.String() = %q, must not name a concrete charset", got)
+	}
+}

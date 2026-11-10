@@ -78,6 +78,12 @@ UNLICENSED, detected repository) without prompting.
                            divergence is still reported
   --no-verify-signature    Skip Layer 1 registry signature verification for this
                            install (discouraged; overrides signing.enforce)
+  --force-character-encoding
+                           Install even when the package was built with a
+                           character encoding, or requires a length semantics,
+                           that this Genero environment does not use. String
+                           literals may then display incorrectly and string
+                           lengths may be wrong (discouraged)
   --no-prune               Keep packages, webcomponents, and JARs the dependency
                            graph no longer requires instead of deleting them
   --frozen                 Fail if fglpkg-lock.json disagrees with fglpkg.json instead
@@ -91,6 +97,14 @@ stops appearing in 'fglpkg list' and stops resolving on FGLLDPATH. Pruning
 applies to local (.fglpkg/) installs only — a global ~/.fglpkg/ is shared
 across projects — and is skipped under --production, which resolves a
 deliberately narrowed graph.
+
+A package records the character encoding its artifacts were built with
+("characterEncoding" in fglpkg.json, derived by 'fglpkg pack'). Installing one
+built with a charset this environment does not use is refused, because
+fglcomp writes string literals into .42m/.42f in the build locale's encoding —
+consuming them under another charset yields mojibake and wrong string lengths.
+A package built as pure US-ASCII is portable everywhere and never checked, and
+a package that declares nothing is installed without comment.
 
 Installed packages are verified against the registry's Ed25519 signature by
 default (mode "warn": a bad or missing signature warns but does not block).
@@ -152,7 +166,8 @@ Takes no package argument; a package name is refused. To move one package, use
 fglpkg.json. Note that it then re-resolves the graph as update does, so other
 dependencies on a range constraint can move with it.
 
-install's own flags (--force, --no-verify-signature, --save-dev/-optional/-prod)
+install's own flags (--force, --no-verify-signature, --force-character-encoding,
+--save-dev/-optional/-prod)
 are refused too: they apply to installing a named package, which update does not
 do.
 
