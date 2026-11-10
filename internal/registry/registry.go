@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -486,9 +487,83 @@ func Resolve(name, constraint string, gv *genero.Version) (*PackageInfo, error) 
 	return FetchInfoForGenero(name, best.String(), majorOf(gv))
 }
 
-// Search queries the consumer registry for packages matching term.
+// searchPageSize is the page size Search asks for. The server may cap it, and
+// the response echoes the size actually applied, so the loop uses that rather
+// than this value.
+const searchPageSize = 100
+
+// maxSearchPages bounds the paging loop. It is a safety net against a server
+// that reports a total it never delivers, not a result limit: at the requested
+// page size it allows far more packages than the registry holds.
+const maxSearchPages = 200
+
+// Search queries the consumer registry for packages matching term, following
+// pagination to the end.
+//
+// It used to issue a single unparameterised request and return whatever the
+// first page held. The registry defaults to 20 results per page, so `search`
+// and `search --all` silently stopped at 20 — reporting no truncation, and
+// ignoring the `total` the response carries. A package past the cut-off simply
+// looked as though it did not exist (GIS-584).
 func Search(term string) ([]SearchResult, error) {
-	u := fmt.Sprintf("%s/registry/packages?q=%s", registryBase(), url.QueryEscape(term))
+	var results []SearchResult
+	seen := make(map[string]bool)
+
+	for page := 1; page <= maxSearchPages; page++ {
+		br, err := fetchSearchPage(term, page, searchPageSize)
+		if err != nil {
+			return nil, err
+		}
+		if len(br.Packages) == 0 {
+			break
+		}
+		added := 0
+		for _, p := range br.Packages {
+			// Dedupe by slug. A server that ignores `page` would otherwise
+			// return the first page forever and this would never terminate
+			// except on the page cap.
+			if seen[p.Slug] {
+				continue
+			}
+			seen[p.Slug] = true
+			added++
+			results = append(results, SearchResult{
+				Name:             p.Slug,
+				LatestVersion:    p.LatestVersion,
+				Description:      p.Description,
+				Author:           p.Owner.Name,
+				GeneroConstraint: p.Genero,
+				Variants:         p.Variants,
+				Deprecated:       p.Deprecated,
+				MovedTo:          p.MovedTo,
+			})
+		}
+		if added == 0 {
+			break // the page repeated what we already had
+		}
+		if br.Total > 0 && len(results) >= br.Total {
+			break // we have everything the server says exists
+		}
+		// A short page is the last one. Use the size the server actually
+		// applied, which may be lower than the one requested.
+		size := br.PageSize
+		if size <= 0 {
+			size = len(br.Packages)
+		}
+		if len(br.Packages) < size {
+			break
+		}
+	}
+	return results, nil
+}
+
+// fetchSearchPage requests one page of search results.
+func fetchSearchPage(term string, page, pageSize int) (*apiBrowseResponse, error) {
+	q := url.Values{}
+	q.Set("q", term)
+	q.Set("page", strconv.Itoa(page))
+	q.Set("pageSize", strconv.Itoa(pageSize))
+	u := fmt.Sprintf("%s/registry/packages?%s", registryBase(), q.Encode())
 	data, err := httpGetAuthed(u)
 	if err != nil {
 		return nil, fmt.Errorf("search failed: %w", err)
@@ -497,20 +572,7 @@ func Search(term string) ([]SearchResult, error) {
 	if err := json.Unmarshal(data, &br); err != nil {
 		return nil, fmt.Errorf("invalid registry response: %w", err)
 	}
-	results := make([]SearchResult, 0, len(br.Packages))
-	for _, p := range br.Packages {
-		results = append(results, SearchResult{
-			Name:             p.Slug,
-			LatestVersion:    p.LatestVersion,
-			Description:      p.Description,
-			Author:           p.Owner.Name,
-			GeneroConstraint: p.Genero,
-			Variants:         p.Variants,
-			Deprecated:       p.Deprecated,
-			MovedTo:          p.MovedTo,
-		})
-	}
-	return results, nil
+	return &br, nil
 }
 
 // ─── Publisher API (new /registry/... protocol) ──────────────────────────────
