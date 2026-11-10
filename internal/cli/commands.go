@@ -622,7 +622,10 @@ DEFAULT column values:
   both      this repo serves both defaults
   publish*  'fglpkg publish' reaches this repo by BUILT-IN FALLBACK, because no
             defaultRegistry is configured anywhere. The gi row carries this when
-            nothing else is set; publish asks before using it (see 'publish --help').
+            nothing else is set; publish asks first when the fallback is the
+            PUBLIC service (see 'publish --help'). Repointed with FGLPKG_REGISTRY
+            to your own GI registry, it does not ask — you have already said
+            where it goes.
   both*     the consume default, and the built-in publish fallback
   -         no default points here
 

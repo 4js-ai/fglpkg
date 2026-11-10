@@ -488,11 +488,12 @@ func normalizeGitRemoteURL(raw string) string {
 // but saying so at the prompt is what stops it being entered (GIS-600).
 func promptRepository(detected string) (string, error) {
 	if detected != "" {
-		// The detected git remote doubles as the worked example, so the label
-		// stays short.
-		return promptWithDefault("Repository (source-code URL)", detected)
+		// The detected git remote doubles as the worked example, so no hint is
+		// needed; promptWithDefault appends it in parentheses.
+		return promptWithDefault("Repository", detected)
 	}
-	return promptNonEmptyString("Repository (source-code URL, e.g. https://github.com/owner/repo)")
+	return promptNonEmptyStringWithHint("Repository",
+		"  The package's public source-code URL, e.g. https://github.com/owner/repo")
 }
 
 // promptGeneroConstraint prompts for the optional Genero version constraint,
@@ -2587,7 +2588,14 @@ func confirmPublishTarget(pf publishFlags, m *manifest.Manifest) error {
 	// fallback goes, and it is not the public service — there is nothing to
 	// disclose and nothing to confirm. Guarding it anyway would force
 	// --registry gi on every publish for no safety gain.
-	if target != config.BuiltinGI("").URL {
+	//
+	// Compared by HOST, not by string. An exact comparison stood the guard
+	// down for other spellings of the same public host — ":443", mixed case,
+	// a trailing "/." — each of which still reaches the public service. This
+	// is the one branch where a mismatch silently re-opens the original bug,
+	// so it fails safe: anything that does not parse is treated as the public
+	// service and guarded.
+	if !sameHost(target, config.BuiltinGI("").URL) {
 		return nil
 	}
 	if pf.dryRun {
@@ -2641,8 +2649,51 @@ func warnNonURLRepository(m *manifest.Manifest) {
 
 // isHTTPURL reports whether s is an absolute http(s) URL with a host.
 func isHTTPURL(s string) bool {
+	// "git+https://github.com/owner/repo.git" is the npm-style spelling of a
+	// perfectly reachable URL, so strip the VCS prefix before parsing rather
+	// than warning that it "is not reachable by anyone".
+	s = strings.TrimPrefix(s, "git+")
 	u, err := neturl.Parse(s)
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+// sameHost reports whether two URLs address the same host, ignoring case, the
+// default port for the scheme, and any path. Anything that fails to parse, or
+// carries no host, compares false EXCEPT against itself — callers that fail
+// safe rely on an unparseable value not matching a known-good one.
+func sameHost(a, b string) bool {
+	ha, oka := normalizedHost(a)
+	hb, okb := normalizedHost(b)
+	if !oka || !okb {
+		// Fall back to a literal comparison so two identically-malformed
+		// values still match; a malformed value never matches a well-formed
+		// one.
+		return a == b
+	}
+	return ha == hb
+}
+
+// normalizedHost returns a URL's lower-cased host with the scheme's default
+// port removed, and whether it could be determined.
+func normalizedHost(raw string) (string, bool) {
+	u, err := neturl.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return "", false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return "", false
+	}
+	port := u.Port()
+	// An explicitly-written default port addresses the same host as none.
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		host += ":" + port
+	}
+	return scheme + "://" + host, true
 }
 
 func cmdPublish(args []string) error {
@@ -4590,6 +4641,10 @@ func cmdRegistryAdd(args []string) error {
 		// --consume-default records the new repository as the sticky source for
 		// install/update/search/info/outdated, in the same file the descriptor
 		// landed in, so "clone → install" needs no per-developer setup (GIS-364).
+		// Read what each default held BEFORE overwriting it, so the
+		// confirmation can say what was replaced instead of asserting it was
+		// the built-in fallback.
+		prevConsume, prevPublish := m.DefaultConsumeRegistry, m.DefaultRegistry
 		if f.consumeDefault {
 			m.DefaultConsumeRegistry = f.name
 		}
@@ -4604,8 +4659,8 @@ func cmdRegistryAdd(args []string) error {
 		}
 		fmt.Printf("✓ Added registry %q to %s\n", f.name, manifest.Filename)
 		noteRepoKeySplit()
-		noteConsumeDefaultSet(f, manifest.Filename)
-		notePublishDefaultSet(f, manifest.Filename)
+		noteConsumeDefaultSet(f, manifest.Filename, prevConsume)
+		notePublishDefaultSet(f, manifest.Filename, prevPublish)
 		return nil
 	}
 
@@ -4618,6 +4673,7 @@ func cmdRegistryAdd(args []string) error {
 		return err
 	}
 	g.Registries = global
+	prevConsume, prevPublish := g.DefaultConsumeRegistry, g.DefaultRegistry
 	if f.consumeDefault {
 		g.DefaultConsumeRegistry = f.name
 	}
@@ -4629,8 +4685,8 @@ func cmdRegistryAdd(args []string) error {
 	}
 	fmt.Printf("✓ Added registry %q to %s\n", f.name, filepath.Join(home, config.GlobalFilename))
 	noteRepoKeySplit()
-	noteConsumeDefaultSet(f, config.GlobalFilename)
-	notePublishDefaultSet(f, config.GlobalFilename)
+	noteConsumeDefaultSet(f, config.GlobalFilename, prevConsume)
+	notePublishDefaultSet(f, config.GlobalFilename, prevPublish)
 	if r.Auth != config.AuthAnonymous {
 		fmt.Printf("  Run 'fglpkg login --registry %s' to store credentials.\n", f.name)
 	}
@@ -4640,23 +4696,34 @@ func cmdRegistryAdd(args []string) error {
 // noteConsumeDefaultSet confirms that --consume-default rewired where packages
 // are consumed from — a bigger change than adding a repository, so it is stated
 // explicitly rather than left to be discovered on the next install.
-func noteConsumeDefaultSet(f registryEditFlags, file string) {
+func noteConsumeDefaultSet(f registryEditFlags, file, previous string) {
 	if !f.consumeDefault {
 		return
 	}
 	fmt.Printf("  Set as the default consume registry in %s — install/update/search/info/outdated\n", file)
 	fmt.Printf("  now resolve from %q alone (override per command with --registry <name>).\n", f.name)
+	if previous != "" && previous != f.name {
+		fmt.Printf("  This replaced the previous default, %q.\n", previous)
+	}
 }
 
 // notePublishDefaultSet confirms that --publish-default rewired where packages
 // are published to — the change that stops `publish` falling back to the public
 // GI registry, so it is stated rather than left to be discovered (GIS-600).
-func notePublishDefaultSet(f registryEditFlags, file string) {
+func notePublishDefaultSet(f registryEditFlags, file, previous string) {
 	if !f.publishDefault {
 		return
 	}
+	// Name what was actually replaced. Claiming "instead of the public GI
+	// registry" is false once a default is already set — and silently
+	// overwriting another target is exactly the kind of change that should be
+	// stated.
+	replaced := "the public GI registry"
+	if previous != "" && previous != f.name {
+		replaced = fmt.Sprintf("%q", previous)
+	}
 	fmt.Printf("  Set as the default publish target in %s — 'fglpkg publish' now\n", file)
-	fmt.Printf("  targets %q instead of the public GI registry (override with --registry <name>).\n", f.name)
+	fmt.Printf("  targets %q instead of %s (override with --registry <name>).\n", f.name, replaced)
 }
 
 func cmdRegistryRemove(args []string) error {
@@ -6132,6 +6199,22 @@ func promptPackageVersion() (string, error) {
 // echoed back in the error line, so callers should pass it in display case
 // (e.g. "Description" yields "Invalid description - cannot be empty").
 func promptNonEmptyString(prompt string) (string, error) {
+	return promptNonEmptyStringWithHint(prompt, "")
+}
+
+// promptNonEmptyStringWithHint is promptNonEmptyString with guidance printed
+// on its OWN line above the prompt.
+//
+// The hint is deliberately not part of the label: the label is reused verbatim
+// in the "Invalid %s - cannot be empty" error (lower-cased), so folding the
+// guidance into it produced `error: Invalid repository (source-code url, e.g.
+// https://github.com/owner/repo) - cannot be empty`, with the URL lower-cased
+// too. It also doubled the parentheses when promptWithDefault appended a
+// detected value.
+func promptNonEmptyStringWithHint(prompt, hint string) (string, error) {
+	if hint != "" {
+		fmt.Printf("%s\n", hint)
+	}
 	str, err := promptWithDefault(prompt, "")
 	if err != nil {
 		return "", err

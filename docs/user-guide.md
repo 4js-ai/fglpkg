@@ -1098,7 +1098,7 @@ Pass `--registry gi` to choose the public registry deliberately, or set your own
 fglpkg registry add acme https://artifactory.acme.example/artifactory/GeneroBDL --publish-default
 ```
 
-`fglpkg registry list` marks the effective target in its `DEFAULT` column; a trailing `*` (`publish*`) means the built-in fallback rather than a configured default. The consuming commands — `install`, `search`, `info`, `outdated` — keep their silent fallback to GI, because reading from it discloses nothing.
+`fglpkg registry list` marks the effective target in its `DEFAULT` column; a trailing `*` (`publish*`) means the built-in fallback rather than a configured default. `publish` asks before using that fallback when it is the public service; with `FGLPKG_REGISTRY` pointing at your own GI registry it does not, because the target was already chosen. The consuming commands — `install`, `search`, `info`, `outdated` — keep their silent fallback to GI, because reading from it discloses nothing.
 
 If `FGLPKG_REGISTRY` points `gi` at your own on-premise registry, the fallback is not the public service and `publish` does not ask.
 

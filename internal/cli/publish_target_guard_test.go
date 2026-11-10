@@ -167,11 +167,75 @@ func TestConfirmPublishTargetSkipsARepointedRegistry(t *testing.T) {
 
 // ...but FGLPKG_REGISTRY set to the public URL is still the public registry, so
 // the guard must not be defeated by spelling the default out.
+// Every spelling that still reaches the PUBLIC service must be guarded. The
+// comparison was once an exact string match, which stood the guard down for
+// ":443", for mixed case, and for a trailing "/." — all of them the same host.
+// This is the one branch where a mismatch silently re-opens the original bug.
 func TestConfirmPublishTargetStillGuardsTheExplicitPublicURL(t *testing.T) {
-	t.Setenv("FGLPKG_REGISTRY", "https://service.generointelligence.ai")
-	forceTTY(t, false)
-	if err := confirmPublishTarget(publishFlags{}, testManifest()); err == nil {
-		t.Fatal("naming the public registry via FGLPKG_REGISTRY must still be guarded")
+	spellings := []string{
+		"https://service.generointelligence.ai",
+		"https://service.generointelligence.ai/",
+		"https://service.generointelligence.ai//",
+		"https://service.generointelligence.ai:443",
+		"HTTPS://SERVICE.GenerOIntelligence.AI",
+		"https://service.generointelligence.ai/.",
+		"https://service.generointelligence.ai/some/path",
+		"  https://service.generointelligence.ai  ",
+	}
+	for _, spelling := range spellings {
+		t.Run(spelling, func(t *testing.T) {
+			t.Setenv("FGLPKG_REGISTRY", spelling)
+			forceTTY(t, false)
+			if err := confirmPublishTarget(publishFlags{}, testManifest()); err == nil {
+				t.Fatalf("FGLPKG_REGISTRY=%q reaches the public service but was not guarded", spelling)
+			}
+		})
+	}
+}
+
+// The mirror image: a genuinely different host must still stand the guard
+// down, or an on-premise GI registry would need --registry gi on every publish
+// for no safety gain.
+func TestConfirmPublishTargetStandsDownForAnotherHost(t *testing.T) {
+	for _, url := range []string{
+		"https://gi.internal.acme.example",
+		"https://service.generointelligence.ai.evil.example", // a suffix, not the host
+		"http://127.0.0.1:8080",
+	} {
+		t.Run(url, func(t *testing.T) {
+			t.Setenv("FGLPKG_REGISTRY", url)
+			forceTTY(t, false)
+			if err := confirmPublishTarget(publishFlags{}, testManifest()); err != nil {
+				t.Fatalf("FGLPKG_REGISTRY=%q is not the public service, so publish must proceed: %v", url, err)
+			}
+		})
+	}
+}
+
+func TestSameHost(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"https://example.com", "https://example.com", true},
+		{"https://example.com", "https://example.com/", true},
+		{"https://example.com:443", "https://example.com", true},
+		{"http://example.com:80", "http://example.com", true},
+		{"HTTPS://EXAMPLE.COM", "https://example.com", true},
+		{"https://example.com/a/b", "https://example.com", true},
+		{"https://example.com", "https://other.example", false},
+		{"https://example.com", "http://example.com", false}, // scheme matters
+		{"https://example.com:8443", "https://example.com", false},
+		// Unparseable values match only themselves, so failing-safe callers
+		// never see a malformed value compare equal to a known-good one.
+		{"", "", true},
+		{"not a url", "not a url", true},
+		{"not a url", "https://example.com", false},
+	}
+	for _, c := range cases {
+		if got := sameHost(c.a, c.b); got != c.want {
+			t.Errorf("sameHost(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
 	}
 }
 
@@ -188,6 +252,13 @@ func TestIsHTTPURL(t *testing.T) {
 		{"github.com/owner/repo", false}, // no scheme
 		{"https://", false},              // scheme but no host
 		{"", false},
+		// The npm-style VCS prefix wraps a perfectly reachable URL, so it must
+		// not be warned about as "not reachable by anyone".
+		{"git+https://github.com/owner/repo.git", true},
+		{"git+http://example.com/x.git", true},
+		// git:// and ssh:// are genuinely not browsable, so they stay flagged.
+		{"git+ssh://git@github.com/owner/repo.git", false},
+		{"git://github.com/owner/repo.git", false},
 	}
 	for _, c := range cases {
 		if got := isHTTPURL(c.in); got != c.want {

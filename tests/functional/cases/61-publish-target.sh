@@ -31,12 +31,35 @@ it "the refusal names the explicit opt-in and how to set a default" _pub_no_targ
 
 # The guard runs before the package is built: nothing is packed, compiled or
 # staged for a publish that was never going to happen.
+#
+# The assertion has to be something the BUILD actually prints, or it cannot
+# fail. An earlier version asserted that the output did not match
+# "Building|Packing|Uploading|Submitting" — words no build step ever emits — so
+# it passed just as happily with the guard moved to AFTER enforceLint, and
+# pinned nothing. The unit tests cannot see call order either: they invoke
+# confirmPublishTarget directly.
+#
+# A `files` pattern matching nothing makes the build emit a warning of its own,
+# which is the observable that distinguishes the two orderings. Verified both
+# ways: on this branch the output is only the refusal; with the guard moved
+# after the build the first line is
+#   warning: files: pattern "nomatch-*.42m" matched no files under root "."
 _pub_no_target_before_build() {
   mkpkg
   export FGLPKG_TOKEN="dummy-token"
+  python3 - <<'PYEOF' || return 1
+import json
+m = json.load(open("fglpkg.json"))
+m["files"] = ["nomatch-*.42m"]
+json.dump(m, open("fglpkg.json", "w"))
+PYEOF
+  rm -f mod.42m
   run publish
-  assert_failure
-  assert_not_match "Building|Packing|Uploading|Submitting"
+  assert_failure || return 1
+  assert_contains "no publish target is configured" || return 1
+  # The build's own diagnostic must be absent: reaching it means the archive
+  # was staged for a publish the guard was about to refuse.
+  assert_not_contains "matched no files" || return 1
 }
 it "the refusal happens before anything is built" _pub_no_target_before_build
 

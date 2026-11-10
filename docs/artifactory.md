@@ -154,7 +154,9 @@ The three derived columns are worth reading:
 - **DEFAULT** — the default role it serves: `consume`, `publish`, `both`, or `-`.
   A trailing `*` marks the **built-in fallback** rather than a configured default:
   with no `defaultRegistry` set anywhere, the `gi` row reads `publish*`, because a
-  bare `fglpkg publish` would go there — and it asks before it does. Set your own
+  bare `fglpkg publish` would go there — and it asks before it does, when that
+  fallback is the public service. (Repointed with `FGLPKG_REGISTRY` at your own
+  GI registry it does not ask: you have already said where it goes.) Set your own
   target with `fglpkg registry add <name> <url> --publish-default`.
 - **LOGIN** — credential state: `yes` (stored), `no` (none), `anon` (anonymous
   scheme), or `env` (the GI registry authenticated by `FGLPKG_TOKEN` — this only

@@ -717,7 +717,7 @@ fglpkg registry list
 
 `LOGIN` values: `yes` (credentials stored), `env` (GI authenticated by `FGLPKG_TOKEN`), `no` (none), `anon` (no auth needed).
 `SOURCE` values: `builtin` (the always-present GI entry), `global` (from `~/.fglpkg/config.json`), `project` (from the committed `fglpkg.json`) — so you can see at a glance which registries a clone inherited from the repo.
-`DEFAULT` values: `consume` (the sole source consulted for `install`/`update`/`search`/`info`/`outdated` — see [Choosing where packages come from](#choosing-where-packages-come-from)), `publish` (the default `publish` target), `both`, or `-`. A trailing `*` (`publish*`, `both*`) marks the **built-in fallback** rather than a configured default: with no `defaultRegistry` set anywhere, the `gi` row carries `publish*`, because that is where a bare `fglpkg publish` would go — and it asks first.
+`DEFAULT` values: `consume` (the sole source consulted for `install`/`update`/`search`/`info`/`outdated` — see [Choosing where packages come from](#choosing-where-packages-come-from)), `publish` (the default `publish` target), `both`, or `-`. A trailing `*` (`publish*`, `both*`) marks the **built-in fallback** rather than a configured default: with no `defaultRegistry` set anywhere, the `gi` row carries `publish*`, because that is where a bare `fglpkg publish` would go — and it asks first when that fallback is the **public** service. Repointed with `FGLPKG_REGISTRY` at your own GI registry it does not ask, because you have already said where it goes.
 
 ### Authentication
 
