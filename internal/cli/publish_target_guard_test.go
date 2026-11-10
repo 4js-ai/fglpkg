@@ -192,6 +192,11 @@ func TestConfirmPublishTargetStillGuardsTheExplicitPublicURL(t *testing.T) {
 		"https://service.generointelligence.ai.",
 		"https://user:pw@service.generointelligence.ai",
 		"//service.generointelligence.ai",
+		// Cloudflare answers HTTPS on alternative ports for a proxied
+		// hostname, so a port does not select a service here. Verified
+		// anonymously: :443, :8443 and :2053 all return the same registry API.
+		"https://service.generointelligence.ai:8443",
+		"https://service.generointelligence.ai:2053",
 	}
 	for _, spelling := range spellings {
 		t.Run(spelling, func(t *testing.T) {
@@ -212,6 +217,10 @@ func TestConfirmPublishTargetStandsDownForAnotherHost(t *testing.T) {
 		"https://gi.internal.acme.example",
 		"https://service.generointelligence.ai.evil.example", // a suffix, not the host
 		"http://127.0.0.1:8080",
+		// Dropping the port from the comparison must not catch these: an
+		// on-premise registry is a different HOST whatever port it listens on.
+		"https://gi.internal.acme.example:8443",
+		"https://localhost:9000",
 	} {
 		t.Run(url, func(t *testing.T) {
 			t.Setenv("FGLPKG_REGISTRY", url)
@@ -262,16 +271,20 @@ func TestComparableHost(t *testing.T) {
 		// The absolute spelling of a name is the same name.
 		{"https://example.com.", "example.com", true},
 		{"https://example.com..", "example.com", true},
-		// A written-out default port addresses the same service as none.
+		// Neither the scheme nor the port is part of the answer, because
+		// neither selects a service on a host. Cloudflare, which proxies the
+		// public registry, answers HTTPS on several alternative ports for one
+		// proxied hostname — verified anonymously, :443, :8443 and :2053 all
+		// return the same registry API — so a port must not read as a
+		// different service. A registry that really is somewhere else is a
+		// different HOST, which this still distinguishes.
 		{"https://example.com:443", "example.com", true},
 		{"http://example.com:80", "example.com", true},
-		// The scheme is not part of the answer: one host is one service, and
-		// an odd pairing like http://host:443 reaches nothing, so it lands on
-		// the safe side rather than reading as a different service.
 		{"http://example.com", "example.com", true},
 		{"http://example.com:443", "example.com", true},
-		// ...but another port IS another service.
-		{"https://example.com:8443", "example.com:8443", true},
+		{"https://example.com:8443", "example.com", true},
+		{"https://example.com:2053", "example.com", true},
+		{"https://other.example:8443", "other.example", true},
 		{"https://other.example", "other.example", true},
 		// No determinable host. The caller guards instead of standing down.
 		{"", "", false},
@@ -312,6 +325,66 @@ func TestIsHTTPURL(t *testing.T) {
 		if got := isHTTPURL(c.in); got != c.want {
 			t.Errorf("isHTTPURL(%q) = %v, want %v", c.in, got, c.want)
 		}
+	}
+}
+
+// Replacing an existing publish default must SAY what it replaced. The message
+// used to claim "instead of the public GI registry" whatever was there before,
+// which is false once a default is set — and silently overwriting a target a
+// team already chose is exactly the change that should be stated (GIS-600).
+func TestCmdRegistryAdd_PublishDefaultNamesWhatItReplaced(t *testing.T) {
+	chdirTemp(t)
+
+	// Nothing was set before, so the fallback is what gets replaced.
+	out, err := captureStdout(t, func() error {
+		return cmdRegistryAdd([]string{"acme", "https://a.example", "--repo-key", "K", "--publish-default"})
+	})
+	if err != nil {
+		t.Fatalf("first --publish-default: %v", err)
+	}
+	if !strings.Contains(out, "the public GI registry") {
+		t.Errorf("the first default replaces the built-in fallback and should say so, got:\n%s", out)
+	}
+
+	// Now there IS a previous default, and it is not the fallback.
+	out, err = captureStdout(t, func() error {
+		return cmdRegistryAdd([]string{"other", "https://o.example", "--repo-key", "K", "--publish-default"})
+	})
+	if err != nil {
+		t.Fatalf("second --publish-default: %v", err)
+	}
+	if !strings.Contains(out, `instead of "acme"`) {
+		t.Errorf(`replacing a default should name it ("instead of \"acme\""), got:`+"\n%s", out)
+	}
+	if strings.Contains(out, "the public GI registry") {
+		t.Errorf("publish was targeting acme, not the public registry, so that claim is false:\n%s", out)
+	}
+}
+
+// --consume-default has the same duty: the previous default disappears, so it
+// must not disappear quietly.
+func TestCmdRegistryAdd_ConsumeDefaultNamesWhatItReplaced(t *testing.T) {
+	chdirTemp(t)
+
+	out, err := captureStdout(t, func() error {
+		return cmdRegistryAdd([]string{"acme", "https://a.example", "--repo-key", "K", "--consume-default"})
+	})
+	if err != nil {
+		t.Fatalf("first --consume-default: %v", err)
+	}
+	// There was no previous default, so there is nothing to report replacing.
+	if strings.Contains(out, "replaced the previous default") {
+		t.Errorf("the first consume default replaced nothing, got:\n%s", out)
+	}
+
+	out, err = captureStdout(t, func() error {
+		return cmdRegistryAdd([]string{"other", "https://o.example", "--repo-key", "K", "--consume-default"})
+	})
+	if err != nil {
+		t.Fatalf("second --consume-default: %v", err)
+	}
+	if !strings.Contains(out, `replaced the previous default, "acme"`) {
+		t.Errorf("replacing the consume default should name it, got:\n%s", out)
 	}
 }
 

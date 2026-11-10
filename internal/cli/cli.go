@@ -2656,11 +2656,12 @@ func isHTTPURL(s string) bool {
 // FGLPKG_REGISTRY, and the one branch where a wrong answer silently re-opens
 // GIS-600, so it is deliberately blunt.
 //
-// It compares HOSTS, not strings. An exact string comparison stood the guard
-// down for ":443", for mixed case, for a trailing "/.", for a plain http://
-// scheme and for a trailing-dot FQDN — every one of those still reaches the
-// public service, and the http:// spelling would additionally put the bearer
-// token on the wire in cleartext.
+// It compares HOST NAMES, not strings. An exact string comparison stood the
+// guard down for ":443", for mixed case, for a trailing "/.", for a plain
+// http:// scheme, for a trailing-dot FQDN and for Cloudflare's alternative
+// HTTPS ports — every one of those still reaches the public service, and the
+// http:// spelling would additionally put the bearer token on the wire in
+// cleartext.
 //
 // It fails safe: a value whose host cannot be determined is guarded rather
 // than waved through. The guard stands down only for a target it can SEE is
@@ -2676,17 +2677,26 @@ func addressesPublicGI(target string) bool {
 	return host == public
 }
 
-// comparableHost reduces a URL to the host that two spellings of the same
-// service share, and reports whether one could be determined at all.
+// comparableHost reduces a URL to the host name that every spelling of the
+// same service shares, and reports whether one could be determined at all.
 //
 // Lower-cased, because host names are case-insensitive. Any trailing "." is
 // trimmed, because "example.com." is the absolute spelling of the same name
-// and Go's TLS verification accepts it. The SCHEME is deliberately not part of
-// the result: http:// and https:// on one host are one service, and the
-// question here is which service a URL reaches. A non-default port IS kept, so
-// ":8443" is a different service — but 80 and 443 are dropped whatever the
-// scheme, since an odd pairing such as http://host:443 reaches nothing at all
-// and erring towards "same host" is the safe side.
+// and Go's TLS verification accepts it.
+//
+// Neither the SCHEME nor the PORT is part of the result, because neither
+// selects a service on the host this is asked about. http:// and https:// on
+// one host are one service. And Cloudflare, which proxies the public
+// registry, answers HTTPS on several alternative ports for a proxied
+// hostname: verified anonymously against the public host, ":443", ":8443" and
+// ":2053" all return the same registry API (a 404
+// {"error":"Package not found"} for the same absent package). Treating
+// ":8443" as a different service would therefore have let a publish through
+// to the real registry.
+//
+// The cost of dropping the port is nil for the case it might have protected:
+// an on-premise registry on any port is a different HOST, so it still stands
+// the guard down.
 func comparableHost(raw string) (string, bool) {
 	u, err := neturl.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -2695,9 +2705,6 @@ func comparableHost(raw string) (string, bool) {
 	host := strings.TrimRight(strings.ToLower(u.Hostname()), ".")
 	if host == "" {
 		return "", false
-	}
-	if port := u.Port(); port != "" && port != "80" && port != "443" {
-		host += ":" + port
 	}
 	return host, true
 }
