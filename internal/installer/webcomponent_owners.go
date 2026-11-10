@@ -340,3 +340,30 @@ func (i *Installer) installedWebcomponents() map[string]string {
 	}
 	return o.Versions
 }
+
+// WebcomponentPackageFiles reports the slash-relative paths (under
+// webcomponentsDir) that pkg installed, and the version recorded for it.
+//
+// It exists because a web-component package leaves NO manifest on disk — the
+// publisher's fglpkg.json is deliberately not extracted, since several widgets
+// would collide on it — so the ownership sidecar is the only record of what a
+// given package put there. `fglpkg docs` needs that record to reach a widget's
+// USERGUIDE.md, which is otherwise unreachable even though the file is sitting
+// on disk (GIS-581).
+//
+// found is false when the sidecar does not name pkg at all. version may be ""
+// for a package recorded before the Versions field existed.
+func WebcomponentPackageFiles(webcomponentsDir, pkg string) (files []string, version string, found bool) {
+	o, err := loadWCOwners(webcomponentsDir)
+	if err != nil {
+		return nil, "", false
+	}
+	owned, ok := o.Packages[pkg]
+	if !ok {
+		return nil, "", false
+	}
+	out := make([]string, len(owned))
+	copy(out, owned)
+	sort.Strings(out)
+	return out, o.Versions[pkg], true
+}

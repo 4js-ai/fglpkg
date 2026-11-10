@@ -5106,9 +5106,23 @@ func cmdDocs(args []string) error {
 
 	pkgName := args[0]
 
+	// Two installed shapes, two places to look. A BDL (or mixed) package keeps
+	// its manifest under .fglpkg/packages/<slug>/, so its own `docs` globs
+	// decide. A package installed as the `webcomponent` variant is extracted
+	// into .fglpkg/webcomponents/ and keeps NO manifest, so it was invisible
+	// here and every widget reported as not installed — telling the user to
+	// install what was already installed (GIS-581).
 	pkgDir, m, err := findInstalledPackage(pkgName)
 	if err != nil {
-		return err
+		src, ok := findWebcomponentDocs(pkgName)
+		if !ok {
+			return err
+		}
+		if len(src.files) == 0 {
+			fmt.Printf("Package %q is installed as a web component and ships no documentation files.\n", src.label)
+			return nil
+		}
+		return printDocs(pkgName, src, args)
 	}
 
 	if len(m.Docs) == 0 {
@@ -5126,19 +5140,24 @@ func cmdDocs(args []string) error {
 		return nil
 	}
 
+	return printDocs(pkgName, docSource{
+		baseDir: pkgDir,
+		files:   docFiles,
+		label:   m.Name + "@" + m.Version,
+	}, args)
+}
+
+// printDocs renders one package's documentation: the single file directly, the
+// list when there are several, or one named file. Shared by both install
+// shapes so a web component's docs read exactly like a BDL package's.
+func printDocs(pkgName string, src docSource, args []string) error {
 	// If no specific file requested and there's only one doc, show it directly.
 	if len(args) < 2 {
-		if len(docFiles) == 1 {
-			fullPath := filepath.Join(pkgDir, docFiles[0])
-			content, err := os.ReadFile(fullPath)
-			if err != nil {
-				return fmt.Errorf("cannot read %s: %w", docFiles[0], err)
-			}
-			fmt.Print(string(content))
-			return nil
+		if len(src.files) == 1 {
+			return printDocFile(src.baseDir, src.files[0])
 		}
-		fmt.Printf("Documentation for %s@%s:\n", m.Name, m.Version)
-		for _, f := range docFiles {
+		fmt.Printf("Documentation for %s:\n", src.label)
+		for _, f := range src.files {
 			fmt.Printf("  %s\n", f)
 		}
 		fmt.Printf("\nView a file: fglpkg docs %s <file>\n", pkgName)
@@ -5149,7 +5168,7 @@ func cmdDocs(args []string) error {
 	requestedFile := args[1]
 
 	var matchPath string
-	for _, f := range docFiles {
+	for _, f := range src.files {
 		if f == requestedFile || filepath.Base(f) == requestedFile {
 			matchPath = f
 			break
@@ -5158,11 +5177,13 @@ func cmdDocs(args []string) error {
 	if matchPath == "" {
 		return fmt.Errorf("doc file %q not found in package %s\nRun 'fglpkg docs %s' to list available files", requestedFile, pkgName, pkgName)
 	}
+	return printDocFile(src.baseDir, matchPath)
+}
 
-	fullPath := filepath.Join(pkgDir, matchPath)
-	content, err := os.ReadFile(fullPath)
+func printDocFile(baseDir, relPath string) error {
+	content, err := os.ReadFile(filepath.Join(baseDir, filepath.FromSlash(relPath)))
 	if err != nil {
-		return fmt.Errorf("cannot read %s: %w", matchPath, err)
+		return fmt.Errorf("cannot read %s: %w", relPath, err)
 	}
 	fmt.Print(string(content))
 	return nil
