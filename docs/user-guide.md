@@ -1082,10 +1082,26 @@ fglpkg login --token <PAT>   # store a Personal Access Token
 Credentials are saved to `~/.fglpkg/credentials.json` and refreshed automatically. Then, from the package directory:
 
 ```bash
-fglpkg publish
-fglpkg publish --dry-run     # preview every call without touching the network
-fglpkg publish --force       # re-upload a still-pending/rejected variant (approved is immutable — bump)
+fglpkg publish --registry gi  # name the target (see "Where publish sends it" below)
+fglpkg publish --dry-run      # preview every call without touching the network
+fglpkg publish --force        # re-upload a still-pending/rejected variant (approved is immutable — bump)
 ```
+
+**Where `publish` sends it.** The target is resolved from `--registry`, then `FGLPKG_PUBLISH_REGISTRY`, then the project's `defaultRegistry`, then the global one. With **none** of them set, `publish` falls back to the public Genero Intelligence registry at `https://service.generointelligence.ai` — which is shared by every partner, and from which a submitted version **cannot be withdrawn from the command line**. That fallback is never taken silently:
+
+- at an interactive terminal, `publish` names the package and the target and asks; answering no (the default) uploads nothing;
+- under `--ci`, or with no terminal, it **fails** and tells you how to name a target;
+- `--dry-run` is not blocked — it uploads nothing by definition — but it warns, so a rehearsal still tells you where the real run would go.
+
+Pass `--registry gi` to choose the public registry deliberately, or set your own target once:
+
+```bash
+fglpkg registry add acme https://artifactory.acme.example/artifactory/GeneroBDL --publish-default
+```
+
+`fglpkg registry list` marks the effective target in its `DEFAULT` column; a trailing `*` (`publish*`) means the built-in fallback rather than a configured default. `publish` asks before using that fallback when it is the public service; with `FGLPKG_REGISTRY` pointing at your own GI registry it does not, because the target was already chosen. The consuming commands — `install`, `search`, `info`, `outdated` — keep their silent fallback to GI, because reading from it discloses nothing.
+
+If `FGLPKG_REGISTRY` points `gi` at your own on-premise registry, the fallback is not the public service and `publish` does not ask.
 
 **Empty-package guard.** If the staged archive would contain no asset — nothing but `fglpkg.json` and files matched by `docs` — `publish` refuses it with an actionable message (a common symptom of a `files` pattern that matches nothing). Any real content counts as an asset: BDL modules, `bin` scripts, a `webcomponents/` tree (html/js/css), `include` files, or a `profile`. Run `fglpkg pack --list` first to see exactly what would ship; it flags the empty case too. Pass `--allow-empty` to publish anyway (e.g. a docs-only placeholder).
 
@@ -1520,7 +1536,7 @@ Notes:
 fglpkg login           # once, OAuth in the browser (or use FGLPKG_TOKEN)
 fglpkg pack --list     # preview the zip contents before pushing
 fglpkg publish --dry-run
-fglpkg publish
+fglpkg publish --registry gi   # name the target; see "Where publish sends it"
 ```
 
 The publish flow picks the variant automatically — `webcomponent` for pure-WC packages, `genero<N>` for mixed or pure-BDL. In both cases the in-zip layout has the `webcomponents/` prefix stripped — so a source file at `webcomponents/3DChart/3DChart.html` is stored as `3DChart/3DChart.html` in the artifact, ready to drop into the consumer's install directory.
@@ -1967,7 +1983,7 @@ Check the effective configuration and login status any time:
 ```bash
 fglpkg registry list
 # NAME   TYPE         PRIO  AUTH    LOGIN  SOURCE   DEFAULT  URL
-# gi     genero       1     bearer  env    builtin  -        https://service.generointelligence.ai
+# gi     genero       1     bearer  env    builtin  publish* https://service.generointelligence.ai
 # acme   artifactory  2     bearer  no     project  consume  https://artifactory.acme.example/artifactory
 ```
 

@@ -426,9 +426,21 @@ DEFAULT TARGET:
   With no --registry, publish targets the default repository, resolved in
   decreasing precedence: the FGLPKG_PUBLISH_REGISTRY environment variable, the
   project's "defaultRegistry" field in fglpkg.json, then the global
-  ~/.fglpkg/config.json "defaultRegistry". If none is set, publish goes to the
-  GI registry (the historical default). A team publishing to their own
-  Artifactory can set "defaultRegistry" once and omit --registry thereafter.
+  ~/.fglpkg/config.json "defaultRegistry". A team publishing to their own
+  Artifactory can set "defaultRegistry" once and omit --registry thereafter,
+  or run 'fglpkg registry add <name> <url> --publish-default'.
+
+  If none of those is set, publish falls back to the PUBLIC GI registry at
+  https://service.generointelligence.ai, where every partner can see the
+  package and a submitted version cannot be withdrawn from the command line.
+  That fallback is never taken silently: publish asks first at an interactive
+  terminal (answering no uploads nothing), and fails under --ci or with no
+  terminal. Pass --registry gi to choose it deliberately. The consuming
+  commands (install, search, info, outdated) are unaffected — they keep their
+  silent fallback to GI, because reading from it discloses nothing.
+
+  'fglpkg registry list' marks the effective target in its DEFAULT column; a
+  trailing "*" means the built-in fallback rather than a configured default.
 
 CHANGELOG:
   When --changelog is not given, publish looks for a CHANGELOG.md in the project
@@ -582,7 +594,7 @@ login".
 			"fglpkg registry add <name> <url> [--type genero|artifactory] [--repo-key K]\n" +
 			"                                 [--auth bearer|basic|apikey|anonymous] [--priority N]\n" +
 			"                                 [--packages 'acme-*,foo-*'] [--local]\n" +
-			"                                 [--consume-default]\n" +
+			"                                 [--consume-default] [--publish-default]\n" +
 			"fglpkg registry remove <name> [--local]",
 		Long: `SUBCOMMANDS:
   list                     Show configured repositories, priority, auth scheme, login status,
@@ -607,6 +619,9 @@ FLAGS (add):
                            selects it explicitly. (--project is a deprecated alias for --local)
   --consume-default        Also record this repo as "defaultConsumeRegistry" in the same
                            file, so install/update/search/info/outdated resolve from it
+  --publish-default        Also record this repo as "defaultRegistry" in the same file, so
+                           'fglpkg publish' targets it instead of falling back to the
+                           public GI registry
 
 Repositories are configured via a "registries" array in fglpkg.json and/or
 ~/.fglpkg/config.json, alongside the built-in Genero Intelligence registry.
@@ -623,16 +638,26 @@ LOGIN column values:
   anon    the repo's auth scheme is "anonymous" (no login required)
 
 DEFAULT column values:
-  consume  install/update/search/info/outdated resolve from this repo by default
-  publish  'fglpkg publish' targets this repo by default
-  both     this repo serves both defaults
-  -        no default points here
+  consume   install/update/search/info/outdated resolve from this repo by default
+  publish   'fglpkg publish' targets this repo by default
+  both      this repo serves both defaults
+  publish*  'fglpkg publish' reaches this repo by BUILT-IN FALLBACK, because no
+            defaultRegistry is configured anywhere. The gi row carries this when
+            nothing else is set; publish asks first when the fallback is the
+            PUBLIC service (see 'publish --help'). Repointed with FGLPKG_REGISTRY
+            to your own GI registry, it does not ask — you have already said
+            where it goes.
+  both*     the consume default, and the built-in publish fallback
+  -         no default points here
 
 Sign in to a secondary repo with 'fglpkg login --registry <name>'. Set which
 repo 'fglpkg publish' targets by default with a top-level "defaultRegistry" in
-fglpkg.json (or the FGLPKG_PUBLISH_REGISTRY env var), and which repo packages
-are consumed from with "defaultConsumeRegistry" (or FGLPKG_CONSUME_REGISTRY /
-'registry add --consume-default'). The consume default is exclusion, not
+fglpkg.json (or the FGLPKG_PUBLISH_REGISTRY env var, or 'registry add
+--publish-default'), and which repo packages are consumed from with
+"defaultConsumeRegistry" (or FGLPKG_CONSUME_REGISTRY /
+'registry add --consume-default'). With no publish default anywhere, 'fglpkg
+publish' falls back to the public GI registry and asks before doing so; the
+DEFAULT column marks that row "publish*". The consume default is exclusion, not
 precedence: only that repo is consulted, so a name in two repos is never
 silently tie-broken. A per-dependency "registry" pin and an explicit
 --registry both override it.
