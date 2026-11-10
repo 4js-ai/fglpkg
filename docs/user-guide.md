@@ -2191,26 +2191,52 @@ fglpkg records what a package was built with, and refuses a verified mismatch.
 
 ### What `pack` records
 
-`fglpkg pack` **derives** `characterEncoding` from the artifacts it stages and writes it into the shipped manifest — you do not normally declare it:
+`fglpkg pack` records only what the staged artifacts **prove**, and leaves the field absent otherwise. Absent means `install` performs no check, which is what every package published before this feature already does.
+
+What each artifact can prove differs sharply, measured against Genero 6.00.01:
+
+| Artifact | What its bytes prove |
+|---|---|
+| `.42s` (string resource) | **Reliable.** An ASCII resource has no byte ≥ `0x80`, a UTF-8 one decodes as UTF-8, an 8-bit one does not. Identical whatever locale `fglmkstr` ran under. |
+| `.42m` (p-code) | **No high byte proves ASCII; a high byte proves nothing.** A `.42m`'s own structure contains bytes ≥ `0x80` — opcode operands, the embedded source-path length. Of 99 real modules compiled from pure-ASCII sources, only 21 had none. The file is byte-identical across build locales, so it records no charset of its own. |
+| `.42f` (compiled form) | **The prolog names the build locale, not the content.** The same pure-ASCII `.per` compiles to a prolog of `ASCII`, `UTF-8` or `ISO-8859-15` depending on your shell. So the prolog is read only when the form actually carries a byte ≥ `0x80`. |
+
+From that, `characterEncoding` describes the package's **code** (`.42m` / `.42f`):
 
 | Evidence | Recorded |
 |---|---|
-| A `.42f` XML prolog naming an encoding | that encoding (authoritative) |
-| No byte ≥ `0x80` in any artifact | `US-ASCII` |
-| High bytes that decode as UTF-8 | `UTF-8` |
-| High bytes that do not decode as UTF-8 | your declaration, else the build charmap with a warning |
+| Every code artifact has no byte ≥ `0x80` | `US-ASCII` |
+| A pure-ASCII `.4gl` / `.per` sits beside each artifact | `US-ASCII` — a pure-ASCII source cannot have produced non-ASCII text |
+| A form carries non-ASCII text, and its prolog names the charset | that charset |
+| Anything else | **nothing**, with a note suggesting you declare it |
 
-This is deliberately *not* a check against your shell's locale. Checking the environment would fail in both directions: a CI job usually runs under `LANG=C`, which would reject a genuinely UTF-8 package, while an all-ASCII package built on a UTF-8 workstation would be forced to declare `UTF-8` and needlessly locked out of every ISO-8859 consumer. Reading the bytes has neither failure mode.
+The source beside the artifact is what makes the ASCII practice provable, since the p-code cannot do it. When you pack from a build tree the sources are there; when you pack a dist directory they are not, and an all-ASCII package then simply records nothing rather than being guessed at.
 
-If you *do* declare a value, `pack` cross-checks it and fails when the artifacts prove it wrong:
+`pack` never consults your shell. An earlier version fell back to `fglrun -i` when the bytes were undecidable — which, given the measurements above, was most packages. Byte-identical artifacts then installed everywhere when packed under `LANG=C` and were refused by ISO-8859-15 consumers when packed under `en_US.UTF-8`. Recording nothing is the honest answer.
+
+String resources are recorded **per file**, because a package may ship one `.42s` per language and charset:
+
+```jsonc
+{
+  "characterEncoding": "US-ASCII",
+  "stringResourceEncodings": {
+    "res/Messages.utf8.42s": "UTF-8",
+    "res/Messages.latin9.42s": "ISO-8859-15"
+  }
+}
+```
+
+An ASCII resource constrains nothing and is omitted. Only a declaration can tell `ISO-8859-1` from `ISO-8859-15`, so declare an entry for a resource whose 8-bit charset the bytes cannot name.
+
+If you declare `characterEncoding`, `pack` cross-checks it — but only against a contradiction it can actually **prove**, which is a form that carries non-ASCII text and names a different charset:
 
 ```console
 $ fglpkg pack
-error: declared characterEncoding "US-ASCII" contradicts the package's artifacts:
-  lib/Util.42m contains bytes >= 0x80, so the package is not pure ASCII
+error: declared characterEncoding "ISO-8859-15" contradicts the package's artifacts:
+  forms/Login.42f carries non-ASCII text and declares UTF-8 in its XML prolog
 ```
 
-The one thing only you can supply is which 8-bit charset it is — `ISO-8859-1` and `ISO-8859-15` are indistinguishable from bytes. A declaration that narrows that is accepted silently.
+Declaring `US-ASCII` for a package whose p-code happens to contain a structure high byte is **correct and accepted**; so is declaring it beside a UTF-8 `.42s`, because that field describes the code.
 
 ### What `install` enforces
 
@@ -2218,19 +2244,29 @@ The one thing only you can supply is which 8-bit charset it is — `ISO-8859-1` 
 $ fglpkg install acme-widget
 error: acme-widget is not compatible with this Genero environment:
   - built with character encoding ISO-8859-15, but this environment uses UTF-8
-  Install it under a matching environment, or pass --force-character-encoding to install anyway (at your own risk).
+  Install it under a matching environment, or run 'fglpkg install --force-character-encoding' to install anyway (at your own risk).
 ```
 
-Two cases are deliberately quiet:
+Deliberately quiet, or advisory:
 
 - **`US-ASCII` is never checked.** ASCII-7 is a subset of every charset Genero supports, so such a package is portable by construction.
-- **A package that declares nothing installs without comment.** Every package published before this field existed declares nothing; the field populates itself as packages are republished.
+- **A package that declares nothing installs without comment.**
+- **A string resource mismatch warns; it never refuses.** A `.42s` is used as its bytes stand, with no transcoding, so a mismatch is real — a UTF-8 resource under an ISO-8859-15 runtime shows raw bytes and reports length 12 for a 10-character string. But a package may ship a resource per charset for you to select at runtime, so refusing the whole package would block a consumer who was going to use a different one:
+
+```console
+$ fglpkg install acme-widget
+warning: acme-widget ships string resources this environment (UTF-8) cannot read correctly:
+  - res/Messages.latin9.42s is ISO-8859-15
+  Text from those files will display incorrectly and report the wrong length. Select a resource file matching your charmap, or rebuild the .str under it.
+```
+
+- **An environment `fglpkg` cannot read warns rather than refusing.** Where `fglrun` is absent — a build container that only vendors packages — the declaration is advisory until a program actually runs.
 
 ### Best practice for a published package
 
-**Keep your `.4gl` and `.per` sources pure ASCII-7**, so the compiled artifacts are too and `pack` records `US-ASCII`. Such a package installs everywhere with no check at all. Put translatable text in `.str` / `.42s` string resources instead, in whichever languages and encodings you need, and let the consumer select them at runtime.
+**Keep your `.4gl` and `.per` sources pure ASCII-7** and put translatable text in `.str` / `.42s` string resources, in whichever languages and encodings you need, letting the consumer select them at runtime.
 
-That advice predates this feature; what deriving the field adds is that following it is now **provable** rather than merely claimed.
+Following that is what `pack` can prove: with the sources staged beside the artifacts it records `characterEncoding: "US-ASCII"`, which `install` never checks, and names each localized resource separately so a consumer is warned about the one file that does not match instead of being refused the package.
 
 ### Length semantics
 

@@ -111,3 +111,55 @@ func TestEncodingFieldsRoundTrip(t *testing.T) {
 		t.Errorf("round trip lost data: %+v", out)
 	}
 }
+
+// Only a charset fglpkg KNOWS to be single-byte may reject "char". Treating
+// every unknown charset as single-byte rejected satisfiable declarations:
+// Genero's own charmap.alias names GBK, GB18030, GB2312, EUC-KR and EUC-TW,
+// and fglrun -i under zh_CN.GBK reports Multibyte: yes.
+func TestValidateCharLengthSemanticsAgainstMultibyteCharsets(t *testing.T) {
+	for _, enc := range []string{"GBK", "GB18030", "GB2312", "EUC-KR", "EUC-TW", "Big5-HKSCS", "UTF-8", "Shift_JIS"} {
+		t.Run(enc, func(t *testing.T) {
+			m := New("a", "1.0.0", "", "")
+			m.CharacterEncoding = enc
+			m.LengthSemantics = "char"
+			if err := m.Validate(); err != nil {
+				t.Errorf("%q is multibyte, so \"char\" is satisfiable: %v", enc, err)
+			}
+		})
+	}
+	// An unknown charset is not evidence either way, so it must be accepted
+	// rather than rejected on a guess.
+	m := New("a", "1.0.0", "", "")
+	m.CharacterEncoding = "X-SOMETHING-NEW"
+	m.LengthSemantics = "char"
+	if err := m.Validate(); err != nil {
+		t.Errorf("an unknown charset must not be assumed single-byte: %v", err)
+	}
+	// ...but a charset known to be single-byte still cannot hold "char".
+	for _, enc := range []string{"ISO-8859-15", "US-ASCII", "windows-1252", "KOI8-R"} {
+		t.Run(enc, func(t *testing.T) {
+			m := New("a", "1.0.0", "", "")
+			m.CharacterEncoding = enc
+			m.LengthSemantics = "char"
+			if err := m.Validate(); err == nil {
+				t.Errorf("%q is single-byte, so the runtime downgrades CHAR to BYTE; this must be rejected", enc)
+			}
+		})
+	}
+}
+
+func TestValidateStringResourceEncodings(t *testing.T) {
+	m := New("a", "1.0.0", "", "")
+	m.StringResourceEncodings = map[string]string{"Msg.42s": "UTF-8"}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("a well-formed entry must validate: %v", err)
+	}
+	m.StringResourceEncodings = map[string]string{"Msg.42s": "  "}
+	if err := m.Validate(); err == nil {
+		t.Error("an entry naming no character set is meaningless and must be rejected")
+	}
+	m.StringResourceEncodings = map[string]string{"": "UTF-8"}
+	if err := m.Validate(); err == nil {
+		t.Error("an entry with no file path is meaningless and must be rejected")
+	}
+}

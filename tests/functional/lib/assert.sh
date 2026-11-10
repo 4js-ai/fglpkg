@@ -50,6 +50,7 @@ assert_file()     { [[ -f "$1" ]] || { _diag "file not found: $1"; return 1; }; 
 assert_dir()      { [[ -d "$1" ]] || { _diag "dir not found: $1"; return 1; }; }
 assert_no_file()  { [[ ! -e "$1" ]] || { _diag "expected absent: $1"; return 1; }; }
 assert_file_contains() { assert_file "$1" || return 1; grep -q -- "$2" "$1" || { _diag "file $1 missing: $2"; return 1; }; }
+assert_file_not_contains() { assert_file "$1" || return 1; grep -q -- "$2" "$1" && { _diag "file $1 unexpectedly contains: $2"; return 1; }; return 0; }
 
 # --- JSON (python3) ---
 assert_json() {  # valid JSON file

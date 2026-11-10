@@ -164,7 +164,12 @@ func TestEqual(t *testing.T) {
 	}
 }
 
-func TestIsSingleByte(t *testing.T) {
+// Three states, not two. An earlier IsSingleByte answered true for every
+// charset it did not recognise, "conservatively" — which rejected satisfiable
+// declarations: "GBK" with lengthSemantics "char" failed the pack, though
+// fglrun -i under zh_CN.GBK reports Multibyte: yes (verified against the real
+// runtime). The tables are the two halves of $FGLDIR/etc/charmap.alias.
+func TestIsKnownSingleByte(t *testing.T) {
 	cases := []struct {
 		in   string
 		want bool
@@ -174,19 +179,58 @@ func TestIsSingleByte(t *testing.T) {
 		{"ISO-8859-1", true},
 		{"ISO-8859-15", true},
 		{"KOI8-R", true},
+		{"TIS-620", true},
+		{"windows-1252", true},
+		{"HP-ROMAN8", true},
+		{"cp850", true},
+		// Known multibyte: never single-byte.
 		{"UTF-8", false},
 		{"Big5", false},
+		{"Big5-HKSCS", false},
 		{"SHIFT_JIS", false},
 		{"EUC-JP", false},
-		// Unknown charsets are treated as single-byte: the conservative answer
-		// for Validate, which then rejects a "char" declaration fglpkg cannot
-		// vouch for rather than letting through one the runtime would downgrade.
-		{"X-SOMETHING", true},
+		{"EUC-KR", false},
+		{"EUC-TW", false},
+		{"GBK", false},
+		{"GB18030", false},
+		{"GB2312", false},
+		{"CP932", false},
+		{"JOHAB", false},
+		// Unknown: not evidence of anything, so not "single-byte".
+		{"X-SOMETHING", false},
 		{"", false},
 	}
 	for _, tc := range cases {
-		if got := IsSingleByte(tc.in); got != tc.want {
-			t.Errorf("IsSingleByte(%q) = %v, want %v", tc.in, got, tc.want)
+		if got := IsKnownSingleByte(tc.in); got != tc.want {
+			t.Errorf("IsKnownSingleByte(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// The two tables must not overlap, and must not both answer for an unknown
+// charset — that third state is what the design depends on.
+func TestSingleByteAndMultibyteAreDisjoint(t *testing.T) {
+	for name := range singleByteNames {
+		if multibyteNames[name] {
+			t.Errorf("%q is listed as both single-byte and multibyte", name)
+		}
+	}
+	for _, unknown := range []string{"X-SOMETHING", "ISO-8859-42", ""} {
+		if IsKnownSingleByte(unknown) || IsKnownMultibyte(unknown) {
+			t.Errorf("%q is unknown and must answer false to both predicates", unknown)
+		}
+	}
+}
+
+func TestIsKnownMultibyte(t *testing.T) {
+	for _, in := range []string{"UTF-8", "GBK", "EUC-KR", "Shift_JIS", "Big5"} {
+		if !IsKnownMultibyte(in) {
+			t.Errorf("IsKnownMultibyte(%q) = false, want true", in)
+		}
+	}
+	for _, in := range []string{"ISO-8859-15", "US-ASCII", "X-SOMETHING", ""} {
+		if IsKnownMultibyte(in) {
+			t.Errorf("IsKnownMultibyte(%q) = true, want false", in)
 		}
 	}
 }

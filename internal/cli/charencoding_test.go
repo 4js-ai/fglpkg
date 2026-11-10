@@ -10,211 +10,311 @@ import (
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 )
 
-// stageFiles writes each archivePath->content pair to a temp dir and returns
-// the staged map pack would have built (archive path -> source path on disk).
-func stageFiles(t *testing.T, files map[string]string) map[string]string {
+// These tests run on REAL compiled artifacts (internal/cli/testdata/encoding),
+// not on source text written into files named .42m. That distinction is the
+// whole point: fake fixtures never contain the structure bytes >= 0x80 that a
+// real .42m carries, so a suite built on them agreed with a byte scan that
+// disagrees with 78 of 99 real modules.
+
+// stageFixtures copies named fixtures into a temp dir and returns the staged
+// map pack would have built (archive path -> path on disk). Each artifact is
+// copied with its own basename, and with the SOURCE it was built from when one
+// exists, because the source beside an artifact is what proves its text ASCII.
+func stageFixtures(t *testing.T, names ...string) map[string]string {
 	t.Helper()
 	dir := t.TempDir()
-	staged := make(map[string]string, len(files))
-	for archivePath, content := range files {
-		src := filepath.Join(dir, strings.ReplaceAll(archivePath, "/", "_"))
-		if err := os.WriteFile(src, []byte(content), 0o644); err != nil {
-			t.Fatalf("write %s: %v", archivePath, err)
+	staged := map[string]string{}
+	for _, name := range names {
+		for _, f := range fixtureAndSource(name) {
+			data, err := os.ReadFile(filepath.Join("testdata", "encoding", f))
+			if err != nil {
+				t.Fatalf("read fixture %s: %v", f, err)
+			}
+			dst := filepath.Join(dir, f)
+			if err := os.WriteFile(dst, data, 0o644); err != nil {
+				t.Fatalf("write %s: %v", dst, err)
+			}
+			if f == name {
+				staged[f] = dst
+			}
 		}
-		staged[archivePath] = src
 	}
 	return staged
 }
 
-const (
-	utf8Literal = "caf\xc3\xa9 na\xc3\xafve \xe2\x82\xac" // 7 high bytes, all decode
-	latin9Lit   = "caf\xe9 na\xefve \xa4"                 // 3 high bytes, none decode
-)
-
-func TestRecordCharacterEncoding_DerivesASCII(t *testing.T) {
-	staged := stageFiles(t, map[string]string{
-		"lib/Util.42m": "DISPLAY \"hello\"",
-		"forms/F.42f":  `<?xml version='1.0' encoding='ASCII'?><Form/>`,
-	})
-	m := &manifest.Manifest{}
-	if err := recordCharacterEncoding(m, staged); err != nil {
-		t.Fatalf("recordCharacterEncoding: %v", err)
+// stageArtifactOnly copies an artifact WITHOUT the source beside it — a pack
+// run against a dist directory rather than a build tree.
+func stageArtifactOnly(t *testing.T, name string) map[string]string {
+	t.Helper()
+	dir := t.TempDir()
+	data, err := os.ReadFile(filepath.Join("testdata", "encoding", name))
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", name, err)
 	}
+	dst := filepath.Join(dir, name)
+	if err := os.WriteFile(dst, data, 0o644); err != nil {
+		t.Fatalf("write %s: %v", dst, err)
+	}
+	return map[string]string{name: dst}
+}
+
+func fixtureAndSource(name string) []string {
+	switch filepath.Ext(name) {
+	case ".42m":
+		return []string{name, strings.TrimSuffix(name, ".42m") + ".4gl"}
+	case ".42f":
+		return []string{name, strings.TrimSuffix(name, ".42f") + ".per"}
+	}
+	return []string{name}
+}
+
+func recordOrFail(t *testing.T, m *manifest.Manifest, staged map[string]string) {
+	t.Helper()
+	if err := recordEncoding(m, staged); err != nil {
+		t.Fatalf("recordEncoding: %v", err)
+	}
+}
+
+// The case the old byte scan got wrong. AsciiBig.42m is compiled from a
+// pure-ASCII source and still contains a byte >= 0x80 (an opcode operand), so
+// a scan of the artifact calls it "some 8-bit charset". The source beside it
+// settles it.
+func TestRecordEncoding_PureASCIISourceProvesASCIIDespiteHighBytesInPcode(t *testing.T) {
+	staged := stageFixtures(t, "AsciiBig.42m")
+	m := &manifest.Manifest{}
+	recordOrFail(t, m, staged)
+	if m.CharacterEncoding != charmap.ASCII {
+		t.Errorf("CharacterEncoding = %q, want %q (the source is pure ASCII)", m.CharacterEncoding, charmap.ASCII)
+	}
+}
+
+// The minority whose p-code happens to be clean: no source needed.
+func TestRecordEncoding_CleanPcodeProvesASCIIWithoutASource(t *testing.T) {
+	staged := stageArtifactOnly(t, "AsciiTiny.42m")
+	m := &manifest.Manifest{}
+	recordOrFail(t, m, staged)
 	if m.CharacterEncoding != charmap.ASCII {
 		t.Errorf("CharacterEncoding = %q, want %q", m.CharacterEncoding, charmap.ASCII)
 	}
 }
 
-func TestRecordCharacterEncoding_DerivesUTF8FromBytes(t *testing.T) {
-	staged := stageFiles(t, map[string]string{
-		"lib/Util.42m": "DISPLAY \"" + utf8Literal + "\"",
-	})
-	m := &manifest.Manifest{}
-	if err := recordCharacterEncoding(m, staged); err != nil {
-		t.Fatalf("recordCharacterEncoding: %v", err)
+// Without a source, a .42m's high bytes prove nothing — they may be structure
+// or a literal. Recording a value here is what stamped packages with the
+// packer's shell charset, so the field stays absent and install does not check.
+func TestRecordEncoding_HighBytesWithoutASourceProveNothing(t *testing.T) {
+	for _, name := range []string{"AsciiBig.42m", "Utf8Lit.42m"} {
+		t.Run(name, func(t *testing.T) {
+			staged := stageArtifactOnly(t, name)
+			m := &manifest.Manifest{}
+			recordOrFail(t, m, staged)
+			if m.CharacterEncoding != "" {
+				t.Errorf("CharacterEncoding = %q, want it absent: a .42m's high bytes are not evidence",
+					m.CharacterEncoding)
+			}
+		})
 	}
+}
+
+// A non-ASCII source proves nothing either: the high bytes may be in a comment,
+// which never reaches the p-code. So this is "no value", not UTF-8 and not an
+// error — the author declares it if the package really carries non-ASCII text.
+func TestRecordEncoding_NonASCIISourceIsNotProof(t *testing.T) {
+	staged := stageFixtures(t, "Utf8Lit.42m")
+	m := &manifest.Manifest{}
+	recordOrFail(t, m, staged)
+	if m.CharacterEncoding != "" {
+		t.Errorf("CharacterEncoding = %q, want it absent", m.CharacterEncoding)
+	}
+}
+
+// A pure-ASCII .per built under a UTF-8 shell writes a UTF-8 prolog. The
+// prolog names the BUILD LOCALE, so reading it as the content's encoding
+// labelled an ASCII-only package UTF-8 and refused it on ISO-8859-15
+// consumers. The form carries no high byte, so it is ASCII.
+func TestRecordEncoding_FormPrologIsIgnoredWhenTheFormIsPureASCII(t *testing.T) {
+	staged := stageFixtures(t, "AsciiForm.42f")
+	m := &manifest.Manifest{}
+	recordOrFail(t, m, staged)
+	if m.CharacterEncoding != charmap.ASCII {
+		t.Errorf("CharacterEncoding = %q, want %q: the prolog names the build locale, not the content",
+			m.CharacterEncoding, charmap.ASCII)
+	}
+}
+
+// ...but a form that really carries non-ASCII text IS described by its prolog,
+// which is the one positive proof of a non-ASCII code encoding available.
+func TestRecordEncoding_FormPrologNamesRealNonASCIIText(t *testing.T) {
+	staged := stageFixtures(t, "Utf8Form.42f")
+	m := &manifest.Manifest{}
+	recordOrFail(t, m, staged)
 	if m.CharacterEncoding != charmap.UTF8 {
 		t.Errorf("CharacterEncoding = %q, want %q", m.CharacterEncoding, charmap.UTF8)
 	}
 }
 
-// A form's prolog is authoritative: it names the encoding outright, so it
-// decides even when every other artifact is pure ASCII and the byte scan alone
-// would have concluded US-ASCII.
-func TestRecordCharacterEncoding_PrologWinsOverASCIIBytes(t *testing.T) {
-	staged := stageFiles(t, map[string]string{
-		"lib/Util.42m": "DISPLAY \"plain\"",
-		"forms/F.42f":  `<?xml version='1.0' encoding='ISO-8859-15'?><Form/>`,
-	})
+// The practice the guide recommends: pure-ASCII code, localized text in .str.
+// The package must come out portable (US-ASCII code) with the resource named
+// separately — not stamped non-portable and refused on the single-byte
+// consumers the practice exists to serve.
+func TestRecordEncoding_ASCIICodePlusLocalizedResourcesStaysPortable(t *testing.T) {
+	staged := stageFixtures(t, "AsciiBig.42m", "AsciiForm.42f", "Utf8Msg.42s")
 	m := &manifest.Manifest{}
-	if err := recordCharacterEncoding(m, staged); err != nil {
-		t.Fatalf("recordCharacterEncoding: %v", err)
+	recordOrFail(t, m, staged)
+	if m.CharacterEncoding != charmap.ASCII {
+		t.Fatalf("CharacterEncoding = %q, want %q: the CODE is pure ASCII", m.CharacterEncoding, charmap.ASCII)
 	}
-	if m.CharacterEncoding != "ISO-8859-15" {
-		t.Errorf("CharacterEncoding = %q, want ISO-8859-15", m.CharacterEncoding)
+	if got := m.StringResourceEncodings["Utf8Msg.42s"]; got != charmap.UTF8 {
+		t.Errorf("StringResourceEncodings[Utf8Msg.42s] = %q, want %q", got, charmap.UTF8)
 	}
 }
 
-func TestRecordCharacterEncoding_DisagreeingPrologsFail(t *testing.T) {
-	staged := stageFiles(t, map[string]string{
-		"forms/A.42f": `<?xml version='1.0' encoding='UTF-8'?><Form/>`,
-		"forms/B.42f": `<?xml version='1.0' encoding='ISO-8859-15'?><Form/>`,
-	})
-	m := &manifest.Manifest{}
-	err := recordCharacterEncoding(m, staged)
-	if err == nil {
-		t.Fatal("two forms declaring different encodings must fail the pack, got nil")
+// A resource set in several charsets cannot be one package-wide value, so each
+// file carries its own. An ASCII resource constrains nothing and is omitted.
+func TestRecordEncoding_ResourcesAreRecordedPerFile(t *testing.T) {
+	staged := stageFixtures(t, "Utf8Msg.42s", "AsciiMsg.42s")
+	m := &manifest.Manifest{
+		StringResourceEncodings: map[string]string{"Latin9Msg.42s": "ISO-8859-15"},
 	}
-	for _, want := range []string{"UTF-8", "ISO-8859-15", "forms/A.42f", "forms/B.42f"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not name %q", err, want)
+	staged["Latin9Msg.42s"] = stageArtifactOnly(t, "Latin9Msg.42s")["Latin9Msg.42s"]
+	recordOrFail(t, m, staged)
+	want := map[string]string{
+		"Utf8Msg.42s":   charmap.UTF8,
+		"Latin9Msg.42s": "ISO-8859-15", // only a declaration can name an 8-bit charset
+	}
+	for k, v := range want {
+		if m.StringResourceEncodings[k] != v {
+			t.Errorf("StringResourceEncodings[%s] = %q, want %q", k, m.StringResourceEncodings[k], v)
 		}
 	}
+	if _, ok := m.StringResourceEncodings["AsciiMsg.42s"]; ok {
+		t.Errorf("an ASCII resource constrains nothing and must not be recorded")
+	}
 }
 
-// A wrong US-ASCII claim is the most damaging one to let through: US-ASCII is
-// the tier install skips its check for, so the package would ship mojibake to
-// every consumer without a word.
-func TestRecordCharacterEncoding_FalseASCIIClaimFails(t *testing.T) {
-	staged := stageFiles(t, map[string]string{
-		"lib/Util.42m": "DISPLAY \"" + utf8Literal + "\"",
-	})
-	m := &manifest.Manifest{CharacterEncoding: "US-ASCII"}
-	err := recordCharacterEncoding(m, staged)
+// Bytes beat a declaration where they prove it wrong.
+func TestRecordEncoding_ResourceDeclarationContradictingBytesFails(t *testing.T) {
+	staged := stageFixtures(t, "Utf8Msg.42s")
+	m := &manifest.Manifest{
+		StringResourceEncodings: map[string]string{"Utf8Msg.42s": "ISO-8859-15"},
+	}
+	err := recordEncoding(m, staged)
 	if err == nil {
-		t.Fatal("declaring US-ASCII with high bytes present must fail, got nil")
+		t.Fatal("a declaration contradicted by the file's bytes must fail the pack")
 	}
-	if !strings.Contains(err.Error(), "lib/Util.42m") {
-		t.Errorf("error %q does not name the offending file", err)
+	if !strings.Contains(err.Error(), "Utf8Msg.42s") {
+		t.Errorf("the error must name the file, got: %v", err)
 	}
 }
 
-func TestRecordCharacterEncoding_DeclarationContradictingPrologFails(t *testing.T) {
-	staged := stageFiles(t, map[string]string{
-		"forms/F.42f": `<?xml version='1.0' encoding='UTF-8'?><Form/>`,
-	})
+// The cross-check that stayed: a form carrying non-ASCII text names its
+// encoding, so a declaration that disagrees is provably wrong.
+func TestRecordEncoding_DeclarationContradictingARealPrologFails(t *testing.T) {
+	staged := stageFixtures(t, "Utf8Form.42f")
 	m := &manifest.Manifest{CharacterEncoding: "ISO-8859-15"}
-	err := recordCharacterEncoding(m, staged)
+	err := recordEncoding(m, staged)
 	if err == nil {
-		t.Fatal("a declaration contradicting a form prolog must fail, got nil")
+		t.Fatal("a declaration contradicting a non-ASCII form's prolog must fail")
 	}
-	if !strings.Contains(err.Error(), "forms/F.42f") {
-		t.Errorf("error %q does not name the form", err)
-	}
-}
-
-// The one thing an author can tell us that the bytes cannot: which 8-bit
-// charset it is. ISO-8859-1 and -15 are indistinguishable from bytes, so a
-// declaration that merely narrows an undecidable result must be accepted in
-// silence, not second-guessed.
-func TestRecordCharacterEncoding_DeclarationNarrowsUndecidable(t *testing.T) {
-	staged := stageFiles(t, map[string]string{
-		"lib/Util.42m": "DISPLAY \"" + latin9Lit + "\"",
-	})
-	m := &manifest.Manifest{CharacterEncoding: "iso-8859-15"}
-	if err := recordCharacterEncoding(m, staged); err != nil {
-		t.Fatalf("narrowing an undecidable result must be accepted, got: %v", err)
-	}
-	if m.CharacterEncoding != "ISO-8859-15" {
-		t.Errorf("CharacterEncoding = %q, want the canonical ISO-8859-15", m.CharacterEncoding)
+	if !strings.Contains(err.Error(), "Utf8Form.42f") {
+		t.Errorf("the error must name the form, got: %v", err)
 	}
 }
 
-// A pure-webcomponent package ships no compiled BDL artifacts. Labelling it
-// US-ASCII on the strength of a vacuous "every artifact was ASCII" would state
-// something about compiled output that does not exist.
-func TestRecordCharacterEncoding_NoArtifactsLeavesFieldAbsent(t *testing.T) {
-	staged := stageFiles(t, map[string]string{
-		"MyWidget/index.html": "<html></html>",
-		"README.md":           "# docs",
-	})
+// The cross-checks that had to GO, because they rejected correct packages.
+func TestRecordEncoding_DeclarationsThatUsedToFailWrongly(t *testing.T) {
+	cases := []struct {
+		name     string
+		fixtures []string
+		declared string
+	}{
+		// 78 of 99 real pure-ASCII modules contain a high byte, so "a high
+		// byte disproves US-ASCII" rejected the correct declaration.
+		{"US-ASCII against real p-code", []string{"AsciiBig.42m"}, charmap.ASCII},
+		// A pure-ASCII form built under a UTF-8 shell has a UTF-8 prolog, so
+		// "the prolog is authoritative" rejected the correct declaration.
+		{"US-ASCII against a UTF-8 prolog on an ASCII form", []string{"AsciiForm.42f"}, charmap.ASCII},
+		// The practice: ASCII code, localized resources. The resource must not
+		// disprove a US-ASCII claim about the CODE.
+		{"US-ASCII code beside a UTF-8 resource", []string{"AsciiBig.42m", "Utf8Msg.42s"}, charmap.ASCII},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			staged := stageFixtures(t, tc.fixtures...)
+			m := &manifest.Manifest{CharacterEncoding: tc.declared}
+			if err := recordEncoding(m, staged); err != nil {
+				t.Fatalf("this declaration is correct and must be accepted, got: %v", err)
+			}
+			if m.CharacterEncoding != tc.declared {
+				t.Errorf("CharacterEncoding = %q, want %q", m.CharacterEncoding, tc.declared)
+			}
+		})
+	}
+}
+
+// pack must never consult the build environment. Whatever FGLPKG_CHARMAP says,
+// an unprovable package records nothing — that fallback is what made the same
+// bytes install everywhere when packed under LANG=C and be refused when packed
+// under en_US.UTF-8.
+func TestRecordEncoding_NeverFallsBackToTheBuildEnvironment(t *testing.T) {
+	t.Setenv("FGLPKG_CHARMAP", "ISO-8859-15")
+	staged := stageArtifactOnly(t, "AsciiBig.42m")
 	m := &manifest.Manifest{}
-	if err := recordCharacterEncoding(m, staged); err != nil {
-		t.Fatalf("recordCharacterEncoding: %v", err)
-	}
+	recordOrFail(t, m, staged)
 	if m.CharacterEncoding != "" {
-		t.Errorf("CharacterEncoding = %q, want empty for a package with no BDL artifacts", m.CharacterEncoding)
+		t.Errorf("CharacterEncoding = %q, want it absent: the packer's shell is not evidence",
+			m.CharacterEncoding)
 	}
 }
 
-// Undecidable bytes with no declaration: the build environment is consulted,
-// but only to fill the gap the bytes left — and it says so.
-func TestRecordCharacterEncoding_UndecidableFallsBackToEnvironment(t *testing.T) {
-	t.Setenv("FGLPKG_CHARMAP", "ISO-8859-1")
-	t.Setenv("FGLPKG_LENGTH_SEMANTICS", "BYTE")
-	staged := stageFiles(t, map[string]string{
-		"lib/Util.42m": "DISPLAY \"" + latin9Lit + "\"",
-	})
+// A package with no compiled BDL artifact (a pure-webcomponent package) must
+// not be labelled US-ASCII on a vacuous "every code artifact was ASCII".
+func TestRecordEncoding_NoCodeArtifactsLeavesFieldAbsent(t *testing.T) {
+	staged := stageFixtures(t, "AsciiMsg.42s")
 	m := &manifest.Manifest{}
-	if err := recordCharacterEncoding(m, staged); err != nil {
-		t.Fatalf("recordCharacterEncoding: %v", err)
-	}
-	if m.CharacterEncoding != "ISO-8859-1" {
-		t.Errorf("CharacterEncoding = %q, want the environment's ISO-8859-1", m.CharacterEncoding)
+	recordOrFail(t, m, staged)
+	if m.CharacterEncoding != "" {
+		t.Errorf("CharacterEncoding = %q, want it absent", m.CharacterEncoding)
 	}
 }
 
-// Sources are not scanned. A .4gl may carry UTF-8 comments and still compile
-// to pure-ASCII p-code; what a consumer runs is the compiled output.
-func TestRecordCharacterEncoding_IgnoresSources(t *testing.T) {
-	staged := stageFiles(t, map[string]string{
-		"lib/Util.42m": "DISPLAY \"plain\"",
-		"lib/Util.4gl": "# comment with " + utf8Literal,
-	})
-	m := &manifest.Manifest{}
-	if err := recordCharacterEncoding(m, staged); err != nil {
-		t.Fatalf("recordCharacterEncoding: %v", err)
+// Two forms that each carry non-ASCII text in different charsets cannot both
+// be right, so the pack fails rather than picking one.
+func TestRecordEncoding_DisagreeingFormsFail(t *testing.T) {
+	staged := stageFixtures(t, "Utf8Form.42f")
+	dir := t.TempDir()
+	// A second form carrying a non-UTF-8 high byte and an ISO-8859-15 prolog.
+	latin := []byte("<?xml version='1.0' encoding='ISO-8859-15'?><Form><t>caf\xe9</t></Form>")
+	p := filepath.Join(dir, "Latin9Form.42f")
+	if err := os.WriteFile(p, latin, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
 	}
-	if m.CharacterEncoding != charmap.ASCII {
-		t.Errorf("CharacterEncoding = %q, want %q — sources must not be scanned",
-			m.CharacterEncoding, charmap.ASCII)
+	staged["Latin9Form.42f"] = p
+	if err := recordEncoding(&manifest.Manifest{}, staged); err == nil {
+		t.Fatal("two forms naming different charsets for real non-ASCII text must fail the pack")
 	}
 }
 
-// The file named in an error must be stable: map iteration order would
-// otherwise make two identical packs blame different files.
-func TestRecordCharacterEncoding_ErrorNamesAStableFile(t *testing.T) {
-	files := map[string]string{
-		"a/One.42m":   "DISPLAY \"" + utf8Literal + "\"",
-		"b/Two.42m":   "DISPLAY \"" + utf8Literal + "\"",
-		"c/Three.42m": "DISPLAY \"" + utf8Literal + "\"",
-	}
+// The file named in a message must be stable across runs, or an identical pack
+// reports a different file each time and a failure cannot be reproduced.
+func TestScanEncoding_NamesAStableFile(t *testing.T) {
+	staged := stageArtifactOnly(t, "AsciiBig.42m")
+	second := stageArtifactOnly(t, "Utf8Lit.42m")
+	staged["Utf8Lit.42m"] = second["Utf8Lit.42m"]
 	var first string
-	for i := 0; i < 8; i++ {
-		m := &manifest.Manifest{CharacterEncoding: "US-ASCII"}
-		err := recordCharacterEncoding(m, stageFiles(t, files))
-		if err == nil {
-			t.Fatal("expected a false-ASCII failure")
+	for i := 0; i < 20; i++ {
+		ev, err := scanEncoding(staged)
+		if err != nil {
+			t.Fatalf("scanEncoding: %v", err)
 		}
 		if i == 0 {
-			first = err.Error()
+			first = ev.unprovenFile
 			continue
 		}
-		if err.Error() != first {
-			t.Fatalf("error message varies between runs:\n  %s\n  %s", first, err)
+		if ev.unprovenFile != first {
+			t.Fatalf("unprovenFile varies between runs: %q then %q", first, ev.unprovenFile)
 		}
 	}
-	if !strings.Contains(first, "a/One.42m") {
-		t.Errorf("expected the lexically first file to be named, got %q", first)
+	if first == "" {
+		t.Fatal("expected an unproven file to be recorded")
 	}
 }

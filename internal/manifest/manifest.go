@@ -69,6 +69,18 @@ type Manifest struct {
 	// routine), not of its bytes, so it is author-declared only. Absent means
 	// no constraint.
 	LengthSemantics string `json:"lengthSemantics,omitempty"`
+	// StringResourceEncodings names the character set of each compiled string
+	// resource (.42s) that carries non-ASCII text, keyed by the file's path
+	// inside the archive. `pack` derives it: a .42s is a clean container whose
+	// bytes are reliable evidence, unlike a .42m.
+	//
+	// It is PER FILE and advisory. A package may ship one resource file per
+	// language and charset for the consumer to select at runtime, so no single
+	// package-wide value could describe the set, and a file whose charset does
+	// not match the consumer is a warning rather than a refusal — the consumer
+	// may be about to select a different one. An author may declare an entry
+	// for a file whose 8-bit charset bytes alone cannot name.
+	StringResourceEncodings map[string]string `json:"stringResourceEncodings,omitempty"`
 	// GeneroConstraint declares which Genero BDL runtime versions this package
 	// is compatible with, using standard semver constraint syntax.
 	// Examples: "^4.0.0", ">=3.20.0 <5.0.0", "^3.20.0 || ^4.0.0"
@@ -1253,14 +1265,26 @@ func (m *Manifest) validateEncoding() error {
 			m.LengthSemantics, LengthSemanticsChar, LengthSemanticsByte,
 		)
 	}
+	// Only a charset fglpkg KNOWS to be single-byte may reject "char". An
+	// unknown charset is not evidence of anything: treating unknown as
+	// single-byte rejected satisfiable declarations such as "GBK" with
+	// "char", though fglrun -i under zh_CN.GBK reports Multibyte: yes.
 	if strings.EqualFold(strings.TrimSpace(m.LengthSemantics), LengthSemanticsChar) &&
-		m.CharacterEncoding != "" && charmap.IsSingleByte(m.CharacterEncoding) {
+		m.CharacterEncoding != "" && charmap.IsKnownSingleByte(m.CharacterEncoding) {
 		return fmt.Errorf(
 			"lengthSemantics %q cannot hold with the single-byte characterEncoding %q: "+
 				"the Genero runtime reports CHAR as BYTE under a single-byte charmap, "+
 				"so no consumer environment could satisfy this combination",
 			m.LengthSemantics, m.CharacterEncoding,
 		)
+	}
+	for path, enc := range m.StringResourceEncodings {
+		if strings.TrimSpace(path) == "" {
+			return fmt.Errorf("stringResourceEncodings has an entry with an empty file path")
+		}
+		if strings.TrimSpace(enc) == "" {
+			return fmt.Errorf("stringResourceEncodings[%q] is empty (name a character set, or omit the entry)", path)
+		}
 	}
 	return nil
 }

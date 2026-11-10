@@ -3127,10 +3127,11 @@ func stagePackage(stageDir string, m *manifest.Manifest) (empty bool, err error)
 	if err := recordGeneroPackages(pub, staged, m.Programs); err != nil {
 		return false, err
 	}
-	// Derive the character encoding from the artifacts about to ship, so the
-	// shipped manifest states it as a fact rather than as the author's claim
-	// (GIS-285). Runs here, after every stager, so it sees the final tree.
-	if err := recordCharacterEncoding(pub, staged); err != nil {
+	// Record what the artifacts about to ship PROVE about their encoding, so
+	// the shipped manifest states a fact rather than the author's claim or the
+	// packer's shell (GIS-285). Anything unproven is left absent. Runs here,
+	// after every stager, so it sees the final tree.
+	if err := recordEncoding(pub, staged); err != nil {
 		return false, err
 	}
 	mfData, err := json.MarshalIndent(pub, "", "  ")

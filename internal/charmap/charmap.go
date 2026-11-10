@@ -6,13 +6,24 @@
 // UTF-8 produces mojibake — or silently wrong string lengths — when consumed
 // under ISO-8859-15. See specs/character-encoding.md (GIS-285).
 //
-// The central finding the design rests on is that the encoding is largely
-// recoverable from the artifacts themselves, so `pack` can establish it as a
-// fact instead of trusting the author or the shell they published from:
+// What a byte scan can prove differs sharply by artifact, which the callers
+// must respect (measured against Genero BDL 6.00.01):
 //
-//   - .42f carries an XML prolog naming the encoding outright (authoritative).
-//   - .42m/.42s are binary containers through which fglcomp passes literal
-//     bytes verbatim, so they classify by a byte scan into three tiers.
+//   - .42s is a clean container: a resource file built from an ASCII .str has
+//     no byte >= 0x80, a UTF-8 one decodes as UTF-8, and an 8-bit one does
+//     not. Its bytes are reliable evidence, and are identical whatever locale
+//     fglmkstr ran under.
+//   - .42m carries literal bytes verbatim, but its own STRUCTURE also contains
+//     bytes >= 0x80 — opcode operands and the embedded source-path length. Of
+//     99 real modules compiled from pure-ASCII sources, only 21 had no high
+//     byte. So "no high byte" proves the text is ASCII, and a high byte proves
+//     NOTHING. The file is byte-identical across build locales, so it records
+//     no charset of its own.
+//   - .42f carries an XML prolog, but the prolog names the BUILD LOCALE, not
+//     what the form contains: a pure-ASCII .per compiles to a prolog of
+//     ASCII, UTF-8 or ISO-8859-15 depending on the shell. The prolog is
+//     authoritative only about bytes that are actually there, so it is read
+//     only when the form carries a byte >= 0x80.
 package charmap
 
 import (
@@ -72,21 +83,60 @@ var canonicalNames = map[string]string{
 	"iso-8859-1":  "ISO-8859-1",
 	"iso-8859-15": "ISO-8859-15",
 	"big5":        "Big5",
+	"big5-hkscs":  "Big5-HKSCS",
 	"shift_jis":   "Shift_JIS",
 	"sjis":        "Shift_JIS",
 	"euc-jp":      "EUC-JP",
+	"euc-kr":      "EUC-KR",
+	"euc-tw":      "EUC-TW",
 	"koi8-r":      "KOI8-R",
 }
 
-// multibyte lists the canonical names of the charsets Genero reports as
-// multibyte. It backs IsSingleByte, which Validate uses to reject
+// singleByteNames lists every charset that encodes each character in exactly
+// one byte, keyed by lowercased name. It is the complete single-byte half of
+// the charset table Genero itself ships, $FGLDIR/etc/charmap.alias, whose 70
+// canonical names are enumerable; the multibyte half is listed below for
+// documentation, and everything absent from BOTH is simply unknown.
+//
+// Three states matter, not two. Its one caller, Validate, rejects
 // lengthSemantics "char" against a charset where the runtime would silently
-// downgrade it to BYTE.
-var multibyte = map[string]bool{
-	UTF8:        true,
-	"Big5":      true,
-	"Shift_JIS": true,
-	"EUC-JP":    true,
+// downgrade it to BYTE — so it may only reject a charset known to be
+// single-byte. An earlier version treated every UNKNOWN charset as
+// single-byte "conservatively", which rejected satisfiable declarations:
+// "GBK" with "char" failed the pack, though fglrun -i under zh_CN.GBK reports
+// Multibyte: yes (verified).
+var singleByteNames = map[string]bool{
+	"us-ascii": true, "ascii": true,
+	"iso-8859-1": true, "iso-8859-2": true, "iso-8859-3": true,
+	"iso-8859-4": true, "iso-8859-5": true, "iso-8859-6": true,
+	"iso-8859-7": true, "iso-8859-8": true, "iso-8859-9": true,
+	"iso-8859-13": true, "iso-8859-15": true,
+	"koi8-r": true, "tis-620": true,
+	"hp-roman8": true, "hp-arabic8": true, "hp-greek8": true,
+	"hp-hebrew8": true, "hp-turkish8": true, "hp-kana8": true,
+	"cp437": true, "cp737": true, "cp775": true, "cp850": true,
+	"cp852": true, "cp855": true, "cp856": true, "cp857": true,
+	"cp860": true, "cp861": true, "cp862": true, "cp863": true,
+	"cp864": true, "cp865": true, "cp866": true, "cp869": true,
+	"cp874": true, "cp922": true, "cp1046": true, "cp1124": true,
+	"cp1129": true, "cp1251": true, "cp1252": true,
+	"windows-1250": true, "windows-1251": true, "windows-1252": true,
+	"windows-1253": true, "windows-1254": true, "windows-1255": true,
+	"windows-1256": true, "windows-1257": true, "windows-1258": true,
+}
+
+// multibyteNames is the other half of the same table. Nothing consults it to
+// decide anything — an unknown charset and a known multibyte one are both
+// simply "not known to be single-byte" — but it records what the table covers
+// so the two lists can be checked against charmap.alias when Genero adds a
+// charset.
+var multibyteNames = map[string]bool{
+	"utf-8": true, "big5": true, "big5-hkscs": true,
+	"shift_jis": true, "cp932": true, "cp936": true, "cp943": true,
+	"cp949": true, "cp950": true, "johab": true,
+	"euc-jp": true, "euc-kr": true, "euc-tw": true,
+	"gb2312": true, "gbk": true, "gb18030": true,
+	"dec-hanyu": true, "dec-kanji": true,
 }
 
 // Canonical returns the IANA preferred spelling of a charset name, or the
@@ -116,18 +166,29 @@ func Equal(a, b string) bool {
 	return strings.EqualFold(ca, cb)
 }
 
-// IsSingleByte reports whether a charset encodes every character in one byte.
-// An unknown charset is treated as single-byte, which is the conservative
-// answer for the one caller: it makes Validate reject a "char" length
-// semantics declared against a charset fglpkg cannot vouch for as multibyte,
-// rather than letting a declaration through that the runtime would silently
-// downgrade.
-func IsSingleByte(name string) bool {
+// IsKnownSingleByte reports whether fglpkg POSITIVELY knows this charset
+// encodes every character in one byte. An unknown charset answers false,
+// because "we have never heard of it" is not evidence that it is single-byte,
+// and the only caller uses this to reject a declaration.
+func IsKnownSingleByte(name string) bool {
 	c := Canonical(name)
 	if c == "" {
 		return false
 	}
-	return !multibyte[c]
+	return singleByteNames[strings.ToLower(c)]
+}
+
+// IsKnownMultibyte reports whether fglpkg positively knows this charset
+// encodes some character in more than one byte. Unknown answers false too, so
+// IsKnownSingleByte and IsKnownMultibyte are both false for a charset outside
+// the table — that is the third state, and callers must not treat the absence
+// of one as the other.
+func IsKnownMultibyte(name string) bool {
+	c := Canonical(name)
+	if c == "" {
+		return false
+	}
+	return multibyteNames[strings.ToLower(c)]
 }
 
 // prologRe matches the encoding pseudo-attribute of an XML declaration, in

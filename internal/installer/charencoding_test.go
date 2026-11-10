@@ -187,3 +187,104 @@ func TestReadEncodingFromZipNoManifest(t *testing.T) {
 		t.Errorf("a zip with no manifest must report nothing, got %+v", enc)
 	}
 }
+
+// A blank charmap is the same situation as an error reading the environment,
+// and must warn rather than refuse. DetectRuntimeInfo returns no error when
+// fglrun is absent but FGLPKG_LENGTH_SEMANTICS is set, leaving Charmap empty;
+// every declared charset then "mismatched" it, and the refusal read
+// "...but this environment uses " with nothing after it.
+func TestCheckEncodingEmptyCharmapWarnsNotFails(t *testing.T) {
+	t.Setenv("FGLPKG_CHARMAP", "")
+	t.Setenv("FGLPKG_LENGTH_SEMANTICS", "CHAR")
+	t.Setenv("PATH", t.TempDir()) // no fglrun reachable
+	t.Setenv("FGLDIR", "")
+
+	i := New(t.TempDir(), "", "", "")
+	zipPath := zipWithManifest(t, `{"name":"a","version":"1.0.0","characterEncoding":"UTF-8"}`)
+	if err := i.checkEncoding(zipPath, "acme-widget"); err != nil {
+		t.Fatalf("an empty charmap means the environment is unknown, so this must warn: %v", err)
+	}
+}
+
+// The US-ASCII exemption inside the mismatch test, not the fast path above it.
+// With lengthSemantics set, a US-ASCII package gets past the fast path and
+// reaches the charset comparison, where it must still be exempt: ASCII-7 is a
+// subset of every charset Genero supports.
+func TestCheckEncodingASCIIExemptEvenWithLengthSemantics(t *testing.T) {
+	t.Setenv("FGLPKG_CHARMAP", "UTF-8")
+	t.Setenv("FGLPKG_LENGTH_SEMANTICS", "CHAR")
+
+	i := New(t.TempDir(), "", "", "")
+	zipPath := zipWithManifest(t,
+		`{"name":"a","version":"1.0.0","characterEncoding":"US-ASCII","lengthSemantics":"char"}`)
+	if err := i.checkEncoding(zipPath, "acme-widget"); err != nil {
+		t.Fatalf("a US-ASCII package is portable to every charmap, so it must not be refused: %v", err)
+	}
+}
+
+// The refusal also fires during `fglpkg update`, which REJECTS a bare
+// --force-character-encoding. Naming the command makes the advice correct from
+// either entry point.
+func TestCheckEncodingRefusalNamesTheInstallCommand(t *testing.T) {
+	t.Setenv("FGLPKG_CHARMAP", "UTF-8")
+	t.Setenv("FGLPKG_LENGTH_SEMANTICS", "")
+
+	i := New(t.TempDir(), "", "", "")
+	zipPath := zipWithManifest(t, `{"name":"a","version":"1.0.0","characterEncoding":"ISO-8859-15"}`)
+	err := i.checkEncoding(zipPath, "acme-widget")
+	if err == nil {
+		t.Fatal("a real mismatch must refuse")
+	}
+	if !strings.Contains(err.Error(), "fglpkg install --force-character-encoding") {
+		t.Errorf("the refusal must name the command, not just the flag, got:\n%s", err.Error())
+	}
+}
+
+// String resources WARN and never refuse: a package may ship one resource file
+// per language and charset for the consumer to select at runtime, so a file
+// that does not match this environment may simply be one it never loads.
+func TestCheckEncodingResourceMismatchDoesNotRefuse(t *testing.T) {
+	t.Setenv("FGLPKG_CHARMAP", "UTF-8")
+	t.Setenv("FGLPKG_LENGTH_SEMANTICS", "")
+
+	i := New(t.TempDir(), "", "", "")
+	zipPath := zipWithManifest(t, `{"name":"a","version":"1.0.0","characterEncoding":"US-ASCII",`+
+		`"stringResourceEncodings":{"Msg.latin9.42s":"ISO-8859-15","Msg.utf8.42s":"UTF-8"}}`)
+	if err := i.checkEncoding(zipPath, "acme-widget"); err != nil {
+		t.Fatalf("a resource charset mismatch must warn, never refuse: %v", err)
+	}
+}
+
+// ...but the warning has to actually name the offending file, or it tells the
+// consumer nothing they can act on.
+func TestWarnResourceEncodingsNamesTheMismatchedFileOnly(t *testing.T) {
+	out := captureStderr(t, func() {
+		warnResourceEncodings("acme-widget", map[string]string{
+			"Msg.latin9.42s": "ISO-8859-15",
+			"Msg.utf8.42s":   "UTF-8",
+			"Msg.plain.42s":  "US-ASCII",
+		}, "UTF-8")
+	})
+	if !strings.Contains(out, "Msg.latin9.42s") {
+		t.Errorf("the warning must name the mismatched resource, got:\n%s", out)
+	}
+	for _, fine := range []string{"Msg.utf8.42s", "Msg.plain.42s"} {
+		if strings.Contains(out, fine) {
+			t.Errorf("%s matches this environment and must not be named, got:\n%s", fine, out)
+		}
+	}
+}
+
+// Nothing to say means nothing printed, or every install of a localized
+// package becomes noisy.
+func TestWarnResourceEncodingsSilentWhenEverythingMatches(t *testing.T) {
+	out := captureStderr(t, func() {
+		warnResourceEncodings("acme-widget", map[string]string{
+			"Msg.utf8.42s":  "UTF-8",
+			"Msg.plain.42s": "US-ASCII",
+		}, "UTF-8")
+	})
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("expected no warning, got:\n%s", out)
+	}
+}

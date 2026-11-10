@@ -98,13 +98,19 @@ applies to local (.fglpkg/) installs only — a global ~/.fglpkg/ is shared
 across projects — and is skipped under --production, which resolves a
 deliberately narrowed graph.
 
-A package records the character encoding its artifacts were built with
-("characterEncoding" in fglpkg.json, derived by 'fglpkg pack'). Installing one
-built with a charset this environment does not use is refused, because
-fglcomp writes string literals into .42m/.42f in the build locale's encoding —
-consuming them under another charset yields mojibake and wrong string lengths.
-A package built as pure US-ASCII is portable everywhere and never checked, and
-a package that declares nothing is installed without comment.
+A package may record the character encoding its compiled CODE carries
+("characterEncoding" in fglpkg.json). Installing one built with a charset this
+environment does not use is refused, because fglcomp writes string literals
+into .42m/.42f in the build locale's encoding — consuming them under another
+charset yields mojibake and wrong string lengths. A package built as pure
+US-ASCII is portable everywhere and never checked, a package that declares
+nothing is installed without comment, and an environment fglpkg cannot read
+warns rather than refusing.
+
+String resources (.42s) are recorded per file in "stringResourceEncodings" and
+only ever WARN: a package may ship one resource per language and charset for
+you to select at runtime, so one that does not match this environment may
+simply be one you never load.
 
 Installed packages are verified against the registry's Ed25519 signature by
 default (mode "warn": a bad or missing signature warns but does not block).

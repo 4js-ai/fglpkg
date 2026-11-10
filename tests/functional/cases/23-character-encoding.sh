@@ -1,25 +1,26 @@
 suite "character encoding (GIS-285)"
 
-# fglcomp/fglform write string literals into .42m/.42f/.42s in the encoding of
-# the build locale, so a package built under UTF-8 yields mojibake — or
-# silently wrong string lengths — when consumed under ISO-8859-15.
+# A package built under one charset yields mojibake — or silently wrong string
+# lengths — when consumed under another, so `pack` records what the artifacts
+# PROVE and `install` acts on it.
 #
-# `pack` DERIVES the encoding from the staged artifacts rather than asking, and
-# `install` refuses a verified mismatch. Every fixture below is written as raw
-# bytes rather than compiled, so these cases need no Genero toolchain: that is
-# the whole point of pinning FGLPKG_CHARMAP too, without which detection would
-# depend on the machine's locale and the suite would not be reproducible.
+# The fixtures are REAL compiled output (tests/functional/fixtures/encoding),
+# committed as bytes so the suite still needs no Genero toolchain. Source text
+# written into a file named .42m would not do: it never contains the structure
+# bytes >= 0x80 that real p-code carries, which is exactly the case an earlier
+# design got wrong.
+#
+# FGLPKG_CHARMAP is pinned throughout so detection cannot depend on the
+# machine's locale. pack must IGNORE it; install must use it.
 
-# The literal DISPLAY "café naïve €" as each locale compiles it. 7 high bytes
-# under UTF-8 (all decoding), 3 under ISO-8859-15 (none decoding).
-_ascii_bytes()  { printf 'DISPLAY "plain ascii"'; }
-_utf8_bytes()   { printf 'DISPLAY "caf\303\251 na\303\257ve \342\202\254"'; }
-_latin9_bytes() { printf 'DISPLAY "caf\351 na\357ve \244"'; }
+_enc_fixture() {  # _enc_fixture <name>... — copy fixtures into the project
+  local f
+  for f in "$@"; do cp "$_FIXTURES/encoding/$f" . || return 1; done
+}
 
-# _mkpkg_enc <42m-writer-fn> [extra-manifest-json]
-# A minimal packable project whose single .42m is written byte-for-byte.
+# _mkpkg_enc [extra-manifest-json] — a packable project; add artifacts yourself.
 _mkpkg_enc() {
-  local writer="$1" extra="${2:-}"
+  local extra="${1:-}"
   cat > fglpkg.json <<EOF
 {
   "name": "enc.pkg",
@@ -29,106 +30,191 @@ _mkpkg_enc() {
   "license": "MIT",
   "repository": "https://github.com/example/enc",
   "author": "fglpkg functional tests",
-  "files": ["*.42m", "*.42f"]${extra:+,
+  "files": ["*.42m", "*.42f", "*.42s"]${extra:+,
   $extra}
 }
 EOF
-  "$writer" > mod.42m
 }
 
 # ---------------------------------------------------------------- pack ------
 
-_enc_pack_derives_ascii() {
+# The case a byte scan of the artifact gets wrong. AsciiBig.42m is compiled
+# from a pure-ASCII source and still holds a byte >= 0x80 (an opcode operand);
+# 78 of 99 real modules look like that. The source staged beside it proves the
+# text is ASCII.
+_enc_pack_proves_ascii_from_source() {
+  export FGLPKG_CHARMAP=ISO-8859-15 FGLPKG_LENGTH_SEMANTICS=BYTE
+  _mkpkg_enc '"files": ["*.42m", "*.4gl"]'
+  _enc_fixture AsciiBig.42m AsciiBig.4gl || return 1
+  run pack -o p.zip
+  assert_success || return 1
+  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  # Not ISO-8859-15: the packer's shell is not evidence.
+  assert_file_contains shipped.json '"characterEncoding": "US-ASCII"' || return 1
+}
+it "pack proves US-ASCII from a pure-ASCII source beside real p-code" _enc_pack_proves_ascii_from_source
+
+# Without a source, a .42m's high bytes prove nothing. Recording a value here
+# is what stamped packages with the packer's shell charset.
+_enc_pack_records_nothing_without_evidence() {
+  export FGLPKG_CHARMAP=ISO-8859-15 FGLPKG_LENGTH_SEMANTICS=BYTE
+  _mkpkg_enc
+  _enc_fixture AsciiBig.42m || return 1
+  run pack -o p.zip
+  assert_success || return 1
+  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  assert_file_not_contains shipped.json 'characterEncoding' || return 1
+}
+it "pack records no encoding when the artifacts prove none" _enc_pack_records_nothing_without_evidence
+
+# The same bytes must pack identically whatever shell they are packed from.
+# Packing under LANG=C once installed everywhere and packing under UTF-8 was
+# refused by ISO-8859-15 consumers, for byte-identical artifacts.
+_enc_pack_ignores_the_build_environment() {
+  local first="" cm got
+  for cm in US-ASCII UTF-8 ISO-8859-15; do
+    rm -rf sub; mkdir sub; cd sub || return 1
+    export FGLPKG_CHARMAP="$cm" FGLPKG_LENGTH_SEMANTICS=BYTE
+    _mkpkg_enc '"files": ["*.42m", "*.4gl"]'
+    _enc_fixture AsciiBig.42m AsciiBig.4gl || { cd ..; return 1; }
+    run pack -o p.zip
+    assert_success || { cd ..; return 1; }
+    unzip -p p.zip fglpkg.json > shipped.json || { cd ..; return 1; }
+    got="$(grep -c 'characterEncoding.*US-ASCII' shipped.json || true)"
+    cd .. || return 1
+    [ -z "$first" ] && first="$got"
+    if [ "$got" != "$first" ] || [ "$got" != "1" ]; then
+      _diag "FGLPKG_CHARMAP=$cm changed what pack recorded"
+      return 1
+    fi
+  done
+}
+it "pack records the same thing whatever charmap it runs under" _enc_pack_ignores_the_build_environment
+
+# A pure-ASCII .per built under a UTF-8 shell writes a UTF-8 prolog. The prolog
+# names the BUILD LOCALE, so reading it as the content's encoding labelled an
+# ASCII-only package UTF-8 and refused it on single-byte consumers.
+_enc_pack_form_prolog_is_not_the_content() {
   export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
-  _mkpkg_enc _ascii_bytes
-  # Derived from the bytes, NOT from the build locale — the environment here is
-  # UTF-8, yet an all-ASCII package must still be declared portable.
+  _mkpkg_enc
+  _enc_fixture AsciiForm.42f || return 1
   run pack -o p.zip
   assert_success || return 1
   unzip -p p.zip fglpkg.json > shipped.json || return 1
   assert_file_contains shipped.json '"characterEncoding": "US-ASCII"' || return 1
 }
-it "pack derives US-ASCII from ASCII artifacts, not from the build locale" _enc_pack_derives_ascii
+it "a pure-ASCII form is US-ASCII even though its prolog says UTF-8" _enc_pack_form_prolog_is_not_the_content
 
-_enc_pack_derives_utf8() {
-  export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
-  _mkpkg_enc _utf8_bytes
+# ...but a form that really carries non-ASCII text IS described by its prolog.
+_enc_pack_form_with_real_text_uses_its_prolog() {
+  export FGLPKG_CHARMAP=ISO-8859-15 FGLPKG_LENGTH_SEMANTICS=BYTE
+  _mkpkg_enc
+  _enc_fixture Utf8Form.42f || return 1
   run pack -o p.zip
   assert_success || return 1
   unzip -p p.zip fglpkg.json > shipped.json || return 1
   assert_file_contains shipped.json '"characterEncoding": "UTF-8"' || return 1
 }
-it "pack derives UTF-8 from high bytes that decode as UTF-8" _enc_pack_derives_utf8
+it "a form carrying non-ASCII text takes its encoding from its prolog" _enc_pack_form_with_real_text_uses_its_prolog
 
-# A wrong US-ASCII claim is the most damaging one to let through: US-ASCII is
-# the tier install skips its check for, so the package would ship mojibake to
-# every consumer without a word.
-_enc_pack_rejects_false_ascii() {
+# The practice the guide recommends: pure-ASCII code, localized text in .str.
+# The package must stay portable, with the resource named separately — not
+# stamped non-portable and refused on the consumers the practice serves.
+_enc_pack_ascii_code_plus_localized_resources() {
   export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
-  _mkpkg_enc _utf8_bytes '"characterEncoding": "US-ASCII"'
+  _mkpkg_enc '"files": ["*.42m", "*.4gl", "*.42s"]'
+  _enc_fixture AsciiBig.42m AsciiBig.4gl Utf8Msg.42s || return 1
+  run pack -o p.zip
+  assert_success || return 1
+  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  assert_file_contains shipped.json '"characterEncoding": "US-ASCII"' || return 1
+  assert_file_contains shipped.json '"Utf8Msg.42s": "UTF-8"' || return 1
+}
+it "ASCII code plus a UTF-8 .str stays portable, with the resource named" _enc_pack_ascii_code_plus_localized_resources
+
+# An ASCII resource constrains nothing, so it is not recorded.
+_enc_pack_ascii_resource_is_not_recorded() {
+  export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
+  _mkpkg_enc
+  _enc_fixture AsciiMsg.42s || return 1
+  run pack -o p.zip
+  assert_success || return 1
+  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  assert_file_not_contains shipped.json 'stringResourceEncodings' || return 1
+}
+it "an ASCII string resource constrains nothing and is not recorded" _enc_pack_ascii_resource_is_not_recorded
+
+# These declarations are CORRECT and used to fail the pack.
+_enc_pack_accepts_correct_ascii_declaration() {
+  export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
+  _mkpkg_enc '"characterEncoding": "US-ASCII"'
+  # Real p-code with a structure high byte, a pure-ASCII form whose prolog says
+  # UTF-8, and a localized resource. None of them disproves US-ASCII code.
+  _enc_fixture AsciiBig.42m AsciiForm.42f Utf8Msg.42s || return 1
+  run pack -o p.zip
+  assert_success || return 1
+  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  assert_file_contains shipped.json '"characterEncoding": "US-ASCII"' || return 1
+}
+it "a correct US-ASCII declaration survives real p-code, a UTF-8 prolog and a .42s" _enc_pack_accepts_correct_ascii_declaration
+
+# The one contradiction that is still provable.
+_enc_pack_rejects_contradicted_declaration() {
+  export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
+  _mkpkg_enc '"characterEncoding": "ISO-8859-15"'
+  _enc_fixture Utf8Form.42f || return 1
   run pack -o p.zip
   assert_failure || return 1
-  assert_contains "mod.42m" || return 1
-  assert_contains "not pure ASCII" || return 1
+  assert_contains "Utf8Form.42f" || return 1
 }
-it "pack refuses a declared US-ASCII contradicted by the bytes" _enc_pack_rejects_false_ascii
+it "pack refuses a declaration a non-ASCII form's prolog disproves" _enc_pack_rejects_contradicted_declaration
 
-# A compiled form declares its encoding in the XML prolog, so it decides.
-_enc_pack_prolog_is_authoritative() {
-  export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
-  _mkpkg_enc _ascii_bytes
-  printf "<?xml version='1.0' encoding='ISO-8859-15'?><Form/>" > f.42f
-  run pack -o p.zip
-  assert_success || return 1
-  unzip -p p.zip fglpkg.json > shipped.json || return 1
-  assert_file_contains shipped.json '"characterEncoding": "ISO-8859-15"' || return 1
-}
-it "a form's XML prolog decides the package encoding" _enc_pack_prolog_is_authoritative
-
-# ISO-8859-1 and -15 are indistinguishable from bytes, so a declaration that
-# narrows an undecidable result is the one thing the author can add.
-_enc_pack_declaration_narrows() {
-  export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
-  _mkpkg_enc _latin9_bytes '"characterEncoding": "ISO-8859-15"'
-  run pack -o p.zip
-  assert_success || return 1
-  unzip -p p.zip fglpkg.json > shipped.json || return 1
-  assert_file_contains shipped.json '"characterEncoding": "ISO-8859-15"' || return 1
-}
-it "a declaration narrowing an undecidable 8-bit result is accepted" _enc_pack_declaration_narrows
-
-# lengthSemantics "char" under a single-byte charset is unsatisfiable: the
-# runtime reports CHAR as BYTE there, so no consumer could ever match it.
 _enc_rejects_impossible_length_semantics() {
   export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
-  _mkpkg_enc _ascii_bytes '"characterEncoding": "ISO-8859-15", "lengthSemantics": "char"'
-  run pack --list
+  _mkpkg_enc '"characterEncoding": "ISO-8859-15", "lengthSemantics": "char"'
+  _enc_fixture AsciiTiny.42m || return 1
+  run pack -o p.zip
   assert_failure || return 1
   assert_contains "single-byte" || return 1
 }
 it "lengthSemantics char with a single-byte charset is rejected" _enc_rejects_impossible_length_semantics
 
+# ...but a multibyte charset makes it satisfiable. Treating every unknown
+# charset as single-byte rejected this: fglrun -i under zh_CN.GBK reports
+# Multibyte: yes.
+_enc_accepts_char_with_multibyte_charset() {
+  export FGLPKG_CHARMAP=GBK FGLPKG_LENGTH_SEMANTICS=CHAR
+  _mkpkg_enc '"characterEncoding": "GBK", "lengthSemantics": "char"'
+  _enc_fixture AsciiTiny.42m || return 1
+  run pack -o p.zip
+  assert_success || return 1
+}
+it "lengthSemantics char with a multibyte charset is accepted" _enc_accepts_char_with_multibyte_charset
+
 _enc_rejects_unknown_length_semantics() {
   export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
-  _mkpkg_enc _ascii_bytes '"lengthSemantics": "chars"'
-  run pack --list
+  _mkpkg_enc '"lengthSemantics": "characters"'
+  _enc_fixture AsciiTiny.42m || return 1
+  run pack -o p.zip
   assert_failure || return 1
-  assert_contains "invalid lengthSemantics" || return 1
+  assert_contains "lengthSemantics" || return 1
 }
 it "an unknown lengthSemantics value is rejected, not ignored" _enc_rejects_unknown_length_semantics
 
 # ------------------------------------------------------------- install ------
 
-# Build a fixtures dir serving one package that declares ISO-8859-15.
-_enc_build_latin9_fixtures() {  # _enc_build_latin9_fixtures <dir>
-  local dir="$1"; mkdir -p "$dir"
+# _enc_build_fixtures <dir> <extra-manifest-json> <fixture-file>...
+_enc_build_fixtures() {
+  local dir="$1" extra="$2"; shift 2
+  mkdir -p "$dir"
   local build; build="$(mktemp -d "$_SANDBOX_ROOT/enc.XXXXXX")"
   (
-    cd "$build"
-    _mkpkg_enc _latin9_bytes '"characterEncoding": "ISO-8859-15"'
+    cd "$build" || exit 1
+    _mkpkg_enc "$extra"
     sed -i.bak 's/"name": "enc.pkg"/"name": "demo.pkg"/' fglpkg.json && rm -f fglpkg.json.bak
+    local f; for f in "$@"; do cp "$_FIXTURES/encoding/$f" . || exit 1; done
     "$FGLPKG" pack -o "$dir/demo-pkg-1.0.0-genero6.zip" </dev/null >/dev/null 2>&1 || exit 1
-  ) || { _diag "could not build the ISO-8859-15 fixture"; return 1; }
+  ) || { _diag "could not build the encoding fixture"; return 1; }
   cat > "$dir/packages.json" <<'EOF'
 {
   "packages": [
@@ -149,17 +235,17 @@ EOF
 }
 
 _enc_install_refuses_mismatch() {
-  export FGLPKG_CHARMAP=ISO-8859-15 FGLPKG_LENGTH_SEMANTICS=BYTE
+  export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
   local fx; fx="$(mktemp -d "$_SANDBOX_ROOT/fx.XXXXXX")"
-  _enc_build_latin9_fixtures "$fx" || return 1
+  _enc_build_fixtures "$fx" '"characterEncoding": "ISO-8859-15"' AsciiTiny.42m || return 1
   mock_registry_start "$fx" || return 1
 
-  # Now consume it from a UTF-8 environment.
-  export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
   run install demo.pkg@1.0.0
   assert_failure || return 1
   assert_contains "ISO-8859-15" || return 1
-  assert_contains "--force-character-encoding" || return 1
+  # Name the COMMAND: `update` rejects a bare --force-character-encoding, so
+  # the flag alone sent the user to a second error.
+  assert_contains "fglpkg install --force-character-encoding" || return 1
   # Nothing may be left on disk: the gate runs before extraction, so a re-run
   # must not read the package as installed (the shape of GIS-580).
   assert_no_file ".fglpkg/packages/demo-pkg/fglpkg.json" || return 1
@@ -167,12 +253,11 @@ _enc_install_refuses_mismatch() {
 it "install refuses a package built with a different charset" _enc_install_refuses_mismatch
 
 _enc_install_force_overrides() {
-  export FGLPKG_CHARMAP=ISO-8859-15 FGLPKG_LENGTH_SEMANTICS=BYTE
+  export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
   local fx; fx="$(mktemp -d "$_SANDBOX_ROOT/fx.XXXXXX")"
-  _enc_build_latin9_fixtures "$fx" || return 1
+  _enc_build_fixtures "$fx" '"characterEncoding": "ISO-8859-15"' AsciiTiny.42m || return 1
   mock_registry_start "$fx" || return 1
 
-  export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
   run install demo.pkg@1.0.0 --force-character-encoding
   assert_success || return 1
   assert_file ".fglpkg/packages/demo-pkg/fglpkg.json" || return 1
@@ -182,7 +267,7 @@ it "--force-character-encoding installs the mismatch anyway" _enc_install_force_
 _enc_install_matching_charset_proceeds() {
   export FGLPKG_CHARMAP=ISO-8859-15 FGLPKG_LENGTH_SEMANTICS=BYTE
   local fx; fx="$(mktemp -d "$_SANDBOX_ROOT/fx.XXXXXX")"
-  _enc_build_latin9_fixtures "$fx" || return 1
+  _enc_build_fixtures "$fx" '"characterEncoding": "ISO-8859-15"' AsciiTiny.42m || return 1
   mock_registry_start "$fx" || return 1
 
   run install demo.pkg@1.0.0
@@ -191,11 +276,40 @@ _enc_install_matching_charset_proceeds() {
 }
 it "install proceeds when the charsets match" _enc_install_matching_charset_proceeds
 
-# Every package on the registry predates this field. Warning about them would
+# A string resource this environment cannot read is a WARNING. The package may
+# ship one resource per language and charset for the consumer to select, so
+# refusing would block a consumer who was going to use a different one.
+_enc_install_resource_mismatch_warns_only() {
+  export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
+  local fx; fx="$(mktemp -d "$_SANDBOX_ROOT/fx.XXXXXX")"
+  _enc_build_fixtures "$fx" \
+    '"characterEncoding": "US-ASCII", "stringResourceEncodings": {"Latin9Msg.42s": "ISO-8859-15"}' \
+    AsciiTiny.42m Latin9Msg.42s || return 1
+  mock_registry_start "$fx" || return 1
+
+  run install demo.pkg@1.0.0
+  assert_success || return 1
+  assert_contains "Latin9Msg.42s" || return 1
+  assert_file ".fglpkg/packages/demo-pkg/fglpkg.json" || return 1
+}
+it "a string resource this charmap cannot read warns but installs" _enc_install_resource_mismatch_warns_only
+
+# Every package on the registry predates these fields. Warning about them would
 # make install noisy for everyone while saying nothing actionable.
+#
+# The fixture must really declare nothing, which the standard mock fixture does
+# NOT guarantee — pack derives a value for it. Real p-code with no source beside
+# it proves nothing, so that is what is packed here, and the assertion below
+# checks the shipped manifest before the install is believed.
 _enc_install_absent_is_silent() {
   export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
-  mock_registry_start || return 1
+  local fx; fx="$(mktemp -d "$_SANDBOX_ROOT/fx.XXXXXX")"
+  _enc_build_fixtures "$fx" '' AsciiBig.42m || return 1
+  unzip -p "$fx/demo-pkg-1.0.0-genero6.zip" fglpkg.json > shipped.json || return 1
+  assert_file_not_contains shipped.json 'characterEncoding' || return 1
+  assert_file_not_contains shipped.json 'stringResourceEncodings' || return 1
+  mock_registry_start "$fx" || return 1
+
   run install demo.pkg@1.0.0
   assert_success || return 1
   assert_not_match "character encoding|characterEncoding" || return 1
