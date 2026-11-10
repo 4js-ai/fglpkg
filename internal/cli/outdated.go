@@ -244,9 +244,13 @@ func buildOutdatedRow(rs *provider.RepositorySet, name, constraint, currentVer, 
 	case row.Wanted != "" && row.Wanted != currentVer:
 		row.Status = "update available"
 	case row.Latest != "" && row.Latest != currentVer:
-		// Current satisfies the constraint, but a newer stable exists
-		// outside the constraint (typically a major bump).
-		row.Status = "major available"
+		// Current satisfies the constraint, but a newer stable exists outside
+		// it. Name the actual jump rather than assuming a major one: an EXACT
+		// pin ("1.0.0") is satisfied only by itself, so every newer release —
+		// including a patch — lands here, and calling 1.0.1 a major bump told
+		// users a breaking change was waiting when it was a bug fix they
+		// probably wanted (GIS-594).
+		row.Status = outsideConstraintStatus(currentVer, row.Latest)
 	default:
 		row.Status = "ok"
 	}
@@ -445,4 +449,33 @@ func firstNonEmpty(vs ...string) string {
 		}
 	}
 	return ""
+}
+
+// outsideConstraintStatus names the size of the jump from the installed
+// version to the newest stable one that the declared constraint excludes.
+//
+// The distinction matters because the status is advice: "major available"
+// warns of a breaking change, while a patch outside an exact pin is a bug fix
+// the user most likely wants. Reporting every such jump as major made the
+// warning meaningless for anyone who pins exactly (GIS-594).
+//
+// Unparseable versions fall back to the neutral wording rather than guessing.
+func outsideConstraintStatus(currentVer, latestVer string) string {
+	cur, err1 := semver.Parse(currentVer)
+	lat, err2 := semver.Parse(latestVer)
+	if err1 != nil || err2 != nil {
+		return "newer available"
+	}
+	switch {
+	case lat.Major != cur.Major:
+		return "major available"
+	case lat.Minor != cur.Minor:
+		return "minor available"
+	case lat.Patch != cur.Patch:
+		return "patch available"
+	default:
+		// Same release triple: the difference is only in the prerelease or
+		// build part, which is not a major/minor/patch step.
+		return "newer available"
+	}
 }
