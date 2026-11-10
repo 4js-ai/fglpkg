@@ -169,8 +169,10 @@ func TestConfirmPublishTargetSkipsARepointedRegistry(t *testing.T) {
 // the guard must not be defeated by spelling the default out.
 // Every spelling that still reaches the PUBLIC service must be guarded. The
 // comparison was once an exact string match, which stood the guard down for
-// ":443", for mixed case, and for a trailing "/." — all of them the same host.
-// This is the one branch where a mismatch silently re-opens the original bug.
+// ":443", for mixed case and for a trailing "/."; comparing scheme://host then
+// still let through a plain "http://" and a trailing-dot FQDN. All of them are
+// the same host, and this is the one branch where a mismatch silently re-opens
+// the original bug.
 func TestConfirmPublishTargetStillGuardsTheExplicitPublicURL(t *testing.T) {
 	spellings := []string{
 		"https://service.generointelligence.ai",
@@ -181,6 +183,15 @@ func TestConfirmPublishTargetStillGuardsTheExplicitPublicURL(t *testing.T) {
 		"https://service.generointelligence.ai/.",
 		"https://service.generointelligence.ai/some/path",
 		"  https://service.generointelligence.ai  ",
+		// Cleartext to the same host: it reaches the public service, and sends
+		// the bearer token over the first hop unencrypted.
+		"http://service.generointelligence.ai",
+		"http://service.generointelligence.ai:80",
+		// The absolute spelling of the same name. Go's TLS verification
+		// accepts the root label, so this really does reach the service.
+		"https://service.generointelligence.ai.",
+		"https://user:pw@service.generointelligence.ai",
+		"//service.generointelligence.ai",
 	}
 	for _, spelling := range spellings {
 		t.Run(spelling, func(t *testing.T) {
@@ -212,29 +223,66 @@ func TestConfirmPublishTargetStandsDownForAnotherHost(t *testing.T) {
 	}
 }
 
-func TestSameHost(t *testing.T) {
+// A target whose host cannot be determined is guarded as well. These do not
+// reach the public service — they reach nothing, the HTTP client cannot dial
+// any of them — but the guard stands down only for a target it can SEE is
+// something else, so an unreadable value can never silently re-open GIS-600.
+// Refusing costs a legitimate user nothing: a target this malformed could not
+// have been published to either way.
+func TestConfirmPublishTargetGuardsAnUnusableTarget(t *testing.T) {
+	for _, url := range []string{
+		"service.generointelligence.ai",         // no scheme: parsed as a path
+		"https://",                              // a scheme with no host
+		"https://[::1",                          // unbalanced bracket: a parse error
+		"ht!tp://service.generointelligence.ai", // not a valid scheme
+	} {
+		t.Run(url, func(t *testing.T) {
+			t.Setenv("FGLPKG_REGISTRY", url)
+			forceTTY(t, false)
+			if err := confirmPublishTarget(publishFlags{}, testManifest()); err == nil {
+				t.Fatalf("FGLPKG_REGISTRY=%q has no usable host, so the guard must not stand down", url)
+			}
+		})
+	}
+}
+
+func TestComparableHost(t *testing.T) {
 	cases := []struct {
-		a, b string
-		want bool
+		in   string
+		want string
+		ok   bool
 	}{
-		{"https://example.com", "https://example.com", true},
-		{"https://example.com", "https://example.com/", true},
-		{"https://example.com:443", "https://example.com", true},
-		{"http://example.com:80", "http://example.com", true},
-		{"HTTPS://EXAMPLE.COM", "https://example.com", true},
-		{"https://example.com/a/b", "https://example.com", true},
-		{"https://example.com", "https://other.example", false},
-		{"https://example.com", "http://example.com", false}, // scheme matters
-		{"https://example.com:8443", "https://example.com", false},
-		// Unparseable values match only themselves, so failing-safe callers
-		// never see a malformed value compare equal to a known-good one.
-		{"", "", true},
-		{"not a url", "not a url", true},
-		{"not a url", "https://example.com", false},
+		{"https://example.com", "example.com", true},
+		{"https://example.com/", "example.com", true},
+		{"https://example.com/a/b", "example.com", true},
+		{"  https://example.com  ", "example.com", true},
+		{"HTTPS://EXAMPLE.COM", "example.com", true},
+		{"https://user:pw@example.com", "example.com", true},
+		{"//example.com", "example.com", true},
+		// The absolute spelling of a name is the same name.
+		{"https://example.com.", "example.com", true},
+		{"https://example.com..", "example.com", true},
+		// A written-out default port addresses the same service as none.
+		{"https://example.com:443", "example.com", true},
+		{"http://example.com:80", "example.com", true},
+		// The scheme is not part of the answer: one host is one service, and
+		// an odd pairing like http://host:443 reaches nothing, so it lands on
+		// the safe side rather than reading as a different service.
+		{"http://example.com", "example.com", true},
+		{"http://example.com:443", "example.com", true},
+		// ...but another port IS another service.
+		{"https://example.com:8443", "example.com:8443", true},
+		{"https://other.example", "other.example", true},
+		// No determinable host. The caller guards instead of standing down.
+		{"", "", false},
+		{"example.com", "", false},
+		{"https://", "", false},
+		{"https://[::1", "", false},
 	}
 	for _, c := range cases {
-		if got := sameHost(c.a, c.b); got != c.want {
-			t.Errorf("sameHost(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		got, ok := comparableHost(c.in)
+		if got != c.want || ok != c.ok {
+			t.Errorf("comparableHost(%q) = (%q, %v), want (%q, %v)", c.in, got, ok, c.want, c.ok)
 		}
 	}
 }

@@ -2587,15 +2587,9 @@ func confirmPublishTarget(pf publishFlags, m *manifest.Manifest) error {
 	// GI registry (or the functional suite's mock) has already said where the
 	// fallback goes, and it is not the public service — there is nothing to
 	// disclose and nothing to confirm. Guarding it anyway would force
-	// --registry gi on every publish for no safety gain.
-	//
-	// Compared by HOST, not by string. An exact comparison stood the guard
-	// down for other spellings of the same public host — ":443", mixed case,
-	// a trailing "/." — each of which still reaches the public service. This
-	// is the one branch where a mismatch silently re-opens the original bug,
-	// so it fails safe: anything that does not parse is treated as the public
-	// service and guarded.
-	if !sameHost(target, config.BuiltinGI("").URL) {
+	// --registry gi on every publish for no safety gain. addressesPublicGI
+	// settles that question, and it fails safe.
+	if !addressesPublicGI(target) {
 		return nil
 	}
 	if pf.dryRun {
@@ -2657,43 +2651,55 @@ func isHTTPURL(s string) bool {
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
-// sameHost reports whether two URLs address the same host, ignoring case, the
-// default port for the scheme, and any path. Anything that fails to parse, or
-// carries no host, compares false EXCEPT against itself — callers that fail
-// safe rely on an unparseable value not matching a known-good one.
-func sameHost(a, b string) bool {
-	ha, oka := normalizedHost(a)
-	hb, okb := normalizedHost(b)
-	if !oka || !okb {
-		// Fall back to a literal comparison so two identically-malformed
-		// values still match; a malformed value never matches a well-formed
-		// one.
-		return a == b
+// addressesPublicGI reports whether target reaches the PUBLIC Genero
+// Intelligence service. This is the question the publish guard asks of
+// FGLPKG_REGISTRY, and the one branch where a wrong answer silently re-opens
+// GIS-600, so it is deliberately blunt.
+//
+// It compares HOSTS, not strings. An exact string comparison stood the guard
+// down for ":443", for mixed case, for a trailing "/.", for a plain http://
+// scheme and for a trailing-dot FQDN — every one of those still reaches the
+// public service, and the http:// spelling would additionally put the bearer
+// token on the wire in cleartext.
+//
+// It fails safe: a value whose host cannot be determined is guarded rather
+// than waved through. The guard stands down only for a target it can SEE is
+// something else. Nothing is lost by that, because a URL with no usable host
+// (no scheme, no authority, unbalanced brackets) cannot be published to in any
+// case — the HTTP client cannot dial it.
+func addressesPublicGI(target string) bool {
+	host, ok := comparableHost(target)
+	if !ok {
+		return true
 	}
-	return ha == hb
+	public, _ := comparableHost(config.BuiltinGI("").URL)
+	return host == public
 }
 
-// normalizedHost returns a URL's lower-cased host with the scheme's default
-// port removed, and whether it could be determined.
-func normalizedHost(raw string) (string, bool) {
+// comparableHost reduces a URL to the host that two spellings of the same
+// service share, and reports whether one could be determined at all.
+//
+// Lower-cased, because host names are case-insensitive. Any trailing "." is
+// trimmed, because "example.com." is the absolute spelling of the same name
+// and Go's TLS verification accepts it. The SCHEME is deliberately not part of
+// the result: http:// and https:// on one host are one service, and the
+// question here is which service a URL reaches. A non-default port IS kept, so
+// ":8443" is a different service — but 80 and 443 are dropped whatever the
+// scheme, since an odd pairing such as http://host:443 reaches nothing at all
+// and erring towards "same host" is the safe side.
+func comparableHost(raw string) (string, bool) {
 	u, err := neturl.Parse(strings.TrimSpace(raw))
-	if err != nil || u.Host == "" {
+	if err != nil {
 		return "", false
 	}
-	scheme := strings.ToLower(u.Scheme)
-	host := strings.ToLower(u.Hostname())
+	host := strings.TrimRight(strings.ToLower(u.Hostname()), ".")
 	if host == "" {
 		return "", false
 	}
-	port := u.Port()
-	// An explicitly-written default port addresses the same host as none.
-	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
-		port = ""
-	}
-	if port != "" {
+	if port := u.Port(); port != "" && port != "80" && port != "443" {
 		host += ":" + port
 	}
-	return scheme + "://" + host, true
+	return host, true
 }
 
 func cmdPublish(args []string) error {
