@@ -1587,10 +1587,77 @@ func cmdEnv(args []string) error {
 	// list Genero Studio can parse. Emitting them here — after the switch —
 	// covers every output mode, --gst included.
 	printEnvWarnings(g)
+	if len(exports) == 0 && !f.global {
+		// Nothing to export is a result the user must SEE. stdout is consumed
+		// by `eval "$(fglpkg env)"`, so an empty stdout plus exit 0 is
+		// indistinguishable from success — the compile then fails much later
+		// with -8403 Module does not exist, far from the cause (GIS-588).
+		//
+		// An explicit --global is the one mode that stays silent, because an
+		// empty global root is an EXPECTED state there, not a failure: the
+		// documented profile setup is `eval "$(fglpkg env --global)"` in
+		// ~/.bashrc (docs/user-guide.md), so anyone whose packages are all
+		// project-local would read this explanation on every new shell. The
+		// GIS-588 failure is the default and --local modes, where the user is
+		// inside a project and does expect that project's packages.
+		printEnvNothingFound(home, useLocal)
+		return nil
+	}
 	for _, line := range exports {
 		fmt.Println(line)
 	}
 	return nil
+}
+
+// printEnvNothingFound explains an empty `fglpkg env` on stderr, so stdout
+// stays safe to eval.
+//
+// The single most likely way to reach it is running from a SUBDIRECTORY of a
+// project: isProjectDir() looks only at the current directory, so a
+// subdirectory falls through to the merged default mode and finds nothing
+// local. Naming the parent that does hold a manifest turns a silent no-op into
+// a one-line fix.
+//
+// Only the default and --local modes reach this; the caller keeps an explicit
+// --global silent, so there is no "global root is empty" wording to write.
+func printEnvNothingFound(globalRoot string, useLocal bool) {
+	scope := "no installed packages found"
+	if useLocal {
+		scope += " in this project"
+	}
+	fmt.Fprintf(os.Stderr, "fglpkg env: %s; nothing to export\n", scope)
+	if dir, ok := findProjectAncestor(); ok {
+		fmt.Fprintf(os.Stderr,
+			"  The current directory is not a project, but %s is.\n"+
+				"  Run fglpkg env from there, or 'cd %s' first.\n", dir, dir)
+	}
+	if !useLocal {
+		fmt.Fprintf(os.Stderr, "  Global package root: %s\n", globalRoot)
+	}
+}
+
+// findProjectAncestor walks up from the working directory looking for the
+// nearest parent that is a project (holds fglpkg.json or a project .fglpkg/).
+// The working directory itself is not considered — the caller already knows it
+// is not one.
+func findProjectAncestor() (string, bool) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", false
+	}
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false // reached the filesystem root
+		}
+		dir = parent
+		if _, err := os.Stat(filepath.Join(dir, manifest.Filename)); err == nil {
+			return dir, true
+		}
+		if fi, err := os.Stat(filepath.Join(dir, ".fglpkg")); err == nil && !isFglpkgOwnDir(fi) {
+			return dir, true
+		}
+	}
 }
 
 // printEnvWarnings writes an env Generator's diagnostics (basename collisions
@@ -5343,9 +5410,32 @@ func cmdDocs(args []string) error {
 
 	pkgName := args[0]
 
+	// Two installed shapes, two places to look. A BDL (or mixed) package keeps
+	// its manifest under .fglpkg/packages/<slug>/, so its own `docs` globs
+	// decide. A package installed as the `webcomponent` variant is extracted
+	// into .fglpkg/webcomponents/ and keeps NO manifest, so it was invisible
+	// here and every widget reported as not installed — telling the user to
+	// install what was already installed (GIS-581).
 	pkgDir, m, err := findInstalledPackage(pkgName)
 	if err != nil {
-		return err
+		src, ok := findWebcomponentDocs(pkgName)
+		if !ok {
+			return err
+		}
+		if len(src.files) == 0 {
+			// Not "ships none": the package may well ship README.md and
+			// LICENSE at the ZIP ROOT, which the installer deliberately does
+			// not extract (see extractWebcomponentZip), so they never reach
+			// disk and the ownership sidecar never records them. Saying the
+			// package ships no documentation would blame the author for a
+			// limit of the install layout, so name the limit instead.
+			fmt.Printf("Package %q is installed as a web component; no documentation files were kept on disk.\n", src.label)
+			fmt.Println("  A web component's zip-root files (README.md, LICENSE, ...) are not extracted,")
+			fmt.Println("  so documentation shipped there is not reachable here. Documentation under a")
+			fmt.Println("  subdirectory — docs/, or the component directory — is listed.")
+			return nil
+		}
+		return printDocs(pkgName, src, args)
 	}
 
 	if len(m.Docs) == 0 {
@@ -5363,19 +5453,24 @@ func cmdDocs(args []string) error {
 		return nil
 	}
 
+	return printDocs(pkgName, docSource{
+		baseDir: pkgDir,
+		files:   docFiles,
+		label:   m.Name + "@" + m.Version,
+	}, args)
+}
+
+// printDocs renders one package's documentation: the single file directly, the
+// list when there are several, or one named file. Shared by both install
+// shapes so a web component's docs read exactly like a BDL package's.
+func printDocs(pkgName string, src docSource, args []string) error {
 	// If no specific file requested and there's only one doc, show it directly.
 	if len(args) < 2 {
-		if len(docFiles) == 1 {
-			fullPath := filepath.Join(pkgDir, docFiles[0])
-			content, err := os.ReadFile(fullPath)
-			if err != nil {
-				return fmt.Errorf("cannot read %s: %w", docFiles[0], err)
-			}
-			fmt.Print(string(content))
-			return nil
+		if len(src.files) == 1 {
+			return printDocFile(src.baseDir, src.files[0])
 		}
-		fmt.Printf("Documentation for %s@%s:\n", m.Name, m.Version)
-		for _, f := range docFiles {
+		fmt.Printf("Documentation for %s:\n", src.label)
+		for _, f := range src.files {
 			fmt.Printf("  %s\n", f)
 		}
 		fmt.Printf("\nView a file: fglpkg docs %s <file>\n", pkgName)
@@ -5386,7 +5481,7 @@ func cmdDocs(args []string) error {
 	requestedFile := args[1]
 
 	var matchPath string
-	for _, f := range docFiles {
+	for _, f := range src.files {
 		if f == requestedFile || filepath.Base(f) == requestedFile {
 			matchPath = f
 			break
@@ -5395,11 +5490,13 @@ func cmdDocs(args []string) error {
 	if matchPath == "" {
 		return fmt.Errorf("doc file %q not found in package %s\nRun 'fglpkg docs %s' to list available files", requestedFile, pkgName, pkgName)
 	}
+	return printDocFile(src.baseDir, matchPath)
+}
 
-	fullPath := filepath.Join(pkgDir, matchPath)
-	content, err := os.ReadFile(fullPath)
+func printDocFile(baseDir, relPath string) error {
+	content, err := os.ReadFile(filepath.Join(baseDir, filepath.FromSlash(relPath)))
 	if err != nil {
-		return fmt.Errorf("cannot read %s: %w", matchPath, err)
+		return fmt.Errorf("cannot read %s: %w", relPath, err)
 	}
 	fmt.Print(string(content))
 	return nil

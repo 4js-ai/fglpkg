@@ -90,12 +90,23 @@ class Fixtures:
             "variants": variants,
         }
 
-    def search(self, term):
+    # The real registry paginates and defaults to 20 per page. Modelling that
+    # here is what makes GIS-584 testable: a client that ignores page/pageSize
+    # silently sees only the first 20 matches.
+    DEFAULT_PAGE_SIZE = 20
+    MAX_PAGE_SIZE = 50          # a real server caps what a client may ask for
+
+    def search(self, term, page=1, page_size=None):
         term = (term or "").lower()
         hits = [self.listed(p) for p in self.packages.values()
                 if term in canonical(p["slug"]) or term in p.get("name", "").lower()
                 or term in p.get("description", "").lower()]
-        return {"packages": hits, "page": 1, "pageSize": 20, "total": len(hits)}
+        size = self.DEFAULT_PAGE_SIZE if page_size is None else page_size
+        size = max(1, min(size, self.MAX_PAGE_SIZE))
+        page = max(1, page)
+        start = (page - 1) * size
+        return {"packages": hits[start:start + size],
+                "page": page, "pageSize": size, "total": len(hits)}
 
 FX = None
 
@@ -135,8 +146,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         # 2) search
         if path == "/registry/packages":
-            q = urllib.parse.parse_qs(parsed.query).get("q", [""])[0]
-            self._json(200, FX.search(q))
+            qs = urllib.parse.parse_qs(parsed.query)
+            q = qs.get("q", [""])[0]
+
+            def _int(name):
+                try:
+                    return int(qs.get(name, [""])[0])
+                except ValueError:
+                    return None
+
+            self._json(200, FX.search(q, page=_int("page") or 1, page_size=_int("pageSize")))
             return
         # 3) package detail
         m = re.fullmatch(r"/registry/packages/([^/]+)", path)
