@@ -21,8 +21,8 @@
 //     no charset of its own.
 //   - .42f carries an XML prolog, but the prolog names the BUILD LOCALE and
 //     never the content. The same UTF-8 .per compiled under en_US.UTF-8,
-//     LANG=C and en_US.ISO8859-15 gives byte-identical form content and
-//     prologs of UTF-8, ASCII and ISO-8859-15 — so a prolog cannot classify a
+//     LANG=C and en_US.ISO8859-15 gives identical TEXT bytes and prologs of
+//     UTF-8, ASCII and ISO-8859-15 — so a prolog cannot classify a
 //     form even when the form really does carry non-ASCII text. A .42f is a
 //     clean container like a .42s and is classified by its own bytes. Nothing
 //     here reads the prolog: measured, fglrun uses a form's bytes as stored

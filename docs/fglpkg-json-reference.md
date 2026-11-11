@@ -329,15 +329,16 @@ The reason the rules are shaped that way, measured against Genero 6.00.01:
   content is its source's bytes copied through. Its XML prolog is NOT read as
   evidence, because it names the build locale and never the content — the same
   UTF-8 `.per` compiled under `en_US.UTF-8`, `LANG=C` and `en_US.ISO8859-15`
-  gives byte-identical form content and prologs of `UTF-8`, `ASCII` and
+  gives identical *text* bytes and prologs of `UTF-8`, `ASCII` and
   `ISO-8859-15`. A prolog that contradicts the content is not reported either:
   `fglrun` uses a form's bytes as stored whatever the prolog says, and the
   front ends never read the file — `fglrun` parses it and sends an AUI tree.
 - The **`.4gl` beside a `.42m`** is what can prove it ASCII, since `fglcomp`
   copies literal bytes straight through. Two things break that, so both are
   checked: `&include` files are followed recursively, in every separator
-  spelling `fglcomp` accepts (`&include"f"`, `& include "f"`, tab or form feed
-  for either space), with an unresolvable one proving nothing because
+  spelling `fglcomp` accepts — a sweep of every ASCII byte through the three
+  separator positions found exactly four: space, tab, form feed and carriage
+  return, in any of them, with an unresolvable one proving nothing because
   `fglcomp` also searches `-I` paths `pack` cannot know; and a source much
   newer than its module is not believed to be the one it was built from. The converse does not hold either — a `.4gl` may carry
   UTF-8 comments that never reach the p-code — so a non-ASCII source yields no

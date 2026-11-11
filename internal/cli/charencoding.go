@@ -30,9 +30,13 @@ import (
 //  2. Trust a compiled form's XML prolog once the form carried a high byte.
 //     But the prolog records the SHELL fglform ran under, not the file. The
 //     same UTF-8 .per compiled under en_US.UTF-8, LANG=C and en_US.ISO8859-15
-//     produces byte-identical form content (`Caf\xc3\xa9` every time) and
-//     three different prologs, so pack recorded UTF-8, US-ASCII and
-//     ISO-8859-15 for one unchanged file.
+//     produces identical TEXT bytes (`Caf\xc3\xa9` every time) and three
+//     different prologs, so pack recorded UTF-8, US-ASCII and ISO-8859-15 for
+//     one unchanged file. (The rest of the form is not identical: the build
+//     locale counts the label in characters or in bytes, so a `Café:` label
+//     gives form width 18, gridWidth 6 and the field at posX 7 under UTF-8
+//     against 19, 7 and 8 under C. Only the text bytes are classified, so
+//     that changes nothing here.)
 //
 // Both put the packer's environment back into a field whose whole purpose was
 // to remove it. What each artifact can actually prove is respected instead:
@@ -71,12 +75,25 @@ import (
 // accepts has to match: a missed one silently records US-ASCII for a module
 // that carries the include's text, while an extra match only costs the value.
 // So the matcher errs wide, and the shape of "wide" is measured rather than
-// guessed — each line below was compiled with fglcomp 6.00.01 from an ASCII
-// source including a UTF-8 file, and the .42m then searched for that text:
+// guessed.
+//
+// The separator class comes from an exhaustive sweep: every ASCII byte 0x01
+// to 0x7f (bar the newline, which ends the line) was put in each of the three
+// separator positions — before the `&`, between `&` and `include`, and
+// between `include` and the quote — compiled with fglcomp 6.00.01 from an
+// ASCII source including a UTF-8 file, and the .42m searched for that text.
+// All three positions accept the same four bytes and no others:
+//
+//	0x20 space   0x09 tab   0x0c form feed   0x0d carriage return
+//
+// A hand-picked list had missed the carriage return, which needs a stray CR
+// (a CRLF file has its trailing CR stripped before this runs, and a CR-only
+// source does not compile at all) but fails the same silent way. The rest of
+// the grammar, from the same probes:
 //
 //	&include "f"   &include"f"   & include "f"   &<TAB>include "f"
 //	&<FF>include "f"   &   include   "f"   &include<TAB>"f"   &include 'f'
-//	&include "f"  # trailing comment        <FF> before the &
+//	&include "f"  # trailing comment        <FF> or <CR> before the &
 //	                              -> directive; the text reaches the .42m
 //	<VT> before the &             -> error -6609
 //	&<VT>include "f"              -> error -8102
@@ -87,10 +104,9 @@ import (
 //	# &include "f"                -> compiles; not a directive
 //	DISPLAY "&include \"f\""      -> compiles; not a directive
 //
-// So the separator class is space, tab and form feed — not vertical tab — and
-// anchoring at the line start keeps the comment and the string literal out
+// Anchoring at the line start keeps the comment and the string literal out
 // without writing a BDL lexer.
-var includeRe = regexp.MustCompile(`^[ \t\f]*&[ \t\f]*include[ \t\f]*["']([^"']+)["']`)
+var includeRe = regexp.MustCompile(`^[ \t\f\r]*&[ \t\f\r]*include[ \t\f\r]*["']([^"']+)["']`)
 
 // maxIncludeDepth bounds the include walk. Genero rejects a cycle itself; this
 // only stops a pathological tree from costing a pack more than it is worth.

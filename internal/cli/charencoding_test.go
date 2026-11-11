@@ -232,6 +232,51 @@ func TestRecordEncoding_UnresolvableIncludeProvesNothing(t *testing.T) {
 	}
 }
 
+// The walk has to be recursive, not one level deep. IncDeep.4gl and the file
+// it includes are both pure ASCII; only the include's own include carries the
+// UTF-8 text, and the .42m carries it too. A walk that stops at depth 1 reads
+// two clean files and records US-ASCII for a module that is not.
+func TestRecordEncoding_IncludeTwoLevelsDownIsStillFollowed(t *testing.T) {
+	staged := stageFixtures(t, "IncDeep.42m")
+	m := &manifest.Manifest{}
+	out, err := captureStderr(t, func() error { return recordEncoding(m, staged) })
+	if err != nil {
+		t.Fatalf("recordEncoding: %v", err)
+	}
+	if m.CharacterEncoding != "" {
+		t.Errorf("CharacterEncoding = %q, want it absent: the second-level include carries UTF-8",
+			m.CharacterEncoding)
+	}
+	if !strings.Contains(out, "IncDeepB.inc") {
+		t.Errorf("the note must name the second-level include, got: %s", out)
+	}
+}
+
+// Staleness applies to an include as much as to the source. An include edited
+// after the build is as little proof about the shipped p-code as a .4gl is:
+// the module was compiled from whatever the file said then, and that text is
+// in the artifact whether the file still says it or not.
+func TestRecordEncoding_IncludeNewerThanTheArtifactProvesNothing(t *testing.T) {
+	staged := stageFixtures(t, "IncAscii.42m")
+	inc := filepath.Join(filepath.Dir(staged["IncAscii.42m"]), "IncAscii.inc")
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(inc, later, later); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	m := &manifest.Manifest{}
+	out, err := captureStderr(t, func() error { return recordEncoding(m, staged) })
+	if err != nil {
+		t.Fatalf("recordEncoding: %v", err)
+	}
+	if m.CharacterEncoding != "" {
+		t.Errorf("CharacterEncoding = %q, want it absent: the include is newer than the module",
+			m.CharacterEncoding)
+	}
+	if !strings.Contains(out, "IncAscii.inc") || !strings.Contains(out, "NEWER") {
+		t.Errorf("the note must name the include and say it is newer, got: %s", out)
+	}
+}
+
 // A source edited after the build does not describe the artifact that ships.
 // Compile a module with a literal, make the .4gl ASCII without recompiling,
 // and the old rule read the new source as proof about the old p-code.
@@ -586,8 +631,13 @@ func TestScanEncoding_NamesAStableFile(t *testing.T) {
 // table is the measurement that says how wide. Every row was run through
 // fglcomp 6.00.01 with an ASCII source including a UTF-8 file, checking
 // whether that text reached the .42m.
+//
+// The separator rows are not a hand-picked list. Every ASCII byte 0x01-0x7f
+// (bar the newline) was put in each of the three separator positions and
+// compiled; all three accept the same four bytes and no others: space, tab,
+// form feed and carriage return.
 func TestIncludeRe_MatchesWhatFglcompTreatsAsADirective(t *testing.T) {
-	const ff, vt = "\f", "\v"
+	const ff, vt, cr = "\f", "\v", "\r"
 	cases := []struct {
 		line string
 		want string
@@ -606,6 +656,14 @@ func TestIncludeRe_MatchesWhatFglcompTreatsAsADirective(t *testing.T) {
 		{"&include\t\"greet.inc\"", "greet.inc"},
 		{ff + `&include "greet.inc"`, "greet.inc"},
 		{`&include "greet.inc"  # trailing comment`, "greet.inc"},
+		// Carriage return is the fourth separator, found by sweeping every
+		// ASCII byte through all three positions rather than guessing a list.
+		// It needs a STRAY CR — a CRLF line has its trailing CR stripped
+		// before the matcher runs, and a CR-only source does not compile —
+		// but it fails the same silent way, so it is in the class.
+		{cr + `&include "greet.inc"`, "greet.inc"},
+		{"&" + cr + `include "greet.inc"`, "greet.inc"},
+		{`&include` + cr + `"greet.inc"`, "greet.inc"},
 		// Not directives: fglcomp compiles these two without reading a file.
 		{`# &include "greet.inc"`, ""},
 		{`   DISPLAY "&include \"greet.inc\""`, ""},

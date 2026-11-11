@@ -44,7 +44,8 @@ author did write, and gate consumption on a *verified* mismatch only.
 >
 > 1. The include matcher required `&include` followed by whitespace. `fglcomp` accepts six further
 >    separator spellings, each of which puts the include's text in the `.42m`, so the matcher now
->    allows space, tab or form feed on either side of the `&`. A missed spelling records
+>    allows space, tab, form feed or carriage return on either side of the `&`. A missed spelling
+>    records
 >    `US-ASCII` for a module that is not, which `install` then never checks — the only silent
 >    failure mode in the derivation.
 > 2. The prolog note is gone. `fglrun` uses a form's bytes as stored whatever the prolog says
@@ -85,14 +86,28 @@ file records no charset of its own.
 The second design concluded from this that the prolog is authoritative *once the form carries a
 high byte*. It is not. Compiling a `.per` whose label really is `Café crème` (UTF-8 source):
 
-| Build locale | `.42f` prolog | Form content bytes |
+| Build locale | `.42f` prolog | Form *text* bytes |
 |---|---|---|
 | `en_US.UTF-8` | `UTF-8` | `Caf\xc3\xa9 cr\xc3\xa8me` |
 | `C` / `POSIX` | `ASCII` | `Caf\xc3\xa9 cr\xc3\xa8me` (identical) |
 | `en_US.ISO8859-15` | `ISO-8859-15` | `Caf\xc3\xa9 cr\xc3\xa8me` (identical) |
 
-The content is the source's bytes copied through, byte-for-byte, in all three; only the prolog
-moves. So a `.42f` is a clean container like a `.42s` and must be classified by its own bytes.
+The text is the source's bytes copied through, byte-for-byte, in all three; the prolog moves. So a
+`.42f` is a clean container like a `.42s` and must be classified by its own bytes.
+
+The **rest** of the form is not identical, which is why this says *text* bytes rather than form
+content. The build locale decides whether a label is counted in characters or in bytes, so its
+layout numbers move with it. A `SCREEN` form labelled `Café:`:
+
+| Build locale | Form width | Label `gridWidth` | Field `posX` | Text bytes |
+|---|---|---|---|---|
+| `en_US.UTF-8` | 18 | 6 | 7 | `Caf\xc3\xa9` |
+| `C` / `POSIX` | 19 | 7 | 8 | identical |
+| `en_US.ISO8859-15` | 19 | 7 | 8 | identical |
+
+Only the text bytes are classified, so this changes nothing in the derivation — but a form built
+under the wrong locale is laid out one column wide per non-ASCII character, which is a build
+problem of its own and nothing `fglpkg` can see.
 
 ### Nothing in Genero reads the prolog
 
@@ -263,7 +278,7 @@ Run over the staged tree, after `stageBDLFiles`.
 
    | Written | `fglcomp` |
    |---|---|
-   | `&include "f"`, `&include"f"`, `& include "f"`, `&<TAB>include "f"`, `&<FF>include "f"`, `&   include   "f"`, `&include<TAB>"f"`, `&include 'f'`, trailing comment, leading `<FF>` | directive; the text reaches the `.42m` |
+   | `&include "f"`, `&include"f"`, `& include "f"`, `&<TAB>include "f"`, `&<FF>include "f"`, `&<CR>include "f"`, `&   include   "f"`, `&include<TAB>"f"`, `&include 'f'`, trailing comment, leading `<FF>` or `<CR>` | directive; the text reaches the `.42m` |
    | leading `<VT>` | error `-6609` |
    | `&<VT>include "f"` | error `-8102` |
    | `&` newline `include "f"` | error `-8102` (one line only) |
@@ -272,8 +287,15 @@ Run over the staged tree, after `stageBDLFiles`.
    | `DISPLAY "x" &include "f"` | error `-6609` (first token on its line) |
    | `# &include "f"`, `DISPLAY "&include \"f\""` | compiles; not a directive |
 
-   So the separator class is space, tab and form feed — not vertical tab — and anchoring at the
-   line start keeps the comment and the string literal out without a BDL lexer.
+   The class is not a hand-picked list: every ASCII byte `0x01`-`0x7f` (bar the newline) was put
+   in each of the three separator positions — before the `&`, between `&` and `include`, between
+   `include` and the quote — and compiled. All three positions accept the same four bytes and no
+   others: **space `0x20`, tab `0x09`, form feed `0x0c`, carriage return `0x0d`**. Anchoring at
+   the line start keeps the comment and the string literal out without a BDL lexer.
+
+   The carriage return needs a *stray* CR to matter: a CRLF file has its trailing CR stripped
+   before the matcher runs, and a CR-only source does not compile at all (`-6609`). It is in the
+   class anyway, because the cost of a miss is silent and the cost of a false match is not.
 4. Otherwise → **unproven**.
 
 Then: every code artifact ASCII → `US-ASCII`; a form proved an encoding and nothing is unproven →

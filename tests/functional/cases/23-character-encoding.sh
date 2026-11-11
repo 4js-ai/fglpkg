@@ -199,6 +199,37 @@ _enc_pack_ascii_include_still_proves_ascii() {
 }
 it "a pure-ASCII &include still proves the module ASCII" _enc_pack_ascii_include_still_proves_ascii
 
+# The walk is recursive. IncDeep.4gl and IncDeepA.inc are both pure ASCII and
+# only IncDeepB.inc carries the UTF-8 text, so a walk that stops one level down
+# reads two clean files and records US-ASCII for a module that is not.
+_enc_pack_include_two_levels_down_is_followed() {
+  export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
+  _mkpkg_enc
+  _enc_fixture IncDeep.42m IncDeep.4gl IncDeepA.inc IncDeepB.inc || return 1
+  run pack -o p.zip
+  assert_success || return 1
+  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  assert_file_not_contains shipped.json 'characterEncoding' || return 1
+  assert_contains "IncDeepB.inc" || return 1
+}
+it "an &include two levels down is still followed" _enc_pack_include_two_levels_down_is_followed
+
+# Staleness applies to an include as much as to the source: the module was
+# compiled from whatever the include said then, not what it says now.
+_enc_pack_stale_include_proves_nothing() {
+  export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
+  _mkpkg_enc
+  _enc_fixture IncAscii.42m IncAscii.4gl IncAscii.inc || return 1
+  touch -t "$(date -u -v+1H '+%Y%m%d%H%M' 2>/dev/null || date -u -d '+1 hour' '+%Y%m%d%H%M')" IncAscii.inc || return 1
+  run pack -o p.zip
+  assert_success || return 1
+  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  assert_file_not_contains shipped.json 'characterEncoding' || return 1
+  assert_contains "IncAscii.inc" || return 1
+  assert_contains "NEWER" || return 1
+}
+it "an &include newer than the module proves nothing" _enc_pack_stale_include_proves_nothing
+
 # A source edited after the build does not describe the artifact that ships.
 _enc_pack_stale_source_proves_nothing() {
   export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
