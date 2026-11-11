@@ -297,6 +297,144 @@ against your running Genero version — override the compared version with
 is hidden or reordered, and a package with no `genero` constraint simply grades
 `?`.
 
+#### `characterEncoding` — string (IANA charset name)
+Records the character set the package's compiled **code** (`.42m` / `.42f`)
+carries, for example `"US-ASCII"`, `"UTF-8"` or `"ISO-8859-15"`. String
+resources are recorded separately, in
+[`stringResourceEncodings`](#stringresourceencodings--object-path--charset).
+
+This matters because `fglcomp` and `fglform` write string literals into the
+compiled output in the encoding of the build locale. A package built under
+UTF-8 and consumed under ISO-8859-15 produces mojibake — or, worse, silently
+wrong string lengths.
+
+`fglpkg pack` records this field only when the staged artifacts **prove** it,
+and leaves it absent otherwise:
+
+| Evidence in the staged artifacts | Recorded |
+|---|---|
+| Every code artifact has no byte ≥ `0x80` | `US-ASCII` |
+| A form's high bytes decode as UTF-8 | `UTF-8` |
+| A pure-ASCII `.4gl`, and everything it `&include`s, sits beside each `.42m` | `US-ASCII` |
+| Anything else | nothing — `install` then performs no check |
+
+The reason the rules are shaped that way, measured against Genero 6.00.01:
+
+- A **`.42m`'s own structure** contains bytes ≥ `0x80` (opcode operands, the
+  embedded source-path length). Of 99 real modules compiled from pure-ASCII
+  sources, only 21 had none — so no high byte proves the text is ASCII, and a
+  high byte proves nothing at all. The file is byte-identical across build
+  locales, so it records no charset of its own.
+- A **`.42f` is classified by its own bytes**, like a `.42s`: the form's
+  content is its source's bytes copied through. Its XML prolog is NOT read as
+  evidence, because it names the build locale and never the content — the same
+  UTF-8 `.per` compiled under `en_US.UTF-8`, `LANG=C` and `en_US.ISO8859-15`
+  gives identical *text* bytes and prologs of `UTF-8`, `ASCII` and
+  `ISO-8859-15`. A prolog that contradicts the content is not reported either:
+  `fglrun` uses a form's bytes as stored whatever the prolog says, and the
+  front ends never read the file — `fglrun` parses it and sends an AUI tree.
+- The **`.4gl` beside a `.42m`** is what can prove it ASCII, since `fglcomp`
+  copies literal bytes straight through. Two things break that, so both are
+  checked: `&include` files are followed recursively, in every separator
+  spelling `fglcomp` accepts — a sweep of every ASCII byte through the three
+  separator positions found exactly four: space, tab, form feed and carriage
+  return, in any of them, with an unresolvable one proving nothing because
+  `fglcomp` also searches `-I` paths `pack` cannot know; and a source much
+  newer than its module is not believed to be the one it was built from. The converse does not hold either — a `.4gl` may carry
+  UTF-8 comments that never reach the p-code — so a non-ASCII source yields no
+  value rather than an error.
+
+`pack` never consults the build environment. Falling back to `fglrun -i` where
+the bytes were undecidable meant byte-identical artifacts installed everywhere
+when packed under `LANG=C` and were refused by ISO-8859-15 consumers when
+packed under `en_US.UTF-8`.
+
+**Declare the field** when your package carries non-ASCII code text that `pack`
+cannot prove. A declaration is cross-checked only against a contradiction that
+is actually provable — a form whose own bytes decode as UTF-8 under a
+declaration that is not UTF-8 — and the error names the file. Declaring `US-ASCII` for a
+package whose p-code holds a structure high byte is correct and accepted, as is
+declaring it beside a UTF-8 `.42s`.
+
+On the consuming side, `fglpkg install` refuses a package whose
+`characterEncoding` differs from the local Genero charmap (`fglrun -i`), naming
+both. Three cases are deliberately quiet:
+
+- **`US-ASCII`** is never checked. ASCII-7 is a subset of every charset Genero
+  supports, which is why shipping pure-ASCII code is the recommended practice
+  for a public package.
+- **An absent field** installs without comment.
+- **An unreadable environment** (no `fglrun`, or no charmap reported) warns
+  instead of refusing.
+
+`fglpkg install --force-character-encoding` installs a mismatch anyway, with a
+warning. Name the command, not just the flag: `fglpkg update` rejects the bare
+flag.
+
+#### `stringResourceEncodings` — object (path → charset)
+Names the character set of each compiled string resource (`.42s`) that carries
+non-ASCII text, keyed by the file's path inside the archive.
+
+```jsonc
+{
+  "characterEncoding": "US-ASCII",
+  "stringResourceEncodings": {
+    "res/Messages.utf8.42s": "UTF-8",
+    "res/Messages.latin9.42s": "ISO-8859-15"
+  }
+}
+```
+
+`pack` derives this: unlike a `.42m`, a `.42s` is a clean container whose byte
+scan is reliable — an ASCII resource has no high byte, a UTF-8 one decodes as
+UTF-8, an 8-bit one does not — and its bytes are the same whatever locale
+`fglmkstr` ran under. An ASCII resource constrains nothing and is omitted.
+
+It is **per file and advisory**. A package may ship one resource per language
+and charset for the consumer to select at runtime, so no single package-wide
+value could describe the set, and `install` **warns** about a resource this
+environment cannot read rather than refusing the package — the consumer may be
+about to select a different one. The mismatch is real (a `.42s` is used as its
+bytes stand, with no transcoding), it is simply not the package's fault.
+
+Declare an entry for a resource whose 8-bit charset the bytes cannot name:
+`ISO-8859-1` and `ISO-8859-15` are indistinguishable. A declaration the bytes
+disprove fails the pack.
+
+#### `lengthSemantics` — string (`"char"` | `"byte"`)
+Declares the `FGL_LENGTH_SEMANTICS` a consumer must use. Unlike
+`characterEncoding` this **cannot be derived** — it is a property of the code's
+behaviour, not of its bytes. A `FOR` loop over `getCharAt`, or a sorting
+routine, may produce nonsense under the wrong setting while the bytes look
+identical. So it is author-declared only, and omitting it means "no
+constraint".
+
+Two validation rules:
+
+- An unrecognised value is rejected rather than ignored, because a typo that
+  silently degraded to "no constraint" is exactly what this field exists to
+  prevent.
+- `"char"` cannot be combined with a characterEncoding **known to be
+  single-byte**. The Genero runtime reports `FGL_LENGTH_SEMANTICS=CHAR` as
+  `BYTE` under a single-byte charmap, so such a declaration states a
+  constraint that no consumer environment could ever satisfy. Only charsets
+  `fglpkg` positively knows to be single-byte are rejected — the two halves of
+  Genero's own `$FGLDIR/etc/charmap.alias`. A multibyte charset such as `GBK`,
+  `GB18030`, `EUC-KR` or `Big5-HKSCS` is satisfiable and accepted, and a
+  charset `fglpkg` has never heard of is accepted too, because not
+  recognising a name is not evidence that it is single-byte.
+  `US-ASCII` is exempt, and that is the common case: `characterEncoding`
+  describes the package's **code**, and ASCII-7 code is a subset of every
+  charset including the multibyte ones, so it constrains no consumer charmap —
+  which is why `install` skips it. ASCII code that walks a UTF-8 `.42s` string
+  with `getCharAt` legitimately needs `"char"`, and a UTF-8 consumer satisfies
+  both.
+
+Note the interaction this implies: declaring `"char"` restricts your package to
+multibyte-charset consumers. That is sometimes exactly right, and sometimes an
+unintended lockout — an application on Informix uses BYTE semantics even under
+UTF-8, so a package pinned to `"char"` cannot be used there.
+
 ### 6.3 Entry points & runnable content
 
 #### `main` — string
@@ -924,6 +1062,9 @@ authority (see [§5](#5-parsing--validation-rules)).
 | `keywords` | string[] | No | Search/discovery tags. |
 | `visibility` | `"public"`\|`"private"` | No | Registry visibility (first publish only). |
 | `genero` | string | No | Genero runtime semver constraint. |
+| `characterEncoding` | string | No | IANA charset the compiled **code** carries. Recorded by `pack` only when the artifacts prove it; declare it otherwise. |
+| `stringResourceEncodings` | object | No | Charset of each `.42s` carrying non-ASCII text, per file. Derived by `pack`; advisory — `install` warns, never refuses. |
+| `lengthSemantics` | string | No | `"char"` or `"byte"` — the `FGL_LENGTH_SEMANTICS` a consumer must use. Author-declared only. |
 | `main` | string | No | Primary `.42m` entry point. |
 | `programs` | string[] | No | Modules with `MAIN`, runnable via `fglpkg bdl`. |
 | `webcomponents` | string[] | No | `COMPONENTTYPE` names provided. |

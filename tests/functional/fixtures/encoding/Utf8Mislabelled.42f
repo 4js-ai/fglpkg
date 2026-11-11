@@ -1,0 +1,12 @@
+<?xml version='1.0' encoding='ASCII'?>
+<Form name="Utf8Mislabelled" build="6.00.01" width="21" height="1">
+  <Grid width="21" height="1">
+    <Label text="Année" posY="0" posX="1" gridWidth="7"/>
+    <FormField name="formonly.annee" colName="annee" sqlType="VARCHAR" fieldId="0" sqlTabName="formonly" tabIndex="1">
+      <Edit width="11" posY="0" posX="9" gridWidth="11"/>
+    </FormField>
+  </Grid>
+  <RecordView tabName="formonly">
+    <Link colName="annee" fieldIdRef="0"/>
+  </RecordView>
+</Form>

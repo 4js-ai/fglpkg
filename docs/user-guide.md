@@ -24,6 +24,7 @@ This guide covers the day-to-day usage of fglpkg, the package manager for Genero
 - [Workspaces (Monorepos)](#workspaces-monorepos)
 - [Lock Files](#lock-files)
 - [Package Signature Verification](#package-signature-verification)
+- [Character Encoding Compatibility](#character-encoding-compatibility)
 - [Auditing dependencies for vulnerabilities](#auditing-dependencies-for-vulnerabilities)
 - [Software Bill of Materials (SBOM)](#software-bill-of-materials-sbom)
 - [Package Ownership](#package-ownership)
@@ -2197,6 +2198,114 @@ Under `require`, verification runs **before** the artifact is downloaded — the
 This matters for pipelines that retry. Under `require`, the **lock record** of an already-installed package is re-verified on every run, so a second attempt cannot accept what the first one refused. Note what that does and does not establish: the record is re-checked, but installed files are matched to it by package name, so it is not a proof that the files on disk are the version the lock names. (Under `warn` an already-installed package is not re-checked, since the warning was issued when it was installed; use `fglpkg audit signatures` to audit the store on demand.)
 
 `fglpkg install --no-verify-signature` skips verification for a single run (discouraged; for emergencies).
+
+## Character Encoding Compatibility
+
+`fglcomp` and `fglform` write string literals into `.42m`, `.42f` and `.42s` in the encoding of the **build locale**. A package compiled under UTF-8 and consumed under ISO-8859-15 therefore displays mojibake — and, less visibly but more dangerously, reports wrong string lengths. Nothing in the artifacts stops you installing such a package; it simply misbehaves at runtime.
+
+fglpkg records what a package was built with, and refuses a verified mismatch.
+
+### What `pack` records
+
+`fglpkg pack` records only what the staged artifacts **prove**, and leaves the field absent otherwise. Absent means `install` performs no check, which is what every package published before this feature already does.
+
+What each artifact can prove differs sharply, measured against Genero 6.00.01:
+
+| Artifact | What its bytes prove |
+|---|---|
+| `.42s` (string resource) | **Reliable.** An ASCII resource has no byte ≥ `0x80`, a UTF-8 one decodes as UTF-8, an 8-bit one does not. Identical whatever locale `fglmkstr` ran under. |
+| `.42m` (p-code) | **No high byte proves ASCII; a high byte proves nothing.** A `.42m`'s own structure contains bytes ≥ `0x80` — opcode operands, the embedded source-path length. Of 99 real modules compiled from pure-ASCII sources, only 21 had none. The file is byte-identical across build locales, so it records no charset of its own. |
+| `.42f` (compiled form) | **Reliable, like a `.42s`.** The form's content is its source's bytes copied through, so a byte scan classifies it. The XML prolog is not read at all: it names the **build locale** and never the content — the same UTF-8 `.per` compiled under `en_US.UTF-8`, `LANG=C` and `en_US.ISO8859-15` gives identical *text* bytes and prologs of `UTF-8`, `ASCII` and `ISO-8859-15` — and `fglrun` uses the form's bytes as stored whatever the prolog says. (The rest of the form is not identical: the build locale counts a label in characters or in bytes, so a `Café:` label gives form width 18 under UTF-8 and 19 under `C`. Only the text bytes are classified.) |
+
+From that, `characterEncoding` describes the package's **code** (`.42m` / `.42f`):
+
+| Evidence | Recorded |
+|---|---|
+| Every code artifact has no byte ≥ `0x80` | `US-ASCII` |
+| A form's high bytes decode as UTF-8 | `UTF-8` |
+| A pure-ASCII `.4gl` sits beside each `.42m` | `US-ASCII` — see below for what "pure-ASCII" has to mean |
+| Anything else | **nothing**, with a note naming the file and why |
+
+A `.42m` is the one artifact a byte scan cannot classify, so it is the one that needs its source. That source is what makes the ASCII practice provable, and `pack` checks it properly:
+
+- **`&include` files are followed**, recursively, because they put their text in the module too. A pure-ASCII `Hi.4gl` that does `&include "greet.inc"` on a UTF-8 `greet.inc` compiles to a `.42m` carrying that text. Every separator `fglcomp` accepts is recognized: a sweep of every ASCII byte through the three separator positions found exactly four — space, tab, form feed and carriage return — so an unusual spelling cannot slip an include past the scan. An include `pack` cannot find — `fglcomp` also searches its `-I` paths, which `pack` cannot know — proves nothing, so the value is left absent.
+- **A source much newer than its module proves nothing**, because it may not be the source the module was built from. Edit a `.4gl` to remove a literal and forget to recompile, and the old rule read the new source as proof about the old p-code. A source newer by a copy's margin is still believed: a checkout or a `cp -r` writes a tree in arbitrary order within one moment, while a forgotten rebuild is minutes or hours apart.
+
+When you pack from a build tree the sources are there; when you pack a dist directory they are not, and an all-ASCII package then simply records nothing rather than being guessed at.
+
+`pack` never consults your shell. An earlier version fell back to `fglrun -i` when the bytes were undecidable — which, given the measurements above, was most packages. Byte-identical artifacts then installed everywhere when packed under `LANG=C` and were refused by ISO-8859-15 consumers when packed under `en_US.UTF-8`. Recording nothing is the honest answer.
+
+String resources are recorded **per file**, because a package may ship one `.42s` per language and charset:
+
+```jsonc
+{
+  "characterEncoding": "US-ASCII",
+  "stringResourceEncodings": {
+    "res/Messages.utf8.42s": "UTF-8",
+    "res/Messages.latin9.42s": "ISO-8859-15"
+  }
+}
+```
+
+An ASCII resource constrains nothing and is omitted. Only a declaration can tell `ISO-8859-1` from `ISO-8859-15`, so declare an entry for a resource whose 8-bit charset the bytes cannot name.
+
+If you declare `characterEncoding`, `pack` cross-checks it — but only against a contradiction it can actually **prove**, which is a form whose own bytes decode as UTF-8 under a declaration that is not UTF-8:
+
+```console
+$ fglpkg pack
+error: declared characterEncoding "ISO-8859-15" contradicts the package's artifacts:
+  the text in forms/Login.42f decodes as UTF-8
+```
+
+A prolog that contradicts the form's content is neither acted on nor reported. `fglrun` reads a form's bytes as stored — measured with a form holding `Café crème`, built under three locales and run under two — and the front ends never see the file at all, since `fglrun` parses it and sends them an AUI tree. (A *generic* XML parser is a different matter: `encoding='ASCII'` over UTF-8 bytes is not well-formed XML. No Genero tool reads a `.42f` that way.)
+
+Declaring `US-ASCII` for a package whose p-code happens to contain a structure high byte is **correct and accepted**; so is declaring it beside a UTF-8 `.42s`, because that field describes the code.
+
+### What `install` enforces
+
+```console
+$ fglpkg install acme-widget
+error: acme-widget is not compatible with this Genero environment:
+  - built with character encoding ISO-8859-15, but this environment uses UTF-8
+  Install it under a matching environment, or run 'fglpkg install --force-character-encoding' to install anyway (at your own risk).
+```
+
+Deliberately quiet, or advisory:
+
+- **`US-ASCII` is never checked.** ASCII-7 is a subset of every charset Genero supports, so such a package is portable by construction.
+- **A package that declares nothing installs without comment.**
+- **A string resource mismatch warns; it never refuses.** A `.42s` is used as its bytes stand, with no transcoding, so a mismatch is real — a UTF-8 resource under an ISO-8859-15 runtime shows raw bytes and reports length 12 for a 10-character string. But a package may ship a resource per charset for you to select at runtime, so refusing the whole package would block a consumer who was going to use a different one:
+
+```console
+$ fglpkg install acme-widget
+warning: acme-widget ships string resources this environment (UTF-8) cannot read correctly:
+  - res/Messages.latin9.42s is ISO-8859-15
+  Text from those files will display incorrectly and report the wrong length. Select a resource file matching your charmap, or rebuild the .str under it.
+```
+
+- **An environment `fglpkg` cannot read warns rather than refusing.** Where `fglrun` is absent — a build container that only vendors packages — the declaration is advisory until a program actually runs.
+
+### Best practice for a published package
+
+**Keep your `.4gl` and `.per` sources pure ASCII-7 — including anything they `&include`** — and put translatable text in `.str` / `.42s` string resources, in whichever languages and encodings you need, letting the consumer select them at runtime.
+
+Following that is what `pack` can prove: with the sources staged beside the artifacts it records `characterEncoding: "US-ASCII"`, which `install` never checks, and names each localized resource separately so a consumer is warned about the one file that does not match instead of being refused the package.
+
+Two things will cost you the proof, and `pack` says which on stderr: a non-ASCII `&include` that the source pulls in, and a source left newer than the module it was supposed to produce. Recompile, or declare `characterEncoding` yourself.
+
+### Length semantics
+
+`lengthSemantics` (`"char"` or `"byte"`) declares the `FGL_LENGTH_SEMANTICS` a consumer must use. Unlike the encoding it cannot be derived — it is a property of your code's behaviour, not its bytes. A loop over `getCharAt`, or a sorting routine, can produce nonsense under the wrong setting while the bytes look identical.
+
+Declare it only when your code genuinely depends on it. It restricts who can use the package: an application on Informix uses BYTE semantics even under UTF-8, so a package pinned to `"char"` cannot be used there. Omitting it means "no constraint", which is the right answer for most packages.
+
+Note that `"char"` cannot be combined with a single-byte `characterEncoding` such as `ISO-8859-15` — the runtime reports `CHAR` as `BYTE` under a single-byte charmap, so the combination could never be satisfied, and `pack` rejects it.
+
+`US-ASCII` is the exception, and it is the common case: that field describes your **code**, and ASCII-7 code is a subset of every charset including the multibyte ones, so it constrains no consumer charmap — which is why `install` skips it. ASCII code that walks a UTF-8 `.42s` string with `getCharAt` genuinely needs `"char"`, and a UTF-8 consumer satisfies both.
+
+### Testing and CI
+
+`FGLPKG_CHARMAP` and `FGLPKG_LENGTH_SEMANTICS` override detection, mirroring `FGLPKG_GENERO_VERSION`. With both set, `fglrun` is never run, so a build container with no Genero toolchain can still pack and install.
 
 ## Auditing dependencies for vulnerabilities
 
