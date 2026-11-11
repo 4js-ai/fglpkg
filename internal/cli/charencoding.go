@@ -41,21 +41,56 @@ import (
 //	      a high byte        -> nothing; ask the .4gl SOURCE beside it
 //	.42f  no high byte       -> its text is ASCII, whatever the prolog says
 //	      high bytes, UTF-8  -> its text is UTF-8
-//	      high bytes, 8-bit  -> nothing; the prolog is only a note
+//	      high bytes, 8-bit  -> nothing; bytes cannot name an 8-bit charset
 //	.42s  byte scan          -> reliable, and recorded per file (see below)
 //
 // A .42m is the one artifact whose bytes cannot classify it, so it is the one
 // that needs the source. A .42f is decided by its own bytes, which is why no
 // .per is consulted: a .per and its includes that are all ASCII cannot produce
 // a form with a high byte, so that rule could never fire.
+//
+// The prolog is not read at all, not even to warn about. An earlier revision
+// printed a note when it contradicted the form's bytes, on the theory that a
+// front end honouring it would mis-read the form. Measured: a SCREEN form
+// holding `Café crème`, built under en_US.UTF-8, LANG=C and en_US.ISO8859-15
+// (prologs UTF-8, ASCII, ISO-8859-15) and run in text mode under UTF-8 and
+// ISO-8859-15 runtimes, wrote the form's bytes as stored in all six runs —
+// no transcoding where the prolog agreed, no error where it did not. The
+// front ends never see the file either; fglrun parses it and sends an AUI
+// tree. So the note fired on every pack of a UTF-8 form built from a
+// non-UTF-8 shell and advised a rebuild that changes nothing a Genero
+// consumer can observe.
+//
+// What the prolog does still decide is whether a GENERIC XML parser can read
+// the file: encoding='ASCII' over UTF-8 bytes is not well-formed and is
+// rejected outright, and encoding='ISO-8859-15' over them decodes to mojibake
+// (both measured with expat). No Genero tool reads a .42f that way, so that
+// is recorded in specs/character-encoding.md rather than warned about here.
 
-// includeRe matches a Genero preprocessor include. The directive must be the
-// FIRST token on its line — verified against fglcomp 6.00.01: `DISPLAY "x"
-// &include "f"` is error -6609, a commented `# &include "f"` is ignored, and so
-// is one inside a string literal. Anchoring here keeps those three out without
-// writing a BDL lexer. The spelling is lower-case (`&INCLUDE` is error -8053)
-// and either quote is accepted.
-var includeRe = regexp.MustCompile(`^[ \t]*&include[ \t]+["']([^"']+)["']`)
+// includeRe matches a Genero preprocessor include. Every spelling fglcomp
+// accepts has to match: a missed one silently records US-ASCII for a module
+// that carries the include's text, while an extra match only costs the value.
+// So the matcher errs wide, and the shape of "wide" is measured rather than
+// guessed — each line below was compiled with fglcomp 6.00.01 from an ASCII
+// source including a UTF-8 file, and the .42m then searched for that text:
+//
+//	&include "f"   &include"f"   & include "f"   &<TAB>include "f"
+//	&<FF>include "f"   &   include   "f"   &include<TAB>"f"   &include 'f'
+//	&include "f"  # trailing comment        <FF> before the &
+//	                              -> directive; the text reaches the .42m
+//	<VT> before the &             -> error -6609
+//	&<VT>include "f"              -> error -8102
+//	& <newline> include "f"       -> error -8102 (one line only)
+//	&include f    &include <f>    -> error -8102 (quotes required)
+//	&INCLUDE "f"                  -> error -8053 (lower case only)
+//	DISPLAY "x" &include "f"      -> error -6609 (first token on its line)
+//	# &include "f"                -> compiles; not a directive
+//	DISPLAY "&include \"f\""      -> compiles; not a directive
+//
+// So the separator class is space, tab and form feed — not vertical tab — and
+// anchoring at the line start keeps the comment and the string literal out
+// without writing a BDL lexer.
+var includeRe = regexp.MustCompile(`^[ \t\f]*&[ \t\f]*include[ \t\f]*["']([^"']+)["']`)
 
 // maxIncludeDepth bounds the include walk. Genero rejects a cycle itself; this
 // only stops a pathological tree from costing a pack more than it is worth.
@@ -178,8 +213,8 @@ func scanEncoding(staged map[string]string) (encodingEvidence, error) {
 		if ext == ".42f" {
 			// A form's content is its source's bytes copied through, so the
 			// form's OWN bytes classify it, exactly as a .42s is classified.
-			// The prolog is reported but never believed.
-			noteFormProlog(ap, data, tier)
+			// The XML prolog is not read at all — see the note above on why
+			// it has no reader to warn an author about.
 			if tier == charmap.TierUTF8 {
 				if ev.codeEnc == "" {
 					ev.codeEnc, ev.codeFile = charmap.UTF8, ap
@@ -210,34 +245,6 @@ func (e *encodingEvidence) noteUnproven(archivePath, why string) {
 		return
 	}
 	e.unprovenFile, e.unprovenWhy = archivePath, why
-}
-
-// noteFormProlog reports a compiled form whose XML prolog disagrees with its
-// own content. The prolog names the shell fglform ran under, so a form
-// carrying UTF-8 text built under LANG=C declares ASCII. fglpkg ignores it for
-// derivation, but a front end that honours the prolog would mis-read such a
-// form for EVERY consumer, which the author can only fix by rebuilding.
-func noteFormProlog(archivePath string, data []byte, tier charmap.Tier) {
-	prolog := charmap.PrologEncoding(data)
-	if prolog == "" {
-		return
-	}
-	switch {
-	case tier == charmap.TierUTF8 && !charmap.Equal(prolog, charmap.UTF8):
-		fmt.Fprintf(os.Stderr,
-			"note: %s carries UTF-8 text but its XML prolog declares %s. The prolog records "+
-				"the locale fglform ran under, not the file's content, so fglpkg ignores it "+
-				"here.\n"+
-				"  Rebuild the form under a UTF-8 locale if your front end honours the prolog.\n",
-			archivePath, prolog)
-	case tier != charmap.TierUTF8 && charmap.Equal(prolog, charmap.ASCII):
-		fmt.Fprintf(os.Stderr,
-			"note: %s contains bytes >= 0x80 but its XML prolog declares %s, so the prolog "+
-				"cannot be describing it. It records the locale fglform ran under.\n"+
-				"  Rebuild the form under the locale its text is written in if your front end "+
-				"honours the prolog.\n",
-			archivePath, prolog)
-	}
 }
 
 // sourceProvesASCII reports whether the .4gl that produced a .42m establishes
@@ -290,7 +297,7 @@ func fileProvesASCII(path string, artifactTime time.Time, seen map[string]bool, 
 	// better than no source at all.
 	mt, err := modTime(path)
 	if err != nil {
-		return false, fmt.Sprintf("%s was not staged beside it", filepath.Base(path))
+		return false, fmt.Sprintf("%s was not found beside it", filepath.Base(path))
 	}
 	if mt.Sub(artifactTime) > staleSourceGrace {
 		return false, fmt.Sprintf(

@@ -3,7 +3,6 @@ package charmap
 import (
 	"bytes"
 	"io"
-	"strings"
 	"testing"
 )
 
@@ -78,37 +77,6 @@ func TestClassifyReaderOneByteAtATime(t *testing.T) {
 	}
 	if got != TierUTF8 {
 		t.Fatalf("byte-at-a-time UTF-8 classified as %v, want %v", got, TierUTF8)
-	}
-}
-
-func TestPrologEncoding(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-		want string
-	}{
-		// The three prologs the spec measured from fglform.
-		{"fglform utf-8", `<?xml version='1.0' encoding='UTF-8'?><Form/>`, "UTF-8"},
-		{"fglform iso-8859-15", `<?xml version='1.0' encoding='ISO-8859-15'?><Form/>`, "ISO-8859-15"},
-		{"fglform ascii canonicalized", `<?xml version='1.0' encoding='ASCII'?><Form/>`, ASCII},
-		{"double quotes", `<?xml version="1.0" encoding="UTF-8"?><Form/>`, "UTF-8"},
-		{"spaces around equals", `<?xml version='1.0' encoding = 'UTF-8'?><Form/>`, "UTF-8"},
-		{"lowercase name canonicalized", `<?xml version='1.0' encoding='utf-8'?>`, "UTF-8"},
-		{"with byte order mark", "\xef\xbb\xbf<?xml version='1.0' encoding='UTF-8'?>", "UTF-8"},
-		{"no encoding attribute", `<?xml version='1.0'?><Form/>`, ""},
-		{"no prolog at all", `<Form/>`, ""},
-		{"empty", ``, ""},
-		// A .42m is a binary container. If the declaration is not at the very
-		// start it is not a declaration, and a p-code file that happens to
-		// contain these bytes further in must not be read as a form.
-		{"prolog not at start", strings.Repeat("\x00", 600) + `<?xml version='1.0' encoding='UTF-8'?>`, ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := PrologEncoding([]byte(tc.in)); got != tc.want {
-				t.Errorf("PrologEncoding(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
 	}
 }
 

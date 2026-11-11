@@ -24,14 +24,14 @@
 //     LANG=C and en_US.ISO8859-15 gives byte-identical form content and
 //     prologs of UTF-8, ASCII and ISO-8859-15 — so a prolog cannot classify a
 //     form even when the form really does carry non-ASCII text. A .42f is a
-//     clean container like a .42s and is classified by its own bytes;
-//     PrologEncoding exists only to report a prolog that contradicts them.
+//     clean container like a .42s and is classified by its own bytes. Nothing
+//     here reads the prolog: measured, fglrun uses a form's bytes as stored
+//     whatever the prolog says, so there is no decision it could inform.
 package charmap
 
 import (
 	"bytes"
 	"io"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -190,39 +190,6 @@ func IsKnownMultibyte(name string) bool {
 		return false
 	}
 	return multibyteNames[strings.ToLower(c)]
-}
-
-// prologRe matches the encoding pseudo-attribute of an XML declaration, in
-// either quoting style. fglform writes single quotes, but the XML spec allows
-// both and nothing guarantees the form was produced by fglform.
-var prologRe = regexp.MustCompile(`^<\?xml\s[^>]*?encoding\s*=\s*['"]([^'"]+)['"]`)
-
-// prologScanLimit caps how far PrologEncoding looks for the XML declaration.
-// The declaration must be the very first thing in the document, so a short
-// window is enough and a binary file that happens to contain the bytes later
-// on cannot be mistaken for a form.
-const prologScanLimit = 512
-
-// PrologEncoding returns the encoding named by a compiled form's XML
-// declaration, canonicalized, or "" when there is none.
-//
-// This is NOT the form's encoding. fglform writes the BUILD LOCALE there,
-// spelled as an IANA name: the same UTF-8 .per yields prologs of UTF-8, ASCII
-// or ISO-8859-15 with identical form content. Callers classify a form by its
-// bytes and use this only to report a prolog that contradicts them, which a
-// front end honouring the prolog would act on.
-func PrologEncoding(data []byte) string {
-	head := data
-	if len(head) > prologScanLimit {
-		head = head[:prologScanLimit]
-	}
-	// A BOM before the declaration is legal and does not change the answer.
-	head = bytes.TrimPrefix(head, []byte{0xEF, 0xBB, 0xBF})
-	m := prologRe.FindSubmatch(head)
-	if m == nil {
-		return ""
-	}
-	return Canonical(string(m[1]))
 }
 
 // chunkSize is the read granularity of ClassifyReader. A UTF-8 sequence can

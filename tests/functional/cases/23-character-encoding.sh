@@ -130,8 +130,12 @@ _enc_pack_form_prolog_never_overrides_the_bytes() {
   assert_success || return 1
   unzip -p p.zip fglpkg.json > shipped.json || return 1
   assert_file_contains shipped.json '"characterEncoding": "UTF-8"' || return 1
-  # The disagreement still matters to a front end that honours the prolog.
-  assert_contains "prolog" || return 1
+  # Nor is the disagreement reported. fglrun uses a form's bytes as stored
+  # whatever the prolog says (measured over three build locales and two
+  # runtime locales), and the front ends never read the file, so a note here
+  # would fire on every UTF-8 form built from a non-UTF-8 shell and ask for a
+  # rebuild that changes nothing.
+  assert_not_contains "prolog" || return 1
 }
 it "a form's prolog never overrides what its bytes say" _enc_pack_form_prolog_never_overrides_the_bytes
 
@@ -164,6 +168,23 @@ _enc_pack_include_defeats_an_ascii_source() {
   assert_contains "IncUtf8.inc" || return 1
 }
 it "a UTF-8 &include stops a pure-ASCII source proving anything" _enc_pack_include_defeats_an_ascii_source
+
+# fglcomp accepts the directive without the space, and with a space, tab or
+# form feed between the & and `include`. IncTight.4gl is IncUtf8.4gl written
+# `&include"IncTight.inc"`, compiled for real. A matcher that wants
+# `&include ` records US-ASCII here for a module carrying UTF-8 text, and
+# install never checks a US-ASCII package — so the miss is silent.
+_enc_pack_include_without_a_space_is_still_an_include() {
+  export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
+  _mkpkg_enc
+  _enc_fixture IncTight.42m IncTight.4gl IncTight.inc || return 1
+  run pack -o p.zip
+  assert_success || return 1
+  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  assert_file_not_contains shipped.json 'characterEncoding' || return 1
+  assert_contains "IncTight.inc" || return 1
+}
+it "&include with no space is still an include" _enc_pack_include_without_a_space_is_still_an_include
 
 # ...and an include that IS pure ASCII must not cost the package its value, or
 # following includes would simply disable the rule for every module using one.

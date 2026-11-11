@@ -2215,7 +2215,7 @@ What each artifact can prove differs sharply, measured against Genero 6.00.01:
 |---|---|
 | `.42s` (string resource) | **Reliable.** An ASCII resource has no byte ≥ `0x80`, a UTF-8 one decodes as UTF-8, an 8-bit one does not. Identical whatever locale `fglmkstr` ran under. |
 | `.42m` (p-code) | **No high byte proves ASCII; a high byte proves nothing.** A `.42m`'s own structure contains bytes ≥ `0x80` — opcode operands, the embedded source-path length. Of 99 real modules compiled from pure-ASCII sources, only 21 had none. The file is byte-identical across build locales, so it records no charset of its own. |
-| `.42f` (compiled form) | **Reliable, like a `.42s` — but ignore the prolog.** The form's content is its source's bytes copied through, so a byte scan classifies it. The XML prolog names the **build locale** and never the content: the same UTF-8 `.per` compiled under `en_US.UTF-8`, `LANG=C` and `en_US.ISO8859-15` gives byte-identical form content and prologs of `UTF-8`, `ASCII` and `ISO-8859-15`. |
+| `.42f` (compiled form) | **Reliable, like a `.42s`.** The form's content is its source's bytes copied through, so a byte scan classifies it. The XML prolog is not read at all: it names the **build locale** and never the content — the same UTF-8 `.per` compiled under `en_US.UTF-8`, `LANG=C` and `en_US.ISO8859-15` gives byte-identical form content and prologs of `UTF-8`, `ASCII` and `ISO-8859-15` — and `fglrun` uses the form's bytes as stored whatever the prolog says. |
 
 From that, `characterEncoding` describes the package's **code** (`.42m` / `.42f`):
 
@@ -2228,7 +2228,7 @@ From that, `characterEncoding` describes the package's **code** (`.42m` / `.42f`
 
 A `.42m` is the one artifact a byte scan cannot classify, so it is the one that needs its source. That source is what makes the ASCII practice provable, and `pack` checks it properly:
 
-- **`&include` files are followed**, recursively, because they put their text in the module too. A pure-ASCII `Hi.4gl` that does `&include "greet.inc"` on a UTF-8 `greet.inc` compiles to a `.42m` carrying that text. An include `pack` cannot find — `fglcomp` also searches its `-I` paths, which `pack` cannot know — proves nothing, so the value is left absent.
+- **`&include` files are followed**, recursively, because they put their text in the module too. A pure-ASCII `Hi.4gl` that does `&include "greet.inc"` on a UTF-8 `greet.inc` compiles to a `.42m` carrying that text. Every separator `fglcomp` accepts is recognized — `&include"f"`, `& include "f"`, and a tab or form feed in place of either space — so an unusual spelling cannot slip an include past the scan. An include `pack` cannot find — `fglcomp` also searches its `-I` paths, which `pack` cannot know — proves nothing, so the value is left absent.
 - **A source much newer than its module proves nothing**, because it may not be the source the module was built from. Edit a `.4gl` to remove a literal and forget to recompile, and the old rule read the new source as proof about the old p-code. A source newer by a copy's margin is still believed: a checkout or a `cp -r` writes a tree in arbitrary order within one moment, while a forgotten rebuild is minutes or hours apart.
 
 When you pack from a build tree the sources are there; when you pack a dist directory they are not, and an all-ASCII package then simply records nothing rather than being guessed at.
@@ -2257,14 +2257,7 @@ error: declared characterEncoding "ISO-8859-15" contradicts the package's artifa
   the text in forms/Login.42f decodes as UTF-8
 ```
 
-A prolog that contradicts the form's content is reported but never acted on, because it changes nothing fglpkg can check — though it matters to a front end that honours it:
-
-```console
-$ fglpkg pack
-note: forms/Login.42f carries UTF-8 text but its XML prolog declares ASCII. The prolog
-records the locale fglform ran under, not the file's content, so fglpkg ignores it here.
-  Rebuild the form under a UTF-8 locale if your front end honours the prolog.
-```
+A prolog that contradicts the form's content is neither acted on nor reported. `fglrun` reads a form's bytes as stored — measured with a form holding `Café crème`, built under three locales and run under two — and the front ends never see the file at all, since `fglrun` parses it and sends them an AUI tree. (A *generic* XML parser is a different matter: `encoding='ASCII'` over UTF-8 bytes is not well-formed XML. No Genero tool reads a `.42f` that way.)
 
 Declaring `US-ASCII` for a package whose p-code happens to contain a structure high byte is **correct and accepted**; so is declaring it beside a UTF-8 `.42s`, because that field describes the code.
 

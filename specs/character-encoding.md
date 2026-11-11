@@ -32,11 +32,24 @@ author did write, and gate consumption on a *verified* mismatch only.
 >
 > 1. The second design kept the `.42f` prolog as evidence *once the form carried a high byte*. It
 >    is not evidence then either — the prolog is the build locale whatever the form holds — so a
->    form is now classified by its own bytes and the prolog is only reported.
+>    form is now classified by its own bytes. (The prolog was at this point still reported as a
+>    note; the third revision below drops that too.)
 > 2. "A pure-ASCII source proves the artifact ASCII" fails for `&include` files and for a source
 >    edited after the build, so both are now checked.
 > 3. `Validate()` rejected `US-ASCII` + `lengthSemantics: "char"`, a pair `pack` itself now writes
 >    for the recommended practice. `US-ASCII` is exempt from that rule.
+>
+> **Revised a third time 2026-11-11 (PR #107 re-review).** Two of those three corrections were
+> themselves incomplete, and open question 3 is now answered:
+>
+> 1. The include matcher required `&include` followed by whitespace. `fglcomp` accepts six further
+>    separator spellings, each of which puts the include's text in the `.42m`, so the matcher now
+>    allows space, tab or form feed on either side of the `&`. A missed spelling records
+>    `US-ASCII` for a module that is not, which `install` then never checks — the only silent
+>    failure mode in the derivation.
+> 2. The prolog note is gone. `fglrun` uses a form's bytes as stored whatever the prolog says
+>    (measured, below), and the front ends never read the file, so the note had no reader to warn
+>    and fired on every UTF-8 form built from a non-UTF-8 shell.
 
 ## Background — what the artifacts actually contain
 
@@ -79,9 +92,30 @@ high byte*. It is not. Compiling a `.per` whose label really is `Café crème` (
 | `en_US.ISO8859-15` | `ISO-8859-15` | `Caf\xc3\xa9 cr\xc3\xa8me` (identical) |
 
 The content is the source's bytes copied through, byte-for-byte, in all three; only the prolog
-moves. So a `.42f` is a clean container like a `.42s` and must be classified by its own bytes. The
-prolog still matters to a *front end* that honours it — a UTF-8 form built under `LANG=C` would be
-mis-read for every consumer — so a prolog that contradicts the content is reported as a note.
+moves. So a `.42f` is a clean container like a `.42s` and must be classified by its own bytes.
+
+### Nothing in Genero reads the prolog
+
+The second revision still reported a contradicting prolog as a note, on the theory that a front end
+honouring it would mis-read the form. Measured, that theory does not hold. A `SCREEN` form holding
+`Café crème` was built under three locales (prologs `UTF-8`, `ASCII`, `ISO-8859-15`) and run in text
+mode (`FGLGUI=0`) under `en_US.UTF-8` and `en_US.ISO8859-15` runtimes — six runs:
+
+| | Prolog agrees with the bytes | Prolog says `ASCII` over UTF-8 bytes | Prolog says `ISO-8859-15` over them |
+|---|---|---|---|
+| UTF-8 runtime | bytes as stored | bytes as stored, no error | bytes as stored, no error |
+| ISO-8859-15 runtime | bytes as stored | bytes as stored, no error | bytes as stored, no error |
+
+`Caf\xc3\xa9` came out of all six. There is no transcoding where the prolog agrees and no complaint
+where it does not. Nor can a front end act on it: GDC and GBC never receive the file — `fglrun`
+parses the `.42f` and sends them an AUI tree — so the prolog has no reader in the Genero toolchain
+and `fglpkg` ignores it completely.
+
+It does decide one thing, for a reader outside Genero: a `.42f` is XML, and `encoding='ASCII'` over
+UTF-8 bytes is **not well-formed**, so a conformant parser rejects the file outright, while
+`encoding='ISO-8859-15'` over them decodes to mojibake (both measured with expat; only the UTF-8
+build round-trips). That is recorded here rather than warned about, because no Genero tool reads a
+`.42f` that way.
 
 ### A pure-ASCII `.4gl` does not always prove a pure-ASCII `.42m`
 
@@ -215,12 +249,31 @@ Run over the staged tree, after `stageBDLFiles`.
 
 1. No byte >= 0x80 → **ASCII**. For a `.42f` this settles it regardless of the prolog.
 2. A `.42f` with high bytes that decode as UTF-8 → **`UTF-8`**; high bytes that do not → *unproven*
-   (bytes cannot tell `ISO-8859-1` from `-15`). The prolog is never consulted for the value; a
-   prolog contradicting the content is reported as a note.
+   (bytes cannot tell `ISO-8859-1` from `-15`). The prolog is not read at all — not for the value
+   and not for a note.
 3. A `.42m` with high bytes → look for the **`.4gl` beside it**, and walk its `&include` tree. All
    pure ASCII, none newer than the artifact by more than a minute → **ASCII**. This is what makes
    the documented practice provable; the p-code cannot do it. A `.per` is never consulted, because
    a `.per` and its includes that are all ASCII cannot produce a form with a high byte.
+
+   The include matcher errs **wide** on purpose: a spelling it misses records `US-ASCII` for a
+   module carrying the include's text, which `install` never checks, while a false match only costs
+   the derived value. Measured against `fglcomp` 6.00.01, each row compiled from an ASCII source
+   including a UTF-8 file:
+
+   | Written | `fglcomp` |
+   |---|---|
+   | `&include "f"`, `&include"f"`, `& include "f"`, `&<TAB>include "f"`, `&<FF>include "f"`, `&   include   "f"`, `&include<TAB>"f"`, `&include 'f'`, trailing comment, leading `<FF>` | directive; the text reaches the `.42m` |
+   | leading `<VT>` | error `-6609` |
+   | `&<VT>include "f"` | error `-8102` |
+   | `&` newline `include "f"` | error `-8102` (one line only) |
+   | `&include f`, `&include <f>` | error `-8102` (quotes required) |
+   | `&INCLUDE "f"` | error `-8053` (lower case only) |
+   | `DISPLAY "x" &include "f"` | error `-6609` (first token on its line) |
+   | `# &include "f"`, `DISPLAY "&include \"f\""` | compiles; not a directive |
+
+   So the separator class is space, tab and form feed — not vertical tab — and anchoring at the
+   line start keeps the comment and the string literal out without a BDL lexer.
 4. Otherwise → **unproven**.
 
 Then: every code artifact ASCII → `US-ASCII`; a form proved an encoding and nothing is unproven →
@@ -294,18 +347,20 @@ structure high byte, a tiny one whose p-code is clean, a module with a genuine U
 pure-ASCII form built under UTF-8 (prolog `UTF-8`, no high bytes), a form really carrying UTF-8
 text, the *same* form compiled under `LANG=C` so its prolog says `ASCII` while its bytes do not, a
 form carrying 8-bit non-UTF-8 text, a pure-ASCII module with a pure-ASCII `&include`, a pure-ASCII
-module with a UTF-8 `&include`, and ASCII / UTF-8 / Latin-9 resource files. Each artifact is kept
+module with a UTF-8 `&include`, the same UTF-8 include written `&include"f"` with no space, and
+ASCII / UTF-8 / Latin-9 resource files. Each artifact is kept
 beside its source and that source's includes.
 
 Unit: the three-tier byte classifier (empty, pure ASCII, valid UTF-8, invalid UTF-8, a UTF-8 sequence
-split across a read boundary); prolog parsing; IANA comparison; the single-byte/multibyte/unknown
-split; `Validate()`.
+split across a read boundary); the include matcher against the measured `fglcomp` table above; IANA
+comparison; the single-byte/multibyte/unknown split; `Validate()`.
 
 Functional: pack proves `US-ASCII` from a source beside real p-code; records nothing without
 evidence; records the same thing under every `FGLPKG_CHARMAP`; a pure-ASCII form with a UTF-8 prolog
 is `US-ASCII`; a form with real non-ASCII text takes its *bytes*, and its prolog never overrides
 them; an 8-bit form records nothing; a UTF-8 `&include` costs a pure-ASCII source its proof while an
-ASCII one does not; a source newer than its module proves nothing; ASCII code plus a UTF-8 `.42s`
+ASCII one does not, and so does one written `&include"f"` with no space; a source newer than its
+module proves nothing; ASCII code plus a UTF-8 `.42s`
 stays portable with the resource named; `US-ASCII` + `"char"` packs and reads back; a correct
 `US-ASCII` declaration survives real p-code, a UTF-8 prolog and a `.42s`; a contradicted declaration
 fails; install refuses a code mismatch, accepts `--force-character-encoding`, warns on a resource
@@ -334,8 +389,10 @@ assumed.
    source-only semantics land.
 2. Should the registry index `characterEncoding` so `search` can filter to packages compatible with
    the caller's charmap? Server-side; out of scope here.
-3. Does the Genero runtime transcode a `.42f` according to its XML prolog? Untestable here — it
-   needs a front end. If it does, a form needs no consumer-side check at all and the one surviving
-   cross-check could go; if it does not, the prolog note is the only thing that can warn an author
-   that a form built under the wrong locale is mis-labelled for every consumer. Worth asking the
-   runtime team.
+3. ~~Does the Genero runtime transcode a `.42f` according to its XML prolog?~~ **Answered
+   2026-11-11: no.** Six text-mode runs (three build locales × two runtime locales) wrote the
+   form's bytes as stored, with no transcoding where the prolog agreed and no error where it did
+   not — see "Nothing in Genero reads the prolog" above. So the consumer-side check on forms is
+   justified (the bytes are what reaches the user, and they must match the consumer's charmap),
+   and the prolog note was removed. GDC and GBC were not run, but they never receive the file:
+   `fglrun` parses it and sends an AUI tree.

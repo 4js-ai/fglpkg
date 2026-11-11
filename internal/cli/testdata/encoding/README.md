@@ -12,6 +12,7 @@ proven ASCII by its source rather than by its own bytes.
 | `Utf8Lit.42m` | 4 | A genuine UTF-8 string literal. Indistinguishable from `AsciiBig.42m` by bytes, which is the point. |
 | `IncAscii.42m` + `.4gl` + `.inc` | 1 | A pure-ASCII module whose source `&include`s a pure-ASCII file. Following includes must not cost this package its `US-ASCII`. |
 | `IncUtf8.42m` + `.4gl` + `.inc` | 4 | The same shape with a **UTF-8** include. `IncUtf8.4gl` has no high byte, yet the module carries `€` — so the source alone is not proof. |
+| `IncTight.42m` + `.4gl` + `.inc` | 5 | The same UTF-8 include written `&include"IncTight.inc"`, with no space. fglcomp accepts that and six other separator spellings; a matcher that wants `&include ` misses them and records `US-ASCII` for a module carrying `€`. |
 | `AsciiForm.42f` | 0 | A **pure-ASCII** form built under `en_US.UTF-8`, so its prolog says `UTF-8`. The prolog names the build locale, not the content. |
 | `Utf8Form.42f` | 2 | A form that really carries UTF-8 text, built under `en_US.UTF-8` (prolog `UTF-8`). |
 | `Utf8Mislabelled.42f` | 2 | **The same `.per`** compiled under `LANG=C`: identical UTF-8 content, prolog `ASCII`. Proves the prolog cannot classify a form even when the form does carry non-ASCII text. |

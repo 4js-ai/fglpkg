@@ -175,6 +175,27 @@ func TestRecordEncoding_IncludeFileDefeatsAPureASCIISource(t *testing.T) {
 	}
 }
 
+// The same thing written without the space fglcomp does not require.
+// IncTight.4gl is IncUtf8.4gl with `&include"IncTight.inc"`, compiled for real:
+// no high byte in the source, `€` in the .42m. A matcher built around
+// `&include ` + whitespace misses this and records US-ASCII, which install
+// then never checks — the one failure mode of this scan that is silent.
+func TestRecordEncoding_IncludeWithNoSpaceIsStillAnInclude(t *testing.T) {
+	staged := stageFixtures(t, "IncTight.42m")
+	m := &manifest.Manifest{}
+	out, err := captureStderr(t, func() error { return recordEncoding(m, staged) })
+	if err != nil {
+		t.Fatalf("recordEncoding: %v", err)
+	}
+	if m.CharacterEncoding != "" {
+		t.Errorf("CharacterEncoding = %q, want it absent: `&include\"f\"` is an include too",
+			m.CharacterEncoding)
+	}
+	if !strings.Contains(out, "IncTight.inc") {
+		t.Errorf("the note must name the include that defeated the proof, got: %s", out)
+	}
+}
+
 // ...and an include that IS pure ASCII must not cost the package its value,
 // or following includes would simply disable the rule for every module that
 // uses one.
@@ -303,10 +324,16 @@ func TestRecordEncoding_FormPrologNeverOverridesTheBytes(t *testing.T) {
 		t.Fatalf("CharacterEncoding = %q, want %q: the bytes are UTF-8 whatever the prolog says",
 			m.CharacterEncoding, charmap.UTF8)
 	}
-	// The disagreement still matters to a front end that honours the prolog,
-	// so it is reported even though it changes nothing here.
-	if !strings.Contains(out, "Utf8Mislabelled.42f") || !strings.Contains(out, "prolog") {
-		t.Errorf("a prolog contradicting the content must be reported, got: %s", out)
+	// And it is not reported either. An earlier revision printed a note here,
+	// on the theory that a front end honouring the prolog would mis-read the
+	// form. Measured instead: this same .per built under three locales and run
+	// in text mode under UTF-8 and ISO-8859-15 runtimes wrote its bytes as
+	// stored in all six runs, and the front ends never read the file at all —
+	// fglrun parses it and sends an AUI tree. A note with no reader behind it
+	// fires on every pack of a UTF-8 form built from a non-UTF-8 shell and
+	// asks for a rebuild that changes nothing.
+	if strings.Contains(out, "prolog") {
+		t.Errorf("the prolog has no Genero reader, so it must not be reported: %s", out)
 	}
 }
 
@@ -552,11 +579,15 @@ func TestScanEncoding_NamesAStableFile(t *testing.T) {
 	}
 }
 
-// The include scanner must match what fglcomp treats as a directive, or it
-// chases filenames out of comments and string literals and declines to prove
-// packages that are fine. Verified against fglcomp 6.00.01: the directive is
-// lower-case, takes either quote, and must be the FIRST token on its line.
+// The include scanner must match everything fglcomp treats as a directive.
+// The two errors are not symmetric: a spelling it misses records US-ASCII for
+// a module that carries the include's text, which install then never checks,
+// while a false match only costs the derived value. So it errs wide, and this
+// table is the measurement that says how wide. Every row was run through
+// fglcomp 6.00.01 with an ASCII source including a UTF-8 file, checking
+// whether that text reached the .42m.
 func TestIncludeRe_MatchesWhatFglcompTreatsAsADirective(t *testing.T) {
+	const ff, vt = "\f", "\v"
 	cases := []struct {
 		line string
 		want string
@@ -565,10 +596,27 @@ func TestIncludeRe_MatchesWhatFglcompTreatsAsADirective(t *testing.T) {
 		{`   &include "greet.inc"`, "greet.inc"},
 		{"\t&include 'greet.inc'", "greet.inc"},
 		{`&include  "inc/greet.inc"`, "inc/greet.inc"},
-		// Not directives: fglcomp compiles all three without reading a file.
+		// Separators fglcomp accepts that a `&include ` + space matcher missed.
+		// Each of these compiled and put `café crème` into the .42m.
+		{`&include"greet.inc"`, "greet.inc"},
+		{`& include "greet.inc"`, "greet.inc"},
+		{"&\tinclude \"greet.inc\"", "greet.inc"},
+		{"&" + ff + `include "greet.inc"`, "greet.inc"},
+		{`&   include   "greet.inc"`, "greet.inc"},
+		{"&include\t\"greet.inc\"", "greet.inc"},
+		{ff + `&include "greet.inc"`, "greet.inc"},
+		{`&include "greet.inc"  # trailing comment`, "greet.inc"},
+		// Not directives: fglcomp compiles these two without reading a file.
 		{`# &include "greet.inc"`, ""},
 		{`   DISPLAY "&include \"greet.inc\""`, ""},
-		{`&INCLUDE "greet.inc"`, ""}, // error -8053, unknown directive
+		// Not directives: fglcomp refuses these outright, so matching them
+		// would only decline to prove a package that cannot be built anyway.
+		{`&INCLUDE "greet.inc"`, ""},             // -8053, unknown directive
+		{`DISPLAY "x" &include "greet.inc"`, ""}, // -6609, not the first token
+		{`&include greet.inc`, ""},               // -8102, quotes required
+		{`&include <greet.inc>`, ""},             // -8102, quotes required
+		{vt + `&include "greet.inc"`, ""},        // -6609, VT is not a separator
+		{"&" + vt + `include "greet.inc"`, ""},   // -8102, VT is not a separator
 		{`&define GREETING "hi"`, ""},
 	}
 	for _, tc := range cases {
