@@ -740,8 +740,9 @@ func (p *envPlan) finalWarnings() []string {
 
 // renderShell emits prepending assignment statements plus the GAS hint comment,
 // in the canonical variable order, in the syntax of the target shell. A variable
-// with no value is skipped entirely, except FGLLDPATH when alwaysLD is set (the
-// historical behaviour of the default `fglpkg env` mode).
+// with no value is skipped entirely — including FGLLDPATH, which used to be
+// emitted empty in the default mode and turned an existing FGLLDPATH=/opt/app/lib
+// into :/opt/app/lib when the result was eval'd (GIS-588).
 //
 // The shell and the path separator are independent: the shell is whoever will
 // execute these lines, the separator is what the Genero runtime that parses the

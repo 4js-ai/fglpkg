@@ -99,8 +99,13 @@ func TestSearchHonoursAServerCappedPageSize(t *testing.T) {
 
 // A server that reports no total must still be paged to exhaustion, using a
 // short page as the end marker.
+//
+// The request count is the only thing that pins the SHORT-PAGE rule. Without
+// it the loop falls through to the empty-page break and still returns all 45,
+// so the result alone cannot tell the two apart — it just costs one more
+// round trip to a registry that told us, in the page itself, that it was done.
 func TestSearchPagesWithoutATotal(t *testing.T) {
-	ts, _ := pagingStub(t, 45, 20, false)
+	ts, requests := pagingStub(t, 45, 20, false)
 	t.Cleanup(ts.Close)
 	t.Setenv("FGLPKG_REGISTRY", ts.URL)
 
@@ -110,6 +115,11 @@ func TestSearchPagesWithoutATotal(t *testing.T) {
 	}
 	if len(got) != 45 {
 		t.Errorf("got %d results, want 45", len(got))
+	}
+	if n := atomic.LoadInt32(requests); n != 3 {
+		t.Errorf("made %d requests for 45 results at 20 per page, want 3: "+
+			"pages of 20, 20 and 5, stopping on the short page rather than "+
+			"asking for an empty page 4", n)
 	}
 }
 

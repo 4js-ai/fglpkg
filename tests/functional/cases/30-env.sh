@@ -95,3 +95,31 @@ _env_subdirectory_names_the_project_above() {
   assert_contains "cd " "$err" || return 1
 }
 it "env from a project subdirectory points at the project above" _env_subdirectory_names_the_project_above
+
+# An explicit --global is the one mode that stays SILENT when nothing is
+# installed. The documented profile line is `eval "$(fglpkg env --global)"` in
+# ~/.bashrc (docs/user-guide.md), so for anyone whose packages are all
+# project-local — an expected, correct state — an explanation here would print
+# on every new shell. The GIS-588 failure is the default and --local modes,
+# where the user is inside a project and does expect that project's packages.
+_env_global_is_silent_with_an_empty_global_root() {
+  local out err
+  out="$("$FGLPKG" env --global 2>/dev/null)" || true
+  err="$("$FGLPKG" env --global 2>&1 >/dev/null)" || true
+
+  [[ -z "$out" ]] || { _diag "stdout was not empty: $out"; return 1; }
+  [[ -z "$err" ]] || {
+    _diag "stderr spoke on a plain --global with nothing installed, which the documented"
+    _diag "shell-profile line runs on every new terminal: $err"
+    return 1
+  }
+}
+it "env --global says nothing when the global root is empty" _env_global_is_silent_with_an_empty_global_root
+
+# ...while the default mode in the same empty state still explains itself, so
+# the --global exemption cannot be widened into the silence GIS-588 reports.
+_env_default_still_explains_itself() {
+  local err; err="$("$FGLPKG" env 2>&1 >/dev/null)" || true
+  assert_contains "no installed packages found" "$err" || return 1
+}
+it "env (default mode) still explains an empty result" _env_default_still_explains_itself

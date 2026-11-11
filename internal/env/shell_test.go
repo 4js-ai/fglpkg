@@ -32,9 +32,11 @@ func TestLegacyShellFormatsAreUnchanged(t *testing.T) {
 			want: `export FGLRESOURCEPATH=/a/forms:/b/forms"${FGLRESOURCEPATH:+:$FGLRESOURCEPATH}"`,
 		},
 		{
-			// The alwaysLD case: `fglpkg env` emits FGLLDPATH even when empty.
-			// needsQuote("") is false, which is exactly why the empty string must
-			// fall on the unquoted branch.
+			// An empty value no longer reaches here from `fglpkg env`, which
+			// now skips a variable with nothing to prepend (GIS-588). This
+			// pins renderAssignment's own contract: needsQuote("") is false,
+			// so the empty string must fall on the unquoted branch — and the
+			// statement stays a no-op prepend rather than an empty export.
 			name: "posix empty value",
 			sh:   ShellSh, key: "FGLLDPATH", value: "", sep: ":",
 			want: `export FGLLDPATH="${FGLLDPATH:+:$FGLLDPATH}"`,

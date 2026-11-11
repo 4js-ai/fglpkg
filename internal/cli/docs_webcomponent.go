@@ -17,24 +17,38 @@ type docSource struct {
 	label   string // "<name>@<version>", or just "<name>" when unknown
 }
 
-// docFileExtensions are the suffixes treated as documentation when a package's
-// `docs` globs are not available to consult.
-var docFileExtensions = []string{".md", ".txt", ".rst", ".adoc"}
+// docMarkupExtensions are the documentation markup formats. A file in one of
+// these is documentation wherever it sits: nothing but prose is written in
+// them, so there is no bundle noise to confuse them with.
+var docMarkupExtensions = []string{".md", ".rst", ".adoc"}
 
-// docFileBasenames are extensionless files conventionally shipped as docs.
+// docPlainExtensions are suffixes that USUALLY mean documentation but carry no
+// format of their own. They count outside a component directory; inside one
+// they must also carry a conventional name, because a widget bundle ships
+// plain-text resources and bundler output beside its real guides (robots.txt,
+// data/terms.txt, main.js.LICENSE.txt).
+var docPlainExtensions = []string{".txt"}
+
+// docFileBasenames are files conventionally shipped as docs, with or without an
+// extension.
 var docFileBasenames = []string{"LICENSE", "COPYING", "NOTICE", "README", "CHANGELOG", "USERGUIDE", "AUTHORS"}
 
 // looksLikeDoc reports whether a slash-relative path is documentation.
+// inComponentDir says whether it sits under a COMPONENTTYPE bundle directory.
 //
 // This heuristic is needed only on the web-component path. A BDL package keeps
 // its fglpkg.json on disk, so its own `docs` globs decide; a web-component
 // package keeps no manifest (several widgets would collide on it), so the
 // ownership sidecar's file list is all there is, and it mixes the widget's
 // JS/CSS in with its documentation.
-func looksLikeDoc(slashPath string) bool {
+//
+// It errs WIDE outside a component directory: listing a file that is not
+// documentation costs a line the reader ignores, while dropping one that is
+// hides it completely, which is the GIS-581 failure itself.
+func looksLikeDoc(slashPath string, inComponentDir bool) bool {
 	base := filepath.Base(slashPath)
 	ext := strings.ToLower(filepath.Ext(base))
-	for _, e := range docFileExtensions {
+	for _, e := range docMarkupExtensions {
 		if ext == e {
 			return true
 		}
@@ -45,7 +59,33 @@ func looksLikeDoc(slashPath string) bool {
 			return true
 		}
 	}
+	if inComponentDir {
+		// Inside the bundle only a conventional name counts, and the loop
+		// above has already tested that.
+		return false
+	}
+	for _, e := range docPlainExtensions {
+		if ext == e {
+			return true
+		}
+	}
 	return false
+}
+
+// isComponentDirName reports whether top is a COMPONENTTYPE bundle directory
+// under webcomponents/: a directory holding the <COMPONENTTYPE>.html entry
+// point named after itself.
+//
+// This is internal/env's isComponentDir, applied here for the same reason: the
+// ancillary trees a package ships (docs/, examples/, com/) land under
+// webcomponents/ too and must not be read as bundles. It is not shared because
+// that one is unexported and this caller needs only the top-level name.
+func isComponentDirName(wcDir, top string) bool {
+	if top == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(wcDir, top, top+".html"))
+	return err == nil && !info.IsDir()
 }
 
 // findWebcomponentDocs locates the documentation of a package installed as the
@@ -82,8 +122,18 @@ func findWebcomponentDocs(name string) (docSource, bool) {
 				continue
 			}
 			var docs []string
+			componentDir := map[string]bool{}
 			for _, f := range owned {
-				if !looksLikeDoc(f) {
+				top := ""
+				if i := strings.Index(f, "/"); i > 0 {
+					top = f[:i]
+				}
+				inComponent, seen := componentDir[top]
+				if !seen {
+					inComponent = isComponentDirName(dir, top)
+					componentDir[top] = inComponent
+				}
+				if !looksLikeDoc(f, inComponent) {
 					continue
 				}
 				// Only report what is really on disk: the sidecar records what

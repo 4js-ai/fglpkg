@@ -1587,12 +1587,20 @@ func cmdEnv(args []string) error {
 	// list Genero Studio can parse. Emitting them here — after the switch —
 	// covers every output mode, --gst included.
 	printEnvWarnings(g)
-	if len(exports) == 0 {
+	if len(exports) == 0 && !f.global {
 		// Nothing to export is a result the user must SEE. stdout is consumed
 		// by `eval "$(fglpkg env)"`, so an empty stdout plus exit 0 is
 		// indistinguishable from success — the compile then fails much later
 		// with -8403 Module does not exist, far from the cause (GIS-588).
-		printEnvNothingFound(home, useLocal, f.global)
+		//
+		// An explicit --global is the one mode that stays silent, because an
+		// empty global root is an EXPECTED state there, not a failure: the
+		// documented profile setup is `eval "$(fglpkg env --global)"` in
+		// ~/.bashrc (docs/user-guide.md), so anyone whose packages are all
+		// project-local would read this explanation on every new shell. The
+		// GIS-588 failure is the default and --local modes, where the user is
+		// inside a project and does expect that project's packages.
+		printEnvNothingFound(home, useLocal)
 		return nil
 	}
 	for _, line := range exports {
@@ -1609,21 +1617,19 @@ func cmdEnv(args []string) error {
 // subdirectory falls through to the merged default mode and finds nothing
 // local. Naming the parent that does hold a manifest turns a silent no-op into
 // a one-line fix.
-func printEnvNothingFound(globalRoot string, useLocal, global bool) {
+//
+// Only the default and --local modes reach this; the caller keeps an explicit
+// --global silent, so there is no "global root is empty" wording to write.
+func printEnvNothingFound(globalRoot string, useLocal bool) {
 	scope := "no installed packages found"
-	switch {
-	case global:
-		scope += " in the global root"
-	case useLocal:
+	if useLocal {
 		scope += " in this project"
 	}
 	fmt.Fprintf(os.Stderr, "fglpkg env: %s; nothing to export\n", scope)
-	if !global {
-		if dir, ok := findProjectAncestor(); ok {
-			fmt.Fprintf(os.Stderr,
-				"  The current directory is not a project, but %s is.\n"+
-					"  Run fglpkg env from there, or 'cd %s' first.\n", dir, dir)
-		}
+	if dir, ok := findProjectAncestor(); ok {
+		fmt.Fprintf(os.Stderr,
+			"  The current directory is not a project, but %s is.\n"+
+				"  Run fglpkg env from there, or 'cd %s' first.\n", dir, dir)
 	}
 	if !useLocal {
 		fmt.Fprintf(os.Stderr, "  Global package root: %s\n", globalRoot)
@@ -5417,7 +5423,16 @@ func cmdDocs(args []string) error {
 			return err
 		}
 		if len(src.files) == 0 {
-			fmt.Printf("Package %q is installed as a web component and ships no documentation files.\n", src.label)
+			// Not "ships none": the package may well ship README.md and
+			// LICENSE at the ZIP ROOT, which the installer deliberately does
+			// not extract (see extractWebcomponentZip), so they never reach
+			// disk and the ownership sidecar never records them. Saying the
+			// package ships no documentation would blame the author for a
+			// limit of the install layout, so name the limit instead.
+			fmt.Printf("Package %q is installed as a web component; no documentation files were kept on disk.\n", src.label)
+			fmt.Println("  A web component's zip-root files (README.md, LICENSE, ...) are not extracted,")
+			fmt.Println("  so documentation shipped there is not reachable here. Documentation under a")
+			fmt.Println("  subdirectory — docs/, or the component directory — is listed.")
 			return nil
 		}
 		return printDocs(pkgName, src, args)

@@ -9,32 +9,53 @@ import (
 
 func TestLooksLikeDoc(t *testing.T) {
 	cases := []struct {
-		path string
-		want bool
+		path     string
+		inBundle bool
+		want     bool
+		why      string
 	}{
 		// The files GIS-581 reports as unreachable.
-		{"docs/fjs-map/USERGUIDE.md", true},
-		{"docs/fjs-map/README.md", true},
-		{"docs/fjs-map/CHANGELOG.md", true},
-		{"LICENSE", true},
-		{"docs/NOTICE", true},
-		{"guide.txt", true},
-		{"manual.rst", true},
-		{"manual.adoc", true},
-		{"README", true},
-		{"readme.MD", true},
+		{"docs/fjs-map/USERGUIDE.md", false, true, ""},
+		{"docs/fjs-map/README.md", false, true, ""},
+		{"docs/fjs-map/CHANGELOG.md", false, true, ""},
+		{"LICENSE", false, true, ""},
+		{"docs/NOTICE", false, true, ""},
+		{"guide.txt", false, true, ""},
+		{"manual.rst", false, true, ""},
+		{"manual.adoc", false, true, ""},
+		{"README", false, true, ""},
+		{"readme.MD", false, true, ""},
+		// Pins the EXTENSION rule, not the stem list: every other .md row
+		// above also matches by its conventional stem (README, USERGUIDE,
+		// CHANGELOG), so dropping ".md" from docMarkupExtensions would leave
+		// them all passing. This is the guide's own example file.
+		{"docs/api-reference.md", false, true, "pins the .md extension"},
 		// A widget's own assets are not documentation, and must not pad the
 		// listing — the sidecar records them alongside the docs.
-		{"FjsMap/index.html", false},
-		{"FjsMap/main.js", false},
-		{"FjsMap/style.css", false},
-		{"FjsMap/icon.png", false},
-		{"FjsMap/data.json", false},
-		{"wcsettings/FjsMap.xml", false},
+		{"FjsMap/index.html", true, false, ""},
+		{"FjsMap/main.js", true, false, ""},
+		{"FjsMap/style.css", true, false, ""},
+		{"FjsMap/icon.png", true, false, ""},
+		{"FjsMap/data.json", true, false, ""},
+		{"wcsettings/FjsMap.xml", false, false, ""},
+		// Plain .txt INSIDE a component bundle is a resource or bundler
+		// output, not a guide, and padded the listing beside the real docs.
+		{"FjsMap/robots.txt", true, false, "a bundle resource"},
+		{"FjsMap/data/terms.txt", true, false, "a bundle resource, nested"},
+		{"FjsMap/main.js.LICENSE.txt", true, false, "bundler output, not the licence"},
+		// ... but a conventional name inside the bundle still counts, and
+		// markup inside the bundle is always a guide.
+		{"FjsMap/LICENSE.txt", true, true, "conventional stem wins inside a bundle"},
+		{"FjsMap/README.txt", true, true, "conventional stem wins inside a bundle"},
+		{"FjsMap/api-reference.md", true, true, "markup is a guide wherever it sits"},
+		// Outside a bundle the plain-text rule is unchanged: nothing there is
+		// generated, and erring wide costs only a line.
+		{"docs/robots.txt", false, true, "outside a bundle .txt still counts"},
 	}
 	for _, tc := range cases {
-		if got := looksLikeDoc(tc.path); got != tc.want {
-			t.Errorf("looksLikeDoc(%q) = %v, want %v", tc.path, got, tc.want)
+		if got := looksLikeDoc(tc.path, tc.inBundle); got != tc.want {
+			t.Errorf("looksLikeDoc(%q, inComponentDir=%v) = %v, want %v %s",
+				tc.path, tc.inBundle, got, tc.want, tc.why)
 		}
 	}
 }
@@ -99,7 +120,7 @@ func TestFindWebcomponentDocs(t *testing.T) {
 		t.Errorf("label = %q, want fjs-map@1.2.0", src.label)
 	}
 	for _, f := range src.files {
-		if looksLikeDoc(f) {
+		if looksLikeDoc(f, false) {
 			continue
 		}
 		t.Errorf("non-doc file %q leaked into the listing", f)

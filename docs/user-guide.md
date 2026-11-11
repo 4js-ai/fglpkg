@@ -1786,6 +1786,23 @@ $ fglpkg docs poiapi README.md
 $ fglpkg docs poiapi api-reference.md
 ```
 
+**Web components.** A package installed as the `webcomponent` variant extracts into
+`webcomponents/` and keeps no manifest of its own — several widgets would collide on one — so
+there are no `docs` globs to consult and `fglpkg docs` reads the ownership record instead,
+listing the documentation files the package actually installed.
+
+Two consequences follow from how a web component is extracted:
+
+- **Files at the zip root are not installed**, so documentation shipped as a top-level
+  `README.md` or `LICENSE` is not reachable through `fglpkg docs`. Ship it under a
+  subdirectory — `docs/`, or the component's own directory — to have it listed. A package whose
+  documentation is all at the root reports that nothing was kept on disk, and says why.
+- **The file list is a heuristic**, since nothing declares which files are documentation.
+  Markup files (`.md`, `.rst`, `.adoc`) and conventional names (`README`, `LICENSE`,
+  `CHANGELOG`, …) count anywhere. A plain `.txt` counts outside a component directory;
+  inside one it needs a conventional name too, so a bundle's own resources and bundler output
+  (`robots.txt`, `main.js.LICENSE.txt`) stay out of the listing.
+
 ### Docs Glob Patterns
 
 The `docs` field supports standard glob syntax with `**` for recursive matching:

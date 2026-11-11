@@ -26,8 +26,17 @@ func TestOutsideConstraintStatus(t *testing.T) {
 		{"minor across a patch", "1.0.3", "1.1.0", "minor available", ""},
 		{"patch many steps", "1.0.0", "1.0.9", "patch available", ""},
 		// Same release triple, differing only in the prerelease part: not a
-		// major/minor/patch step, so it gets the neutral wording.
-		{"prerelease only", "1.0.0", "1.0.0-rc.1", "newer available", ""},
+		// major/minor/patch step, so it gets the neutral wording. Written in
+		// the direction that can actually reach here — a prerelease installed
+		// and its stable release published. The reverse (1.0.0 installed,
+		// only 1.0.0-rc.1 listed) is a DOWNGRADE, and buildOutdatedRow now
+		// stops it before this function sees it.
+		{"prerelease stabilised", "1.0.0-rc.1", "1.0.0", "newer available", ""},
+		// This function names the SIZE of a jump and does not judge its
+		// direction; its caller does, via isNewerThan. Pinned so the division
+		// of labour is visible from the test rather than only the comment.
+		{"backwards", "1.2.0", "1.1.0", "minor available",
+			"direction is the caller's job, not this function's"},
 		// Never guess from an unparseable version.
 		{"unparseable current", "not-a-version", "1.0.1", "newer available", ""},
 		{"unparseable latest", "1.0.0", "latest", "newer available", ""},
