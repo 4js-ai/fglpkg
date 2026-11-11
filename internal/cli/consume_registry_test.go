@@ -211,9 +211,21 @@ func TestRegistryDefaultRole(t *testing.T) {
 		{"acme", "", "acme", "publish"},
 		{"acme", "acme", "acme", "both"},
 		{"acme", "corp", "corp", "-"},
-		// No default declared must not be implied on the gi row, even though an
-		// unset publish default means publish goes to GI.
-		{"gi", "", "", "-"},
+		// GIS-600 reverses the previous rule here. The gi row used to read "-"
+		// when no publish default was declared, on the reasoning that a built-in
+		// fallback is not a configured default. But "-" is documented as "no
+		// default points here", so the one row that publish actually targets
+		// claimed the opposite — and reading it that way is how a package
+		// reaches the public registry by accident. The fallback is now shown,
+		// with "*" marking it built-in rather than configured.
+		{"gi", "", "", "publish*"},
+		// A declared publish default elsewhere means gi is NOT the fallback.
+		{"gi", "", "acme", "-"},
+		// The consume default and the built-in publish fallback can coincide.
+		{"gi", "gi", "", "both*"},
+		// A declared default on gi itself is configured, not a fallback.
+		{"gi", "", "gi", "publish"},
+		{"gi", "gi", "gi", "both"},
 	}
 	for _, c := range cases {
 		if got := registryDefaultRole(c.name, c.consume, c.publish); got != c.want {

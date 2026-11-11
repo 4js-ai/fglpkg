@@ -58,6 +58,20 @@
       "enum": ["public", "private"],
       "description": "Who can see this package on the registry. Defaults to public. Set when the package is first created; ignored on subsequent publishes."
     },
+    "characterEncoding": {
+      "type": "string",
+      "description": "IANA character set the package's compiled CODE (.42m/.42f) carries (e.g. \"US-ASCII\", \"UTF-8\", \"ISO-8859-15\"). `fglpkg pack` records it only when the artifacts prove it — a pure-ASCII source beside an artifact, or a form that carries non-ASCII text and names its encoding in its prolog. A .42m's own structure contains bytes >= 0x80, so its bytes prove nothing, and pack never guesses from the build environment. Declare it when the package carries non-ASCII code text. Absent means unknown, and install then performs no check."
+    },
+    "stringResourceEncodings": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Character set of each compiled string resource (.42s) that carries non-ASCII text, keyed by its path inside the archive. Derived by `fglpkg pack`, whose byte scan is reliable for .42s. Advisory and per file: install warns about a resource this environment cannot read, but never refuses, because a package may ship one resource per language and charset for the consumer to select at runtime. Declare an entry for a file whose 8-bit charset bytes alone cannot name."
+    },
+    "lengthSemantics": {
+      "type": "string",
+      "enum": ["char", "byte"],
+      "description": "FGL_LENGTH_SEMANTICS a consumer must use. Author-declared only — it is a property of the code's behaviour, not of its bytes, so it cannot be derived. Absent means no constraint. \"char\" cannot be combined with a single-byte characterEncoding."
+    },
     "genero": {
       "type": "string",
       "description": "Semver constraint for Genero BDL runtime compatibility (e.g. \"^6.0.0\", \">=4.01 <7\"). Omit or use \"*\" to indicate any Genero version."

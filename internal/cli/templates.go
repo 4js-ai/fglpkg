@@ -154,9 +154,15 @@ Describe the functions or modules this package exposes.
 
 ## Publishing
 
+Name the target explicitly — with none configured, ` + "`" + `fglpkg publish` + "`" + ` falls
+back to the PUBLIC Genero Intelligence registry and asks before using it.
+
 ` + "```" + `bash
-fglpkg publish
+fglpkg publish --registry gi    # the public registry
 ` + "```" + `
+
+Use ` + "`" + `fglpkg registry list` + "`" + ` to see the configured repositories, and
+` + "`" + `fglpkg registry add <name> <url> --publish-default` + "`" + ` to make one the default.
 `
 
 const appReadme = `# {{NAME}}
@@ -221,9 +227,12 @@ const webcomponentReadme = "# {{NAME}}\n\n" +
 	"```\n\n" +
 	"## Install + publish\n\n" +
 	"```bash\n" +
-	"fglpkg install {{NAME}}     # consumer side\n" +
-	"fglpkg publish              # publisher side\n" +
-	"```\n"
+	"fglpkg install {{NAME}}          # consumer side\n" +
+	"fglpkg publish --registry gi     # publisher side (the PUBLIC registry)\n" +
+	"```\n\n" +
+	"With no target configured, `fglpkg publish` falls back to the public\n" +
+	"Genero Intelligence registry and asks first. `fglpkg registry list` shows\n" +
+	"the alternatives.\n"
 
 const webcomponentHTML = `<!DOCTYPE html>
 <html>

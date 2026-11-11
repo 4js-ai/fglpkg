@@ -1,6 +1,6 @@
 # Spec: character encoding and length semantics for packages
 
-**Status:** 📋 Not started — GIS-285 (spec ready; ticket was *Require More Analysis*)
+**Status:** ✅ Implemented 2026-11-10 — GIS-285 (branch `feat/gis-285-character-encoding`)
 **Date:** 2026-09-28
 **Author:** Mike Folcher
 **Motivation:** `fglcomp`/`fglform` write string literals into `.42m`/`.42f`/`.42s` in the encoding
@@ -16,57 +16,161 @@ gate lives), [import-root.md](import-root.md) (the staging walk this hooks into)
 ## Summary
 
 Record the character encoding a package was built with, and the length semantics it requires, in
-`fglpkg.json`. **Derive both from the staged artifacts rather than asking the author to declare
-them**, cross-check any declaration the author did write, and gate consumption on a *verified*
-mismatch only.
+`fglpkg.json`. **Record only what the staged artifacts prove**, cross-check any declaration the
+author did write, and gate consumption on a *verified* mismatch only.
 
-The central finding behind this design: the encoding is largely recoverable **from the artifacts
-themselves**, so `pack` can establish it as a fact rather than trusting either the author or the
-shell they happened to publish from.
+> **Revised 2026-11-10 (PR #107 review).** The first design derived the value from a byte scan of
+> every artifact and fell back to the packer's `fglrun -i` where that was undecidable. Measuring it
+> against real compiled output showed the premise was wrong for `.42m` and `.42f`, and that the
+> fallback was the common path rather than the rare one. The measurements are in Background below;
+> the corrected design follows. The parts that were sound — the install gate,
+> `--force-character-encoding`, `lengthSemantics`, the manifest validation and the `FGLPKG_CHARMAP`
+> overrides — are unchanged.
+>
+> **Revised again 2026-11-11 (PR #107 re-review).** Three holes in that correction, all reproduced
+> with real `fglcomp` / `fglform`:
+>
+> 1. The second design kept the `.42f` prolog as evidence *once the form carried a high byte*. It
+>    is not evidence then either — the prolog is the build locale whatever the form holds — so a
+>    form is now classified by its own bytes. (The prolog was at this point still reported as a
+>    note; the third revision below drops that too.)
+> 2. "A pure-ASCII source proves the artifact ASCII" fails for `&include` files and for a source
+>    edited after the build, so both are now checked.
+> 3. `Validate()` rejected `US-ASCII` + `lengthSemantics: "char"`, a pair `pack` itself now writes
+>    for the recommended practice. `US-ASCII` is exempt from that rule.
+>
+> **Revised a third time 2026-11-11 (PR #107 re-review).** Two of those three corrections were
+> themselves incomplete, and open question 3 is now answered:
+>
+> 1. The include matcher required `&include` followed by whitespace. `fglcomp` accepts six further
+>    separator spellings, each of which puts the include's text in the `.42m`, so the matcher now
+>    allows space, tab, form feed or carriage return on either side of the `&`. A missed spelling
+>    records
+>    `US-ASCII` for a module that is not, which `install` then never checks — the only silent
+>    failure mode in the derivation.
+> 2. The prolog note is gone. `fglrun` uses a form's bytes as stored whatever the prolog says
+>    (measured, below), and the front ends never read the file, so the note had no reader to warn
+>    and fired on every UTF-8 form built from a non-UTF-8 shell.
 
 ## Background — what the artifacts actually contain
 
 Measured against Genero BDL 6.00.01 (`fglrun 6.00.01 rev-53231f0`).
 
-### Compiled forms declare their encoding outright
+### A `.42m`'s own structure contains high bytes
 
-`fglform` writes an XML prolog carrying the build encoding, already spelled as an IANA name:
+`fglcomp` copies string literal bytes through unchanged, so a non-ASCII literal does reach the
+p-code. But the container is not otherwise ASCII: opcode operands and the embedded source-path
+length also set the high bit.
 
-| Build locale | `.42f` prolog |
+| Measurement | Result |
 |---|---|
-| `en_US.UTF-8` | `<?xml version='1.0' encoding='UTF-8'?>` |
-| `en_US.ISO8859-15` | `<?xml version='1.0' encoding='ISO-8859-15'?>` |
-| `C` / `POSIX` | `<?xml version='1.0' encoding='ASCII'?>` |
+| Real `.4gl`/`.42m` pairs across four projects, sources pure ASCII | 99 |
+| ...whose `.42m` also has no byte >= 0x80 | **21 (21%)** |
+| A realistic pure-ASCII module (record, array, loop, `SFMT`) | 1 high byte, `0xdf`, an opcode operand at offset 685 |
+| The same source compiled under `LANG=C`, `en_US.UTF-8`, `en_US.ISO8859-15` | **byte-identical** (same SHA-256) |
 
-This is authoritative and needs no heuristics.
+So for a `.42m`: **no high byte proves the text is ASCII; a high byte proves nothing**, and the
+file records no charset of its own.
 
-### P-code and compiled strings carry literal bytes verbatim
+### A `.42f` prolog names the build locale, and never the content
 
-`fglcomp` copies string literal bytes through unchanged. Compiling `DISPLAY "café naïve €"`:
+`fglform` writes an XML prolog carrying an IANA name — but it is the *build locale*. For a
+**pure-ASCII** `.per`:
 
-| Source encoding | High bytes (≥ 0x80) in `.42m` |
-|---|---|
-| ASCII-only source | 0 |
-| UTF-8 | 7 (`é`=2, `ï`=2, `€`=3) |
-| ISO-8859-15 | 3 (one per character) |
-
-`.42s` (from `fglmkstr`) behaves the same way: binary container, literal bytes passed through, no
-encoding declaration.
-
-So `.42m`/`.42s` classify into three tiers by a byte scan:
-
-| Bytes ≥ 0x80 | Decodes as UTF-8? | Conclusion |
+| Build locale | `.42f` prolog | High bytes in the `.42f` |
 |---|---|---|
-| none | — | **ASCII** — portable to every Genero charset |
-| present | yes | **UTF-8** |
-| present | no | **some 8-bit charset** — `ISO-8859-1` vs `-15` is undecidable from bytes |
+| `C` / `POSIX` | `ASCII` | 0 |
+| `en_US.UTF-8` | `UTF-8` | 0 |
+| `en_US.ISO8859-15` | `ISO-8859-15` | 0 |
+
+The second design concluded from this that the prolog is authoritative *once the form carries a
+high byte*. It is not. Compiling a `.per` whose label really is `Café crème` (UTF-8 source):
+
+| Build locale | `.42f` prolog | Form *text* bytes |
+|---|---|---|
+| `en_US.UTF-8` | `UTF-8` | `Caf\xc3\xa9 cr\xc3\xa8me` |
+| `C` / `POSIX` | `ASCII` | `Caf\xc3\xa9 cr\xc3\xa8me` (identical) |
+| `en_US.ISO8859-15` | `ISO-8859-15` | `Caf\xc3\xa9 cr\xc3\xa8me` (identical) |
+
+The text is the source's bytes copied through, byte-for-byte, in all three; the prolog moves. So a
+`.42f` is a clean container like a `.42s` and must be classified by its own bytes.
+
+The **rest** of the form is not identical, which is why this says *text* bytes rather than form
+content. The build locale decides whether a label is counted in characters or in bytes, so its
+layout numbers move with it. A `SCREEN` form labelled `Café:`:
+
+| Build locale | Form width | Label `gridWidth` | Field `posX` | Text bytes |
+|---|---|---|---|---|
+| `en_US.UTF-8` | 18 | 6 | 7 | `Caf\xc3\xa9` |
+| `C` / `POSIX` | 19 | 7 | 8 | identical |
+| `en_US.ISO8859-15` | 19 | 7 | 8 | identical |
+
+Only the text bytes are classified, so this changes nothing in the derivation — but a form built
+under the wrong locale is laid out one column wide per non-ASCII character, which is a build
+problem of its own and nothing `fglpkg` can see.
+
+### Nothing in Genero reads the prolog
+
+The second revision still reported a contradicting prolog as a note, on the theory that a front end
+honouring it would mis-read the form. Measured, that theory does not hold. A `SCREEN` form holding
+`Café crème` was built under three locales (prologs `UTF-8`, `ASCII`, `ISO-8859-15`) and run in text
+mode (`FGLGUI=0`) under `en_US.UTF-8` and `en_US.ISO8859-15` runtimes — six runs:
+
+| | Prolog agrees with the bytes | Prolog says `ASCII` over UTF-8 bytes | Prolog says `ISO-8859-15` over them |
+|---|---|---|---|
+| UTF-8 runtime | bytes as stored | bytes as stored, no error | bytes as stored, no error |
+| ISO-8859-15 runtime | bytes as stored | bytes as stored, no error | bytes as stored, no error |
+
+`Caf\xc3\xa9` came out of all six. There is no transcoding where the prolog agrees and no complaint
+where it does not. Nor can a front end act on it: GDC and GBC never receive the file — `fglrun`
+parses the `.42f` and sends them an AUI tree — so the prolog has no reader in the Genero toolchain
+and `fglpkg` ignores it completely.
+
+It does decide one thing, for a reader outside Genero: a `.42f` is XML, and `encoding='ASCII'` over
+UTF-8 bytes is **not well-formed**, so a conformant parser rejects the file outright, while
+`encoding='ISO-8859-15'` over them decodes to mojibake (both measured with expat; only the UTF-8
+build round-trips). That is recorded here rather than warned about, because no Genero tool reads a
+`.42f` that way.
+
+### A pure-ASCII `.4gl` does not always prove a pure-ASCII `.42m`
+
+`fglcomp` copies literal bytes through, so a pure-ASCII source normally proves the module carries
+no non-ASCII text. Two ordinary cases break that, both reproduced:
+
+| Case | Result |
+|---|---|
+| `Hi.4gl` (0 high bytes) does `&include "greet.inc"`, where `greet.inc` is a UTF-8 `&define` | `Hi.42m` carries `café crème`; the source scan says ASCII |
+| Compile a source holding `"café crème"`, then edit the `.4gl` to ASCII without recompiling | the `.42m` still holds the literal; the source scan says ASCII |
+
+So the include tree is followed, and a source much newer than its artifact is not believed.
+`&include` resolves against the including file's directory, the working directory and `fglcomp`'s
+`-I` paths; `pack` cannot know the last of those, so an unresolvable include proves nothing. The
+directive must be the first token on its line (verified: `DISPLAY "x" &include "f"` is `-6609`, a
+commented one is ignored, `&INCLUDE` is `-8053`), which is what keeps the scan off comments and
+string literals.
+
+### A `.42s` is a clean container
+
+`fglmkstr` output behaves as the first design assumed, and is the one artifact whose bytes are
+reliable evidence:
+
+| `.str` source | `.42s` high bytes | Decodes as UTF-8 |
+|---|---|---|
+| ASCII | 0 | — |
+| UTF-8 | 4 | yes |
+| ISO-8859-15 | 2 | no |
+
+Byte-identical across build locales, so the scan is reproducible.
+
+The runtime uses a `.42s` as its bytes stand, with **no transcoding**: a UTF-8 resource under an
+ISO-8859-15 runtime shows raw bytes and reports `LENGTH` 12 for a 10-character string, and a
+Latin-9 resource under a UTF-8 runtime is truncated at the first invalid byte. So a resource's
+charset is a real constraint on the consumer that *selects* it.
 
 ### The runtime is the only source for length semantics
 
 `fglrun -i` reports `Charmap`, `Multibyte`, `Stateless` and `Length Semantics`. **`fglcomp -i`
-reports the first three but not Length Semantics.** fglpkg today detects the Genero version with
-`fglcomp --version` and only ever *locates* `fglrun` (`genero.FglrunPath`), never runs it — so this
-is new plumbing.
+reports the first three but not Length Semantics.**
 
 `FGL_LENGTH_SEMANTICS=CHAR` is silently reported as `BYTE` under a single-byte charmap:
 
@@ -75,93 +179,145 @@ LANG=en_US.UTF-8 FGL_LENGTH_SEMANTICS=CHAR  → Charmap: UTF-8  Length Semantics
 LANG=C           FGL_LENGTH_SEMANTICS=CHAR  → Charmap: ASCII  Length Semantics: BYTE
 ```
 
-This settles the Leo/Sebastien thread mechanically: the two properties are **not independent**.
-Declaring `lengthSemantics: "char"` implicitly declares a multibyte charset.
+So the two properties are **not independent**: declaring `lengthSemantics: "char"` implicitly
+declares a multibyte charset.
 
 ### Charmap names Genero reports
 
-| Locale | `Charmap` | IANA preferred |
-|---|---|---|
-| `C`, `POSIX`, `*.US-ASCII` | `ASCII` | **`US-ASCII`** (`ASCII` is a registered alias) |
-| `*.UTF-8` | `UTF-8` | `UTF-8` |
-| `*.ISO8859-1` / `-15` | `ISO-8859-1` / `ISO-8859-15` | same |
-| `zh_TW.Big5` | `Big5` | `Big5` |
-| `ja_JP.SJIS` | `SHIFT_JIS` | **`Shift_JIS`** (case differs) |
-| `ja_JP.eucJP` | `EUC-JP` | `EUC-JP` |
-| `ru_RU.KOI8-R` | `KOI8-R` | `KOI8-R` |
-
-Near-identity, with two wrinkles. IANA charset names are **case-insensitive**, which absorbs
+`$FGLDIR/etc/charmap.alias` enumerates the 70 canonical names Genero knows, which splits cleanly
+into 52 single-byte and 18 multibyte. IANA charset names are case-insensitive, which absorbs
 `SHIFT_JIS`; only `ASCII` ↔ `US-ASCII` needs an explicit alias.
 
-## Decision (2026-09-28)
+Verified: `fglrun -i` under `zh_CN.GBK` reports `Charmap: GBK`, `Multibyte: yes`. So a charset
+fglpkg does not recognise must **not** be assumed single-byte — doing so rejected the satisfiable
+declaration `"characterEncoding": "GBK", "lengthSemantics": "char"`.
 
-**1. Derive, don't demand.** `pack` derives `characterEncoding` from the staged artifacts and writes
-it into the shipped manifest. An author-written value is *cross-checked*, not trusted. This is
-deliberately the inverse of checking the declaration against `fglrun -i` at publish time — see
-Rationale.
+## Decision
 
-**2. Warn by default; deny only on a verified mismatch.** A conflict that is *provable from bytes*
-is an error. Anything unknown or unprovable is a warning.
+**1. Record only what is proven.** `pack` writes a value only where the staged artifacts establish
+it, and leaves the field absent otherwise. Absent means no consumer-side check, which is what every
+package published before this feature already does.
+
+**2. Never consult the build environment at pack time.** The `fglrun -i` fallback made the label a
+property of the packer's shell: byte-identical artifacts installed everywhere when packed under
+`LANG=C` and were refused by ISO-8859-15 consumers when packed under `en_US.UTF-8`. That is the
+environment dependence the feature existed to remove, relocated to the consumer side.
+
+**3. Separate code from string resources.** `characterEncoding` describes the code (`.42m`/`.42f`).
+String resources get their own per-file field. Merging them meant a package following the
+documented practice — pure-ASCII code, localized text in `.str` — was recorded as non-portable and
+refused on exactly the single-byte consumers the practice exists to serve.
+
+**4. Warn on resources; deny only on a verified code mismatch.**
 
 ### Rationale for deriving rather than checking the environment
 
 GIS-285 originally proposed denying publication when the declared encoding does not match the
 publisher's `fglrun -i`. That couples correctness to the publisher's shell and fails in both
-directions:
+directions: a CI publish typically runs `LANG=C` → Charmap `ASCII`, so a genuinely UTF-8 package
+would be rejected; and an all-ASCII package built on a UTF-8 workstation would be forced to declare
+`UTF-8`, locking out every ISO-8859 consumer for artifacts that are in fact portable.
 
-- **CI publishes are usually `LANG=C` → Charmap `ASCII`.** A genuinely UTF-8 package published from
-  CI would be rejected outright.
-- **An all-ASCII package built on a UTF-8 workstation** would be forced to declare `UTF-8`,
-  needlessly locking out every ISO-8859 consumer for artifacts that are in fact portable.
-
-Deriving from bytes has neither failure mode, and makes the documented best practice — ship pure
-ASCII — *mechanically provable* rather than merely advised. Most packages land in the ASCII tier
-and then need no consumer-side check at all.
+That reasoning still stands, and is why the fallback had to go as well: it reintroduced the same
+coupling by the back door.
 
 ## Manifest schema
 
-Two new optional fields. Named in camelCase to match the existing schema (`importRoot`,
-`defaultRegistry`, `mavenMirror`, `optionalDependencies`) rather than the hyphenated form sketched
-on the ticket.
-
 ```jsonc
 {
-  "characterEncoding": "US-ASCII",   // IANA name; derived by pack
-  "lengthSemantics": "char"          // "char" | "byte"; author-declared only
+  "characterEncoding": "US-ASCII",              // IANA name; the CODE's text
+  "lengthSemantics": "char",                    // "char" | "byte"; author-declared only
+  "stringResourceEncodings": {                  // per .42s carrying non-ASCII text
+    "res/Messages.utf8.42s": "UTF-8",
+    "res/Messages.latin9.42s": "ISO-8859-15"
+  }
 }
 ```
 
-- **`characterEncoding`** — IANA charset name. Compared case-insensitively, with `ASCII` accepted as
-  an alias of `US-ASCII`. Written canonically as the IANA preferred name.
-- **`lengthSemantics`** — `"char"` or `"byte"`, case-insensitive on read. **Author-declared only:**
-  it cannot be derived, because it is a property of the code's *behaviour* (Leo's `getCharAt` /
-  sorting example), not of its bytes. Absent means "no constraint", per Sebastien's resolution.
+- **`characterEncoding`** — IANA charset name, compared case-insensitively with `ASCII` accepted as
+  an alias of `US-ASCII`. Describes `.42m`/`.42f` only.
+- **`lengthSemantics`** — `"char"` or `"byte"`. Author-declared only: it is a property of the code's
+  *behaviour* (Leo's `getCharAt` / sorting example), not of its bytes. Absent means "no constraint".
+- **`stringResourceEncodings`** — per-file, derived, advisory. An ASCII resource is omitted, since it
+  constrains nothing. An author may declare an entry for a resource whose 8-bit charset bytes
+  cannot name.
 
-`Validate()` rejects an unknown `lengthSemantics` value, and rejects
-`lengthSemantics: "char"` alongside a single-byte `characterEncoding` — the runtime would silently
-downgrade it to `BYTE`, so the declaration could never hold.
+`Validate()` rejects an unknown `lengthSemantics` value, and rejects `lengthSemantics: "char"`
+alongside a charset **known** to be single-byte. Unknown charsets are accepted: not recognising a
+name is not evidence.
+
+**`US-ASCII` is exempt from that rule**, and the exemption is load-bearing. Since the code/resource
+split, `characterEncoding` describes the *code*, and the localized text lives in `.42s`. `US-ASCII`
+therefore means "this code is ASCII-7", a subset of every charset including the multibyte ones — it
+constrains no consumer charmap, which is why `install` skips it. ASCII code that walks a UTF-8
+resource string with `getCharAt` legitimately needs `"char"`, and a UTF-8 consumer satisfies both.
+Without the exemption `pack` produced a manifest its own `Validate()` rejected: ASCII code plus a
+declared `"char"` ships `{"characterEncoding": "US-ASCII", "lengthSemantics": "char"}`, which then
+failed to load.
 
 ## Derivation algorithm (`pack`)
 
-Run over the staged tree, after `stageBDLFiles`:
+Run over the staged tree, after `stageBDLFiles`.
 
-1. For each `.42f`, read the XML prolog encoding. Authoritative.
-2. For each `.42m` / `.42s`, scan for bytes ≥ 0x80; if any, test whether the whole file decodes as
-   UTF-8.
-3. Combine:
-   - every artifact ASCII (no high bytes, no non-ASCII prolog) → **`US-ASCII`**
-   - a `.42f` prolog names a charset → that charset wins; if two prologs disagree, **error**
-   - no prolog, but high bytes that decode as UTF-8 → **`UTF-8`**
-   - no prolog, high bytes that do not decode as UTF-8 → **undecidable**
+**Code artifacts (`.42m`, `.42f`).** Each one is classified as *ASCII*, *a named encoding*, or
+*unproven*:
 
-In the undecidable case: use the author's `characterEncoding` if present; otherwise fall back to
-`fglrun -i` *with a warning* naming the file and advising an explicit declaration. This is the only
-place the build environment is consulted, and it never overrides evidence.
+1. No byte >= 0x80 → **ASCII**. For a `.42f` this settles it regardless of the prolog.
+2. A `.42f` with high bytes that decode as UTF-8 → **`UTF-8`**; high bytes that do not → *unproven*
+   (bytes cannot tell `ISO-8859-1` from `-15`). The prolog is not read at all — not for the value
+   and not for a note.
+3. A `.42m` with high bytes → look for the **`.4gl` beside it**, and walk its `&include` tree. All
+   pure ASCII, none newer than the artifact by more than a minute → **ASCII**. This is what makes
+   the documented practice provable; the p-code cannot do it. A `.per` is never consulted, because
+   a `.per` and its includes that are all ASCII cannot produce a form with a high byte.
 
-**Cross-check.** If the author declared `characterEncoding` and derivation contradicts it *provably*
-(declared `US-ASCII` but high bytes exist; declared `ISO-8859-15` but a `.42f` prolog says `UTF-8`),
-fail the pack naming the file and both encodings. A declaration that merely *narrows* an undecidable
-result is accepted silently.
+   The include matcher errs **wide** on purpose: a spelling it misses records `US-ASCII` for a
+   module carrying the include's text, which `install` never checks, while a false match only costs
+   the derived value. Measured against `fglcomp` 6.00.01, each row compiled from an ASCII source
+   including a UTF-8 file:
+
+   | Written | `fglcomp` |
+   |---|---|
+   | `&include "f"`, `&include"f"`, `& include "f"`, `&<TAB>include "f"`, `&<FF>include "f"`, `&<CR>include "f"`, `&   include   "f"`, `&include<TAB>"f"`, `&include 'f'`, trailing comment, leading `<FF>` or `<CR>` | directive; the text reaches the `.42m` |
+   | leading `<VT>` | error `-6609` |
+   | `&<VT>include "f"` | error `-8102` |
+   | `&` newline `include "f"` | error `-8102` (one line only) |
+   | `&include f`, `&include <f>` | error `-8102` (quotes required) |
+   | `&INCLUDE "f"` | error `-8053` (lower case only) |
+   | `DISPLAY "x" &include "f"` | error `-6609` (first token on its line) |
+   | `# &include "f"`, `DISPLAY "&include \"f\""` | compiles; not a directive |
+
+   The class is not a hand-picked list: every ASCII byte `0x01`-`0x7f` (bar the newline) was put
+   in each of the three separator positions — before the `&`, between `&` and `include`, between
+   `include` and the quote — and compiled. All three positions accept the same four bytes and no
+   others: **space `0x20`, tab `0x09`, form feed `0x0c`, carriage return `0x0d`**. Anchoring at
+   the line start keeps the comment and the string literal out without a BDL lexer.
+
+   The carriage return needs a *stray* CR to matter: a CRLF file has its trailing CR stripped
+   before the matcher runs, and a CR-only source does not compile at all (`-6609`). It is in the
+   class anyway, because the cost of a miss is silent and the cost of a false match is not.
+4. Otherwise → **unproven**.
+
+Then: every code artifact ASCII → `US-ASCII`; a form proved an encoding and nothing is unproven →
+that encoding; any unproven artifact → **no value**, with a note naming the file and the reason.
+An unproven artifact outranks a proven one: a package is only as portable as its least portable
+module.
+
+The one-minute window on the source's modification time is deliberate. A timestamp is a weak
+signal, and the threshold has to separate what it can mean: a copy, a checkout or an unpack writes
+a tree's files in arbitrary order within one moment, while a forgotten rebuild is minutes or hours
+apart. Rejecting a source for being microseconds newer would silently cost the value to every
+package built from a copied tree, including the committed-artifact layout some shops use.
+
+**String resources (`.42s`).** Byte scan per file: no high bytes → omitted; high bytes decoding as
+UTF-8 → `UTF-8`; otherwise → undecidable, recorded only if the author declared it, with a note.
+
+**Cross-check.** A declared `characterEncoding` fails only against a contradiction that is actually
+provable: a form whose own bytes decode as UTF-8 under a declaration that is not UTF-8. The checks
+that were removed each rejected correct packages — "a high byte disproves US-ASCII" (78 of 99 real
+pure-ASCII modules have one) and "a prolog is authoritative" (which rejects a correct `US-ASCII` on
+a pure-ASCII `.per` built under UTF-8, and a correct `UTF-8` on a real UTF-8 form built under
+`LANG=C`). A declared resource encoding fails when the file's bytes disprove it.
 
 ## Consume-time behaviour (`install`)
 
@@ -169,46 +325,69 @@ Let `pkg` be the package's `characterEncoding` and `env` the consumer's `fglrun 
 
 | `pkg` | Action |
 |---|---|
-| absent | proceed; no message (the status quo for every package published so far) |
+| absent | proceed; no message |
 | `US-ASCII` | proceed; no check — compatible with every Genero charset |
 | equals `env` (case-insensitive, `ASCII`≈`US-ASCII`) | proceed |
-| differs from `env` | **error**; suggest `--force-character-encoding` |
+| differs from `env` | **error**; suggest `fglpkg install --force-character-encoding` |
 
-`lengthSemantics`, when present, must equal the consumer's `fglrun -i` Length Semantics, else the
-same error. Absent → no check.
+`lengthSemantics`, when present, must equal the consumer's Length Semantics, else the same error.
 
-`--force-character-encoding` bypasses both checks with a loud warning, per the ticket.
+An unreadable environment — `fglrun` absent, **or present but reporting no charmap** — warns rather
+than refusing. The second case matters: `DetectRuntimeInfo` returns no error when only
+`FGLPKG_LENGTH_SEMANTICS` is set, and an empty charmap then "mismatched" every declaration, refusing
+with "this environment uses " and nothing after it.
+
+`stringResourceEncodings` **warns and never refuses**, naming each resource this environment cannot
+read. A package may ship one resource per language and charset for the consumer to select at
+runtime, so refusing the package would block a consumer about to select a different one.
+
+The escape hatch names the command, `fglpkg install --force-character-encoding`, because the same
+refusal fires during `fglpkg update`, which rejects the bare flag.
 
 ### Migration
 
-Every package on the registry today (20 at the time of writing) declares no encoding, so the
-`absent` row is the overwhelmingly common case and must stay silent, not warn. The field populates
-itself as packages are republished, because `pack` derives it — authors need not learn about it.
+Packages published before this field declare nothing, so the `absent` row stays silent. Because
+`pack` now records a value only where it is proven, a package packed from a dist directory with no
+sources also records nothing — which is correct, and no worse than the status quo.
 
 ## `init`
 
-`fglpkg init` does **not** write `characterEncoding`. The ticket suggested seeding it from
-`fglrun -i`, but at `init` there are no artifacts, and the value would be a guess from the author's
-current shell that `pack` would then have to contradict. Leaving it absent lets derivation own it.
+`fglpkg init` does **not** write `characterEncoding`. At `init` there are no artifacts, and the
+value would be a guess from the author's current shell.
 
 ## Testing
 
-Detection must not depend on the machine's locale or the suite becomes unrunnable in CI. Add
-`FGLPKG_CHARMAP` and `FGLPKG_LENGTH_SEMANTICS` overrides, mirroring the existing
-`FGLPKG_GENERO_VERSION` escape hatch the functional harness already pins.
+Detection must not depend on the machine's locale or the suite becomes unrunnable in CI, so
+`FGLPKG_CHARMAP` and `FGLPKG_LENGTH_SEMANTICS` override it, mirroring `FGLPKG_GENERO_VERSION`.
 
-Unit: the three-tier byte classifier (empty file, pure ASCII, valid UTF-8, invalid UTF-8, a UTF-8
-sequence split across a read boundary); XML prolog parsing (single vs double quotes, absent prolog,
-disagreeing prologs); IANA comparison (`ASCII`/`US-ASCII`/`us-ascii`, `SHIFT_JIS`/`Shift_JIS`);
-`Validate()` on `lengthSemantics`.
+**Fixtures must be real compiled output, committed as bytes.** Source text written into a file named
+`.42m` never contains the structure high bytes that real p-code carries, which is precisely the case
+the first design got wrong — a suite built on fake fixtures agreed with a byte scan that disagrees
+with 78 of 99 real modules. The committed set (`internal/cli/testdata/encoding`,
+`tests/functional/fixtures/encoding`) covers: a realistic pure-ASCII module whose p-code has a
+structure high byte, a tiny one whose p-code is clean, a module with a genuine UTF-8 literal, a
+pure-ASCII form built under UTF-8 (prolog `UTF-8`, no high bytes), a form really carrying UTF-8
+text, the *same* form compiled under `LANG=C` so its prolog says `ASCII` while its bytes do not, a
+form carrying 8-bit non-UTF-8 text, a pure-ASCII module with a pure-ASCII `&include`, a pure-ASCII
+module with a UTF-8 `&include`, the same UTF-8 include written `&include"f"` with no space, and
+ASCII / UTF-8 / Latin-9 resource files. Each artifact is kept
+beside its source and that source's includes.
 
-Functional: pack an ASCII package → shipped manifest says `US-ASCII`; pack a UTF-8 package → says
-`UTF-8`; pack with a provably wrong declaration → pack fails naming the file; install an
-`ISO-8859-15` package under a `UTF-8` consumer → refused, and accepted under
-`--force-character-encoding`; install a package with no `characterEncoding` → silent.
+Unit: the three-tier byte classifier (empty, pure ASCII, valid UTF-8, invalid UTF-8, a UTF-8 sequence
+split across a read boundary); the include matcher against the measured `fglcomp` table above; IANA
+comparison; the single-byte/multibyte/unknown split; `Validate()`.
 
-Fixtures must be committed as bytes (not generated by the local `fglcomp`), so the suite does not
-require a Genero toolchain.
+Functional: pack proves `US-ASCII` from a source beside real p-code; records nothing without
+evidence; records the same thing under every `FGLPKG_CHARMAP`; a pure-ASCII form with a UTF-8 prolog
+is `US-ASCII`; a form with real non-ASCII text takes its *bytes*, and its prolog never overrides
+them; an 8-bit form records nothing; a UTF-8 `&include` costs a pure-ASCII source its proof while an
+ASCII one does not, and so does one written `&include"f"` with no space; a source newer than its
+module proves nothing; ASCII code plus a UTF-8 `.42s`
+stays portable with the resource named; `US-ASCII` + `"char"` packs and reads back; a correct
+`US-ASCII` declaration survives real p-code, a UTF-8 prolog and a `.42s`; a contradicted declaration
+fails; install refuses a code mismatch, accepts `--force-character-encoding`, warns on a resource
+mismatch, and is silent for a package that declares nothing — asserted on the shipped manifest, not
+assumed.
 
 ## Non-goals
 
@@ -216,7 +395,15 @@ require a Genero toolchain.
   bytes; only a declaration can resolve it.
 - Transcoding artifacts. fglpkg reports incompatibility; it never rewrites p-code.
 - Deriving `lengthSemantics`. It is a property of behaviour, not bytes.
-- Checking `.4gl`/`.per` sources. Only shipped compiled artifacts are examined.
+- Parsing sources. A source is read as a whole-file byte scan plus a line-anchored `&include`
+  match — nothing more. A non-ASCII source proves nothing, because the high bytes may be in
+  comments, and telling a comment from a literal would mean parsing BDL.
+- Resolving `&include` through `fglcomp`'s `-I` paths. `pack` searches the including file's
+  directory and the working directory, which is what a build tree gives it; an include it cannot
+  find yields no value rather than a guess.
+- Proving that a source really produced the artifact beside it. The modification time is the only
+  signal available and it is a weak one, so it is used with a one-minute window (see Derivation)
+  rather than treated as a checksum.
 
 ## Open questions
 
@@ -224,3 +411,10 @@ require a Genero toolchain.
    source-only semantics land.
 2. Should the registry index `characterEncoding` so `search` can filter to packages compatible with
    the caller's charmap? Server-side; out of scope here.
+3. ~~Does the Genero runtime transcode a `.42f` according to its XML prolog?~~ **Answered
+   2026-11-11: no.** Six text-mode runs (three build locales × two runtime locales) wrote the
+   form's bytes as stored, with no transcoding where the prolog agreed and no error where it did
+   not — see "Nothing in Genero reads the prolog" above. So the consumer-side check on forms is
+   justified (the bytes are what reaches the user, and they must match the consumer's charmap),
+   and the prolog note was removed. GDC and GBC were not run, but they never receive the file:
+   `fglrun` parses it and sends an AUI tree.

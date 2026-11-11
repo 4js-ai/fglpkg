@@ -55,6 +55,9 @@ sandbox() {
 # test instead of hanging the whole suite.
 _LIBDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _TIMED="$_LIBDIR/timed.py"
+# Committed binary fixtures (real compiled Genero artifacts), so cases that
+# need genuine p-code do not need a Genero toolchain on the machine.
+_FIXTURES="$(cd "$_LIBDIR/.." && pwd)/fixtures"
 _FT_TIMEOUT="${FGLPKG_FT_TIMEOUT:-15}"
 
 run() {  # run <fglpkg args...>   — no stdin

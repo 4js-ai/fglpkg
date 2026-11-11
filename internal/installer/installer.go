@@ -61,6 +61,11 @@ type Installer struct {
 	// that references a repository since removed from the config (spec §9).
 	configuredRegistries []string
 
+	// forceCharacterEncoding bypasses the consume-time characterEncoding /
+	// lengthSemantics compatibility gate (GIS-285). Set by
+	// --force-character-encoding; the bypass is loud, never silent.
+	forceCharacterEncoding bool
+
 	// ── Layer 1 signature verification (opt-in via WithSigning) ──
 	signingEnforce  string // "require" | "warn" | "off"; "" == off
 	keysHome        string // where the keys manifest is cached (usually the global ~/.fglpkg)
@@ -100,6 +105,15 @@ func New(home, githubToken, registryToken, giOrigin string) *Installer {
 		registryToken:    registryToken,
 		giOrigin:         giOrigin,
 	}
+}
+
+// WithForceCharacterEncoding disables the consume-time character-encoding
+// gate, so a package built under a charset the consumer does not use installs
+// anyway. The caller is taking responsibility for mojibake and wrong string
+// lengths at runtime, so the bypass always prints a warning.
+func (i *Installer) WithForceCharacterEncoding(force bool) *Installer {
+	i.forceCharacterEncoding = force
+	return i
 }
 
 // WithRepoAuth attaches per-repository download auth (for Artifactory
@@ -1086,6 +1100,14 @@ func (i *Installer) installBDL(info *registry.PackageInfo) error {
 	wcNames, err := readWebcomponentsFromZip(tmpName)
 	if err != nil {
 		return fmt.Errorf("cannot read manifest from zip: %w", err)
+	}
+
+	// Refuse an incompatible character encoding BEFORE anything is extracted
+	// (GIS-285). Checking after extraction would leave the unusable package on
+	// disk, where a re-run reads it as installed and reports success — the
+	// shape of bug GIS-580 was.
+	if err := i.checkEncoding(tmpName, info.Name); err != nil {
+		return err
 	}
 
 	destDir := filepath.Join(i.packagesDir, info.Name)
