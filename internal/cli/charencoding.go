@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/charmap"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
@@ -16,48 +19,59 @@ import (
 // consumer-side check — the behaviour every package published before GIS-285
 // already has.
 //
-// An earlier design derived the value from a byte scan of every artifact and,
-// where that was undecidable, fell back to the packer's `fglrun -i`. Measuring
-// it against real compiled output showed the premise was wrong and the
-// fallback was the common path, not the rare one:
+// Two earlier designs were measured against real compiled output and failed:
 //
-//   - Of 99 real modules compiled from pure-ASCII sources, only 21 had no byte
-//     >= 0x80. A .42m's own structure carries high bytes (opcode operands, the
-//     embedded source-path length), so a high byte is not evidence of
-//     non-ASCII text.
-//   - A .42m is byte-identical whatever locale it was built under, so it
-//     records no charset at all.
-//   - A .42f prolog names the BUILD LOCALE: the same pure-ASCII .per compiles
-//     to a prolog of ASCII, UTF-8 or ISO-8859-15 depending on the shell.
+//  1. Derive from a byte scan of every artifact, falling back to the packer's
+//     `fglrun -i` where that was undecidable. But of 99 real modules compiled
+//     from pure-ASCII sources only 21 had no byte >= 0x80 — a .42m's own
+//     structure carries high bytes (opcode operands, the embedded source-path
+//     length) — so most pure-ASCII packages became "undecidable" and were
+//     stamped with the packer's shell charset, which `install` then enforced.
+//  2. Trust a compiled form's XML prolog once the form carried a high byte.
+//     But the prolog records the SHELL fglform ran under, not the file. The
+//     same UTF-8 .per compiled under en_US.UTF-8, LANG=C and en_US.ISO8859-15
+//     produces byte-identical form content (`Caf\xc3\xa9` every time) and
+//     three different prologs, so pack recorded UTF-8, US-ASCII and
+//     ISO-8859-15 for one unchanged file.
 //
-// So most pure-ASCII packages became "undecidable" and were stamped with the
-// packer's shell charset, which `install` then enforced: the same bytes packed
-// under LANG=C installed everywhere, and packed under en_US.UTF-8 were refused
-// on an ISO-8859-15 consumer. That is the environment dependence the feature
-// existed to remove, moved to the consumer side.
+// Both put the packer's environment back into a field whose whole purpose was
+// to remove it. What each artifact can actually prove is respected instead:
 //
-// What each artifact can prove is now respected separately:
+//	.42m  no high byte       -> its text is ASCII
+//	      a high byte        -> nothing; ask the .4gl SOURCE beside it
+//	.42f  no high byte       -> its text is ASCII, whatever the prolog says
+//	      high bytes, UTF-8  -> its text is UTF-8
+//	      high bytes, 8-bit  -> nothing; the prolog is only a note
+//	.42s  byte scan          -> reliable, and recorded per file (see below)
 //
-//	.42m  no high byte          -> its text is ASCII
-//	      a high byte           -> nothing; ask the SOURCE beside it instead
-//	.42f  no high byte          -> its text is ASCII, whatever the prolog says
-//	      a high byte           -> the prolog names that text's encoding
-//	.42s  byte scan             -> reliable, and per file (see below)
+// A .42m is the one artifact whose bytes cannot classify it, so it is the one
+// that needs the source. A .42f is decided by its own bytes, which is why no
+// .per is consulted: a .per and its includes that are all ASCII cannot produce
+// a form with a high byte, so that rule could never fire.
 
-// sourceExtensions maps a compiled artifact to the source that produced it.
-// When `pack` runs in the build tree the source sits beside the artifact, and
-// a pure-ASCII source proves the compiled file carries no non-ASCII text,
-// because fglcomp copies literal bytes straight through. This is what makes
-// the documented practice — keep .4gl pure ASCII — mechanically provable; the
-// artifact's own bytes cannot do it (21 of 99 real modules).
+// includeRe matches a Genero preprocessor include. The directive must be the
+// FIRST token on its line — verified against fglcomp 6.00.01: `DISPLAY "x"
+// &include "f"` is error -6609, a commented `# &include "f"` is ignored, and so
+// is one inside a string literal. Anchoring here keeps those three out without
+// writing a BDL lexer. The spelling is lower-case (`&INCLUDE` is error -8053)
+// and either quote is accepted.
+var includeRe = regexp.MustCompile(`^[ \t]*&include[ \t]+["']([^"']+)["']`)
+
+// maxIncludeDepth bounds the include walk. Genero rejects a cycle itself; this
+// only stops a pathological tree from costing a pack more than it is worth.
+const maxIncludeDepth = 16
+
+// staleSourceGrace is how much newer than its artifact a source may be before
+// pack stops believing it describes that artifact.
 //
-// The converse does not hold: a source with high bytes may carry them only in
-// a comment, which never reaches the p-code. So a non-ASCII source proves
-// nothing and yields no value rather than an error.
-var sourceExtensions = map[string]string{
-	".42m": ".4gl",
-	".42f": ".per",
-}
+// A timestamp is a weak signal, so the threshold has to separate the two
+// things it can mean. A copy, a checkout or an unpack writes a tree's files in
+// arbitrary order within the same moment, and rejecting a source for being
+// microseconds newer would silently cost the value to every package built that
+// way — including the committed-artifact layout some shops use. A forgotten
+// rebuild is the opposite: you edit, you run something, you pack, and the gap
+// is human-scale. One minute sits between them.
+const staleSourceGrace = time.Minute
 
 // encodingEvidence is what a scan of the staged artifacts established. It
 // separates the CODE (.42m/.42f — what the program runs) from the STRING
@@ -74,14 +88,20 @@ type encodingEvidence struct {
 
 	// unprovenFile is the first code artifact whose text could be established
 	// neither as ASCII nor as any named encoding. Its presence means no value
-	// can be recorded.
+	// can be recorded, even if another artifact proved one: the package would
+	// otherwise be labelled with an encoding part of it may not use.
+	// unprovenWhy says which check declined, so the note can tell an author
+	// whose build tree is one `fglcomp` away from provable apart from one
+	// whose package genuinely carries non-ASCII text.
 	unprovenFile string
+	unprovenWhy  string
 
-	// formEncoding is the encoding named by the prolog of a form that ACTUALLY
-	// CARRIES non-ASCII text, and formFile the form that named it. This is the
-	// only positive proof of a non-ASCII code encoding fglpkg can obtain.
-	formEncoding string
-	formFile     string
+	// codeEnc is the non-ASCII encoding a code artifact's own bytes prove, and
+	// codeFile the artifact that proved it. In practice this is only ever
+	// UTF-8, from a form carrying UTF-8 text: no other encoding is decidable
+	// from bytes.
+	codeEnc  string
+	codeFile string
 
 	// resources maps a staged archive path to the encoding its bytes prove,
 	// for resource files that carry non-ASCII text. ASCII resources are absent
@@ -95,29 +115,19 @@ type encodingEvidence struct {
 }
 
 // codeEncoding returns the encoding the code artifacts prove, or "" when they
-// prove nothing.
+// prove nothing. An unproven artifact dominates a proven one: a package is
+// only as portable as its least portable module.
 func (e encodingEvidence) codeEncoding() string {
 	switch {
 	case !e.sawCode:
 		return ""
-	case e.formEncoding != "":
-		return e.formEncoding
 	case e.unprovenFile != "":
 		return ""
+	case e.codeEnc != "":
+		return e.codeEnc
 	default:
 		return charmap.ASCII
 	}
-}
-
-// hasHighByte reports whether a file on disk contains a byte >= 0x80. A
-// missing or unreadable file answers false with ok=false, so a caller can tell
-// "proven ASCII" from "could not look".
-func hasHighByte(path string) (high bool, ok bool) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false, false
-	}
-	return charmap.Classify(data) != charmap.TierASCII, true
 }
 
 // scanEncoding examines the staged artifacts and reports what they prove.
@@ -166,41 +176,197 @@ func scanEncoding(staged map[string]string) (encodingEvidence, error) {
 			continue
 		}
 		if ext == ".42f" {
-			// The form really does carry non-ASCII text, so its prolog names
-			// that text's encoding and IS authoritative here.
-			if enc := charmap.PrologEncoding(data); enc != "" {
-				if ev.formEncoding != "" && !charmap.Equal(ev.formEncoding, enc) {
-					return ev, &charmap.ErrDisagree{
-						FileA: ev.formFile, EncA: ev.formEncoding,
-						FileB: ap, EncB: enc,
-					}
-				}
-				if ev.formEncoding == "" {
-					ev.formEncoding, ev.formFile = enc, ap
-				}
-				continue
-			}
+			// A form's content is its source's bytes copied through, so the
+			// form's OWN bytes classify it, exactly as a .42s is classified.
+			// The prolog is reported but never believed.
+			noteFormProlog(ap, data, tier)
 			if tier == charmap.TierUTF8 {
-				if ev.formEncoding == "" {
-					ev.formEncoding, ev.formFile = charmap.UTF8, ap
+				if ev.codeEnc == "" {
+					ev.codeEnc, ev.codeFile = charmap.UTF8, ap
 				}
 				continue
 			}
+			// High bytes that are not UTF-8: some 8-bit charset, which bytes
+			// cannot name (ISO-8859-1 and -15 are indistinguishable).
+			ev.noteUnproven(ap, "it carries bytes >= 0x80 that are not valid UTF-8, "+
+				"and bytes alone cannot tell ISO-8859-1 from ISO-8859-15")
+			continue
 		}
-		// A .42m with a high byte, or a form with neither prolog nor valid
-		// UTF-8: the artifact proves nothing. Ask the source beside it.
-		if srcExt, ok := sourceExtensions[ext]; ok {
-			srcPath := strings.TrimSuffix(srcDisk, filepath.Ext(srcDisk)) + srcExt
-			if high, read := hasHighByte(srcPath); read && !high {
-				// A pure-ASCII source cannot have produced non-ASCII text.
-				continue
-			}
+		// A .42m with a high byte proves nothing by itself. Ask the source.
+		proven, why := sourceProvesASCII(srcDisk)
+		if proven {
+			continue
 		}
-		if ev.unprovenFile == "" {
-			ev.unprovenFile = ap
-		}
+		ev.noteUnproven(ap, why)
 	}
 	return ev, nil
+}
+
+// noteUnproven records the FIRST artifact that could not be established.
+// Only the first is kept: the note exists to give the author somewhere to
+// start, and listing every module of a large package would bury it.
+func (e *encodingEvidence) noteUnproven(archivePath, why string) {
+	if e.unprovenFile != "" {
+		return
+	}
+	e.unprovenFile, e.unprovenWhy = archivePath, why
+}
+
+// noteFormProlog reports a compiled form whose XML prolog disagrees with its
+// own content. The prolog names the shell fglform ran under, so a form
+// carrying UTF-8 text built under LANG=C declares ASCII. fglpkg ignores it for
+// derivation, but a front end that honours the prolog would mis-read such a
+// form for EVERY consumer, which the author can only fix by rebuilding.
+func noteFormProlog(archivePath string, data []byte, tier charmap.Tier) {
+	prolog := charmap.PrologEncoding(data)
+	if prolog == "" {
+		return
+	}
+	switch {
+	case tier == charmap.TierUTF8 && !charmap.Equal(prolog, charmap.UTF8):
+		fmt.Fprintf(os.Stderr,
+			"note: %s carries UTF-8 text but its XML prolog declares %s. The prolog records "+
+				"the locale fglform ran under, not the file's content, so fglpkg ignores it "+
+				"here.\n"+
+				"  Rebuild the form under a UTF-8 locale if your front end honours the prolog.\n",
+			archivePath, prolog)
+	case tier != charmap.TierUTF8 && charmap.Equal(prolog, charmap.ASCII):
+		fmt.Fprintf(os.Stderr,
+			"note: %s contains bytes >= 0x80 but its XML prolog declares %s, so the prolog "+
+				"cannot be describing it. It records the locale fglform ran under.\n"+
+				"  Rebuild the form under the locale its text is written in if your front end "+
+				"honours the prolog.\n",
+			archivePath, prolog)
+	}
+}
+
+// sourceProvesASCII reports whether the .4gl that produced a .42m establishes
+// that the compiled module carries no non-ASCII text. fglcomp copies string
+// literal bytes straight through, so a pure-ASCII source cannot have emitted
+// any — and this is what makes the documented practice (keep .4gl pure ASCII,
+// put localized text in .str) mechanically provable, where the .42m's own
+// bytes cannot: 21 of 99 real modules, against 99 of 107 source pairs.
+//
+// Two ways a pure-ASCII .4gl still produces non-ASCII p-code, both reproduced
+// with real fglcomp, so both are checked:
+//
+//   - `&include` pulls another file's text in. An ASCII Hi.4gl including a
+//     UTF-8 greet.inc compiles to a .42m carrying `café crème`.
+//   - the source was edited after the build. Compile a source with a literal,
+//     then make the .4gl ASCII without recompiling.
+//
+// The converse never holds: a source with high bytes may carry them only in a
+// comment, which never reaches the p-code. So a non-ASCII source proves
+// nothing and yields no value rather than an error.
+func sourceProvesASCII(artifactDisk string) (proven bool, why string) {
+	srcPath := strings.TrimSuffix(artifactDisk, filepath.Ext(artifactDisk)) + ".4gl"
+	artifactTime, err := modTime(artifactDisk)
+	if err != nil {
+		return false, "its own modification time could not be read"
+	}
+	return fileProvesASCII(srcPath, artifactTime, map[string]bool{}, 0)
+}
+
+// fileProvesASCII reports whether path, and everything it includes, is pure
+// ASCII and no newer than the artifact. Anything it cannot read — a missing
+// file, an include resolved through an -I path fglpkg does not know — answers
+// false, because not being able to look is not evidence of ASCII.
+func fileProvesASCII(path string, artifactTime time.Time, seen map[string]bool, depth int) (bool, string) {
+	if depth > maxIncludeDepth {
+		return false, fmt.Sprintf("its include tree is deeper than %d files", maxIncludeDepth)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return false, fmt.Sprintf("%s could not be resolved", filepath.Base(path))
+	}
+	if seen[abs] {
+		// Already proven on this walk; a second visit adds nothing.
+		return true, ""
+	}
+	seen[abs] = true
+
+	// A source edited after the module was compiled does not describe it. The
+	// artifact is what ships, so a source that cannot have produced it is no
+	// better than no source at all.
+	mt, err := modTime(path)
+	if err != nil {
+		return false, fmt.Sprintf("%s was not staged beside it", filepath.Base(path))
+	}
+	if mt.Sub(artifactTime) > staleSourceGrace {
+		return false, fmt.Sprintf(
+			"%s is NEWER than the compiled file, so it may not be the source it was built from "+
+				"(recompile it, or declare the encoding)",
+			filepath.Base(path))
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return false, fmt.Sprintf("%s could not be read", filepath.Base(path))
+	}
+	defer f.Close()
+
+	var includes []string
+	sc := bufio.NewScanner(f)
+	// Genero accepts long lines; the default 64 KiB token limit would make a
+	// minified or generated source read as an error and silently prove nothing.
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		for _, b := range line {
+			if b >= 0x80 {
+				return false, fmt.Sprintf("%s contains bytes >= 0x80 itself", filepath.Base(path))
+			}
+		}
+		if m := includeRe.FindSubmatch(line); m != nil {
+			includes = append(includes, string(m[1]))
+		}
+	}
+	if sc.Err() != nil {
+		return false, fmt.Sprintf("%s could not be read to the end", filepath.Base(path))
+	}
+
+	for _, inc := range includes {
+		resolved, ok := resolveInclude(inc, filepath.Dir(path))
+		if !ok {
+			return false, fmt.Sprintf(
+				"%s includes %q, which is not beside it or in the working directory "+
+					"(fglcomp also searches its -I paths, which fglpkg cannot know)",
+				filepath.Base(path), inc)
+		}
+		if ok, why := fileProvesASCII(resolved, artifactTime, seen, depth+1); !ok {
+			return false, why
+		}
+	}
+	return true, ""
+}
+
+// resolveInclude finds an &include target the way fglcomp does, minus the -I
+// paths fglpkg cannot know: beside the including file first, then the working
+// directory. Verified against fglcomp 6.00.01, which searches the source's own
+// directory, the working directory and each -I path.
+func resolveInclude(name, sourceDir string) (string, bool) {
+	if filepath.IsAbs(name) {
+		if _, err := os.Stat(name); err == nil {
+			return name, true
+		}
+		return "", false
+	}
+	for _, dir := range []string{sourceDir, "."} {
+		cand := filepath.Join(dir, name)
+		if st, err := os.Stat(cand); err == nil && !st.IsDir() {
+			return cand, true
+		}
+	}
+	return "", false
+}
+
+// modTime returns a file's modification time.
+func modTime(path string) (time.Time, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return st.ModTime(), nil
 }
 
 // recordEncoding sets the shipped manifest's encoding fields from the staged
@@ -237,14 +403,14 @@ func recordCodeEncoding(pub *manifest.Manifest, ev encodingEvidence) error {
 	if ev.unprovenFile != "" {
 		// Absent means no consumer-side check, which is correct: a value
 		// guessed from the packer's shell would be enforced against consumers
-		// for a package that may well be pure ASCII.
+		// for a package that may well be pure ASCII. The reason is named so an
+		// author can act on it — a stale or unstaged source is a build fix, a
+		// genuinely non-ASCII one is a declaration.
 		fmt.Fprintf(os.Stderr,
-			"note: the character encoding of %s could not be established from the package "+
-				"(a .42m's own structure contains bytes >= 0x80, and no pure-ASCII source was "+
-				"staged beside it), so none is recorded and consumers are not checked.\n"+
-				"  If this package carries non-ASCII text, declare it, e.g. "+
-				"\"characterEncoding\": \"UTF-8\" in %s.\n",
-			ev.unprovenFile, manifest.Filename)
+			"note: the character encoding of %s could not be established: %s.\n"+
+				"  None is recorded, so consumers are not checked. If this package carries "+
+				"non-ASCII text, declare it, e.g. \"characterEncoding\": \"UTF-8\" in %s.\n",
+			ev.unprovenFile, ev.unprovenWhy, manifest.Filename)
 	}
 	return nil
 }
@@ -308,20 +474,21 @@ func recordResourceEncodings(pub *manifest.Manifest, ev encodingEvidence) error 
 }
 
 // crossCheckEncoding fails only when the artifacts PROVE the declaration
-// wrong. Exactly one such proof exists, and deliberately no more.
+// wrong, which in practice means a form whose own bytes are valid UTF-8 under
+// a declaration that is not UTF-8.
 //
-// An earlier version also failed when a .42m contained a byte >= 0x80 against
-// a declared US-ASCII, and when any form's prolog differed from the
-// declaration. Both rejected correct packages: 78 of 99 real pure-ASCII
-// modules contain a high byte, and a pure-ASCII .per built under a UTF-8 shell
-// writes a UTF-8 prolog. A wrong pack failure is worse than a missed catch,
-// so neither survives.
+// Two earlier rules were removed because they rejected correct packages: that
+// a byte >= 0x80 in a .42m disproves a declared US-ASCII (78 of 99 real
+// pure-ASCII modules contain one), and that a form's prolog disproves any
+// other declaration (the prolog names the build shell). A wrong pack failure
+// is worse than a missed catch, so only what the bytes themselves show
+// survives.
 func crossCheckEncoding(declared string, ev encodingEvidence) error {
-	if ev.formEncoding != "" && !charmap.Equal(declared, ev.formEncoding) {
+	if ev.codeEnc != "" && !charmap.Equal(declared, ev.codeEnc) {
 		return fmt.Errorf(
 			"declared characterEncoding %q contradicts the package's artifacts: "+
-				"%s carries non-ASCII text and declares %s in its XML prolog",
-			declared, ev.formFile, ev.formEncoding)
+				"the text in %s decodes as %s",
+			declared, ev.codeFile, ev.codeEnc)
 	}
 	return nil
 }

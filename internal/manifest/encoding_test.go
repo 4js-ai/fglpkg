@@ -34,10 +34,14 @@ func TestValidateLengthSemantics(t *testing.T) {
 			name: "char with single-byte charset", length: "char", encoding: "ISO-8859-15",
 			wantErr: true, wantInErr: "single-byte",
 		},
-		{
-			name: "char with US-ASCII", length: "char", encoding: "US-ASCII",
-			wantErr: true, wantInErr: "single-byte",
-		},
+		// ...but US-ASCII is exempt. It describes the CODE's text, which is a
+		// subset of every charset including the multibyte ones, so it places
+		// no constraint on the consumer's charmap — `install` skips it for
+		// exactly that reason. ASCII code walking a UTF-8 .42s string with
+		// getCharAt needs "char", and a UTF-8 consumer satisfies both. Without
+		// the exemption `pack` shipped a manifest its own Validate() rejected.
+		{name: "char with US-ASCII", length: "char", encoding: "US-ASCII"},
+		{name: "char with ASCII spelled as the alias", length: "char", encoding: "ascii"},
 		// The combinations that do hold.
 		{name: "char with UTF-8", length: "char", encoding: "UTF-8"},
 		{name: "byte with UTF-8", length: "byte", encoding: "UTF-8"},
@@ -135,8 +139,10 @@ func TestValidateCharLengthSemanticsAgainstMultibyteCharsets(t *testing.T) {
 	if err := m.Validate(); err != nil {
 		t.Errorf("an unknown charset must not be assumed single-byte: %v", err)
 	}
-	// ...but a charset known to be single-byte still cannot hold "char".
-	for _, enc := range []string{"ISO-8859-15", "US-ASCII", "windows-1252", "KOI8-R"} {
+	// ...but a charset known to be single-byte AND enforced at install time
+	// still cannot hold "char". US-ASCII is not in this list: it is the one
+	// value install skips, so it constrains no consumer charmap.
+	for _, enc := range []string{"ISO-8859-15", "ISO-8859-1", "windows-1252", "KOI8-R"} {
 		t.Run(enc, func(t *testing.T) {
 			m := New("a", "1.0.0", "", "")
 			m.CharacterEncoding = enc

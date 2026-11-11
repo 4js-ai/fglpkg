@@ -314,8 +314,8 @@ and leaves it absent otherwise:
 | Evidence in the staged artifacts | Recorded |
 |---|---|
 | Every code artifact has no byte ≥ `0x80` | `US-ASCII` |
-| A pure-ASCII `.4gl` / `.per` sits beside each artifact | `US-ASCII` |
-| A form carries non-ASCII text, and its prolog names the charset | that charset |
+| A form's high bytes decode as UTF-8 | `UTF-8` |
+| A pure-ASCII `.4gl`, and everything it `&include`s, sits beside each `.42m` | `US-ASCII` |
 | Anything else | nothing — `install` then performs no check |
 
 The reason the rules are shaped that way, measured against Genero 6.00.01:
@@ -325,14 +325,21 @@ The reason the rules are shaped that way, measured against Genero 6.00.01:
   sources, only 21 had none — so no high byte proves the text is ASCII, and a
   high byte proves nothing at all. The file is byte-identical across build
   locales, so it records no charset of its own.
-- A **`.42f` prolog names the build locale**, not the content: the same
-  pure-ASCII `.per` compiles to `ASCII`, `UTF-8` or `ISO-8859-15` depending on
-  the shell. It is therefore read only when the form actually carries a high
-  byte, where it genuinely describes that text.
-- The **source beside the artifact** is what can prove ASCII, since `fglcomp`
-  copies literal bytes straight through. The converse does not hold — a `.4gl`
-  may carry UTF-8 comments that never reach the p-code — so a non-ASCII source
-  yields no value rather than an error.
+- A **`.42f` is classified by its own bytes**, like a `.42s`: the form's
+  content is its source's bytes copied through. Its XML prolog is NOT read as
+  evidence, because it names the build locale and never the content — the same
+  UTF-8 `.per` compiled under `en_US.UTF-8`, `LANG=C` and `en_US.ISO8859-15`
+  gives byte-identical form content and prologs of `UTF-8`, `ASCII` and
+  `ISO-8859-15`. A prolog that contradicts the content is reported as a note,
+  because a front end that honours it would mis-read the form.
+- The **`.4gl` beside a `.42m`** is what can prove it ASCII, since `fglcomp`
+  copies literal bytes straight through. Two things break that, so both are
+  checked: `&include` files are followed recursively (an unresolvable one
+  proves nothing, because `fglcomp` also searches `-I` paths `pack` cannot
+  know), and a source much newer than its module is not believed to be the one
+  it was built from. The converse does not hold either — a `.4gl` may carry
+  UTF-8 comments that never reach the p-code — so a non-ASCII source yields no
+  value rather than an error.
 
 `pack` never consults the build environment. Falling back to `fglrun -i` where
 the bytes were undecidable meant byte-identical artifacts installed everywhere
@@ -341,8 +348,8 @@ packed under `en_US.UTF-8`.
 
 **Declare the field** when your package carries non-ASCII code text that `pack`
 cannot prove. A declaration is cross-checked only against a contradiction that
-is actually provable — a form carrying non-ASCII text whose prolog names a
-different charset — and the error names the file. Declaring `US-ASCII` for a
+is actually provable — a form whose own bytes decode as UTF-8 under a
+declaration that is not UTF-8 — and the error names the file. Declaring `US-ASCII` for a
 package whose p-code holds a structure high byte is correct and accepted, as is
 declaring it beside a UTF-8 `.42s`.
 
@@ -413,6 +420,12 @@ Two validation rules:
   `GB18030`, `EUC-KR` or `Big5-HKSCS` is satisfiable and accepted, and a
   charset `fglpkg` has never heard of is accepted too, because not
   recognising a name is not evidence that it is single-byte.
+  `US-ASCII` is exempt, and that is the common case: `characterEncoding`
+  describes the package's **code**, and ASCII-7 code is a subset of every
+  charset including the multibyte ones, so it constrains no consumer charmap —
+  which is why `install` skips it. ASCII code that walks a UTF-8 `.42s` string
+  with `getCharAt` legitimately needs `"char"`, and a UTF-8 consumer satisfies
+  both.
 
 Note the interaction this implies: declaring `"char"` restricts your package to
 multibyte-charset consumers. That is sometimes exactly right, and sometimes an

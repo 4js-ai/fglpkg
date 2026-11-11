@@ -105,8 +105,9 @@ _enc_pack_form_prolog_is_not_the_content() {
 }
 it "a pure-ASCII form is US-ASCII even though its prolog says UTF-8" _enc_pack_form_prolog_is_not_the_content
 
-# ...but a form that really carries non-ASCII text IS described by its prolog.
-_enc_pack_form_with_real_text_uses_its_prolog() {
+# ...and a form that really carries non-ASCII text is classified by its own
+# BYTES, the same way a .42s is.
+_enc_pack_form_with_real_text_uses_its_bytes() {
   export FGLPKG_CHARMAP=ISO-8859-15 FGLPKG_LENGTH_SEMANTICS=BYTE
   _mkpkg_enc
   _enc_fixture Utf8Form.42f || return 1
@@ -115,7 +116,82 @@ _enc_pack_form_with_real_text_uses_its_prolog() {
   unzip -p p.zip fglpkg.json > shipped.json || return 1
   assert_file_contains shipped.json '"characterEncoding": "UTF-8"' || return 1
 }
-it "a form carrying non-ASCII text takes its encoding from its prolog" _enc_pack_form_with_real_text_uses_its_prolog
+it "a form carrying non-ASCII text takes its encoding from its bytes" _enc_pack_form_with_real_text_uses_its_bytes
+
+# The prolog must never override those bytes. Utf8Mislabelled.42f is the SAME
+# .per as Utf8Form.per compiled under LANG=C: identical UTF-8 content, a prolog
+# that says ASCII. Reading the prolog recorded US-ASCII here — the one tier
+# install never checks — for a form that is not portable at all.
+_enc_pack_form_prolog_never_overrides_the_bytes() {
+  export FGLPKG_CHARMAP=ISO-8859-15 FGLPKG_LENGTH_SEMANTICS=BYTE
+  _mkpkg_enc
+  _enc_fixture Utf8Mislabelled.42f || return 1
+  run pack -o p.zip
+  assert_success || return 1
+  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  assert_file_contains shipped.json '"characterEncoding": "UTF-8"' || return 1
+  # The disagreement still matters to a front end that honours the prolog.
+  assert_contains "prolog" || return 1
+}
+it "a form's prolog never overrides what its bytes say" _enc_pack_form_prolog_never_overrides_the_bytes
+
+# A form whose high bytes are not UTF-8 is some 8-bit charset, and bytes cannot
+# tell ISO-8859-1 from ISO-8859-15. Its prolog is not evidence either, so
+# nothing is recorded and the author declares it.
+_enc_pack_eight_bit_form_proves_nothing() {
+  export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
+  _mkpkg_enc
+  _enc_fixture Latin9Form.42f || return 1
+  run pack -o p.zip
+  assert_success || return 1
+  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  assert_file_not_contains shipped.json 'characterEncoding' || return 1
+}
+it "a form in an 8-bit charset records nothing, prolog or no prolog" _enc_pack_eight_bit_form_proves_nothing
+
+# &include pulls another file's text into the module, so reading the .4gl alone
+# is not enough. IncUtf8.4gl has no byte >= 0x80 and includes a UTF-8
+# IncUtf8.inc; IncUtf8.42m really does carry the euro sign. Before the include
+# walk this shipped "US-ASCII" under every shell.
+_enc_pack_include_defeats_an_ascii_source() {
+  export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
+  _mkpkg_enc
+  _enc_fixture IncUtf8.42m IncUtf8.4gl IncUtf8.inc || return 1
+  run pack -o p.zip
+  assert_success || return 1
+  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  assert_file_not_contains shipped.json 'characterEncoding' || return 1
+  assert_contains "IncUtf8.inc" || return 1
+}
+it "a UTF-8 &include stops a pure-ASCII source proving anything" _enc_pack_include_defeats_an_ascii_source
+
+# ...and an include that IS pure ASCII must not cost the package its value, or
+# following includes would simply disable the rule for every module using one.
+_enc_pack_ascii_include_still_proves_ascii() {
+  export FGLPKG_CHARMAP=ISO-8859-15 FGLPKG_LENGTH_SEMANTICS=BYTE
+  _mkpkg_enc
+  _enc_fixture IncAscii.42m IncAscii.4gl IncAscii.inc || return 1
+  run pack -o p.zip
+  assert_success || return 1
+  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  assert_file_contains shipped.json '"characterEncoding": "US-ASCII"' || return 1
+}
+it "a pure-ASCII &include still proves the module ASCII" _enc_pack_ascii_include_still_proves_ascii
+
+# A source edited after the build does not describe the artifact that ships.
+_enc_pack_stale_source_proves_nothing() {
+  export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
+  _mkpkg_enc
+  _enc_fixture AsciiBig.42m AsciiBig.4gl || return 1
+  # An hour newer: a human edit, not a copy's ordering.
+  touch -t "$(date -u -v+1H '+%Y%m%d%H%M' 2>/dev/null || date -u -d '+1 hour' '+%Y%m%d%H%M')" AsciiBig.4gl || return 1
+  run pack -o p.zip
+  assert_success || return 1
+  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  assert_file_not_contains shipped.json 'characterEncoding' || return 1
+  assert_contains "NEWER" || return 1
+}
+it "a source newer than its module proves nothing" _enc_pack_stale_source_proves_nothing
 
 # The practice the guide recommends: pure-ASCII code, localized text in .str.
 # The package must stay portable, with the resource named separately — not
@@ -167,7 +243,7 @@ _enc_pack_rejects_contradicted_declaration() {
   assert_failure || return 1
   assert_contains "Utf8Form.42f" || return 1
 }
-it "pack refuses a declaration a non-ASCII form's prolog disproves" _enc_pack_rejects_contradicted_declaration
+it "pack refuses a declaration a non-ASCII form's bytes disprove" _enc_pack_rejects_contradicted_declaration
 
 _enc_rejects_impossible_length_semantics() {
   export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
@@ -190,6 +266,27 @@ _enc_accepts_char_with_multibyte_charset() {
   assert_success || return 1
 }
 it "lengthSemantics char with a multibyte charset is accepted" _enc_accepts_char_with_multibyte_charset
+
+# characterEncoding describes the CODE, and since the code/resource split the
+# localized text lives in .42s. US-ASCII code that walks a UTF-8 resource
+# string with getCharAt legitimately needs "char", and a multibyte consumer
+# satisfies it. pack used to write that pair and then its own Validate()
+# rejected the manifest it had just shipped.
+_enc_accepts_char_with_ascii_code_and_utf8_resources() {
+  export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
+  _mkpkg_enc '"lengthSemantics": "char"'
+  _enc_fixture AsciiBig.42m AsciiBig.4gl Utf8Msg.42s || return 1
+  run pack -o p.zip
+  assert_success || return 1
+  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  assert_file_contains shipped.json '"characterEncoding": "US-ASCII"' || return 1
+  assert_file_contains shipped.json '"lengthSemantics": "char"' || return 1
+  # And the shipped manifest must be readable back, which is where this failed.
+  rm -f fglpkg.json && cp shipped.json fglpkg.json || return 1
+  run pack --list
+  assert_success || return 1
+}
+it "US-ASCII code with lengthSemantics char packs and reads back" _enc_accepts_char_with_ascii_code_and_utf8_resources
 
 _enc_rejects_unknown_length_semantics() {
   export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR

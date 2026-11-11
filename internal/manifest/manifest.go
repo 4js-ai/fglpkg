@@ -1255,6 +1255,20 @@ const (
 // independent, and a package declaring "char" alongside a single-byte charset
 // is stating a constraint no consumer environment could ever satisfy. Rejecting
 // it here turns a silent downgrade at runtime into an error at pack time.
+//
+// US-ASCII is exempt, and that exemption is load-bearing. characterEncoding
+// describes the text the package's CODE carries, and since the code/resource
+// split the localized text lives in .42s files named by
+// stringResourceEncodings. US-ASCII therefore means "this code is ASCII-7",
+// which is a subset of every charset INCLUDING the multibyte ones — it states
+// nothing about the consumer's charmap, which is why `install` skips it
+// entirely. ASCII code that walks a UTF-8 resource string with getCharAt
+// legitimately needs "char", and a UTF-8 consumer satisfies both. Without the
+// exemption `pack` produced a manifest its own Validate() rejected: ASCII code
+// plus a declared "char" ships {"characterEncoding": "US-ASCII",
+// "lengthSemantics": "char"}, which then failed to load. The rule still holds
+// for ISO-8859-15 and the rest, where the consumer's charmap must match and
+// "char" can never take effect.
 func (m *Manifest) validateEncoding() error {
 	switch strings.ToLower(strings.TrimSpace(m.LengthSemantics)) {
 	case "", LengthSemanticsChar, LengthSemanticsByte:
@@ -1265,12 +1279,14 @@ func (m *Manifest) validateEncoding() error {
 			m.LengthSemantics, LengthSemanticsChar, LengthSemanticsByte,
 		)
 	}
-	// Only a charset fglpkg KNOWS to be single-byte may reject "char". An
-	// unknown charset is not evidence of anything: treating unknown as
-	// single-byte rejected satisfiable declarations such as "GBK" with
-	// "char", though fglrun -i under zh_CN.GBK reports Multibyte: yes.
+	// Only a charset fglpkg KNOWS to be single-byte AND that constrains the
+	// consumer's charmap may reject "char". An unknown charset is not evidence
+	// of anything: treating unknown as single-byte rejected satisfiable
+	// declarations such as "GBK" with "char", though fglrun -i under zh_CN.GBK
+	// reports Multibyte: yes. US-ASCII constrains nothing (see above).
 	if strings.EqualFold(strings.TrimSpace(m.LengthSemantics), LengthSemanticsChar) &&
-		m.CharacterEncoding != "" && charmap.IsKnownSingleByte(m.CharacterEncoding) {
+		m.CharacterEncoding != "" && charmap.IsKnownSingleByte(m.CharacterEncoding) &&
+		!charmap.Equal(m.CharacterEncoding, charmap.ASCII) {
 		return fmt.Errorf(
 			"lengthSemantics %q cannot hold with the single-byte characterEncoding %q: "+
 				"the Genero runtime reports CHAR as BYTE under a single-byte charmap, "+

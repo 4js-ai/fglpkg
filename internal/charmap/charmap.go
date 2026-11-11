@@ -19,16 +19,17 @@
 //     byte. So "no high byte" proves the text is ASCII, and a high byte proves
 //     NOTHING. The file is byte-identical across build locales, so it records
 //     no charset of its own.
-//   - .42f carries an XML prolog, but the prolog names the BUILD LOCALE, not
-//     what the form contains: a pure-ASCII .per compiles to a prolog of
-//     ASCII, UTF-8 or ISO-8859-15 depending on the shell. The prolog is
-//     authoritative only about bytes that are actually there, so it is read
-//     only when the form carries a byte >= 0x80.
+//   - .42f carries an XML prolog, but the prolog names the BUILD LOCALE and
+//     never the content. The same UTF-8 .per compiled under en_US.UTF-8,
+//     LANG=C and en_US.ISO8859-15 gives byte-identical form content and
+//     prologs of UTF-8, ASCII and ISO-8859-15 — so a prolog cannot classify a
+//     form even when the form really does carry non-ASCII text. A .42f is a
+//     clean container like a .42s and is classified by its own bytes;
+//     PrologEncoding exists only to report a prolog that contradicts them.
 package charmap
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"regexp"
 	"strings"
@@ -203,9 +204,13 @@ var prologRe = regexp.MustCompile(`^<\?xml\s[^>]*?encoding\s*=\s*['"]([^'"]+)['"
 const prologScanLimit = 512
 
 // PrologEncoding returns the encoding named by a compiled form's XML
-// declaration, canonicalized, or "" when there is none. fglform writes the
-// build encoding into the prolog already spelled as an IANA name, which makes
-// a .42f authoritative about its own encoding and needing no heuristics.
+// declaration, canonicalized, or "" when there is none.
+//
+// This is NOT the form's encoding. fglform writes the BUILD LOCALE there,
+// spelled as an IANA name: the same UTF-8 .per yields prologs of UTF-8, ASCII
+// or ISO-8859-15 with identical form content. Callers classify a form by its
+// bytes and use this only to report a prolog that contradicts them, which a
+// front end honouring the prolog would act on.
 func PrologEncoding(data []byte) string {
 	head := data
 	if len(head) > prologScanLimit {
@@ -330,16 +335,4 @@ func seqLen(lead byte) int {
 		return 4
 	}
 	return 0
-}
-
-// ErrDisagree reports two artifacts in one package declaring different
-// encodings, which no single manifest value can describe.
-type ErrDisagree struct {
-	FileA, EncA string
-	FileB, EncB string
-}
-
-func (e *ErrDisagree) Error() string {
-	return fmt.Sprintf("conflicting encodings in one package: %s declares %s but %s declares %s",
-		e.FileA, e.EncA, e.FileB, e.EncB)
 }

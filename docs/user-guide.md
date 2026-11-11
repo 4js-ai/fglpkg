@@ -2215,18 +2215,23 @@ What each artifact can prove differs sharply, measured against Genero 6.00.01:
 |---|---|
 | `.42s` (string resource) | **Reliable.** An ASCII resource has no byte ≥ `0x80`, a UTF-8 one decodes as UTF-8, an 8-bit one does not. Identical whatever locale `fglmkstr` ran under. |
 | `.42m` (p-code) | **No high byte proves ASCII; a high byte proves nothing.** A `.42m`'s own structure contains bytes ≥ `0x80` — opcode operands, the embedded source-path length. Of 99 real modules compiled from pure-ASCII sources, only 21 had none. The file is byte-identical across build locales, so it records no charset of its own. |
-| `.42f` (compiled form) | **The prolog names the build locale, not the content.** The same pure-ASCII `.per` compiles to a prolog of `ASCII`, `UTF-8` or `ISO-8859-15` depending on your shell. So the prolog is read only when the form actually carries a byte ≥ `0x80`. |
+| `.42f` (compiled form) | **Reliable, like a `.42s` — but ignore the prolog.** The form's content is its source's bytes copied through, so a byte scan classifies it. The XML prolog names the **build locale** and never the content: the same UTF-8 `.per` compiled under `en_US.UTF-8`, `LANG=C` and `en_US.ISO8859-15` gives byte-identical form content and prologs of `UTF-8`, `ASCII` and `ISO-8859-15`. |
 
 From that, `characterEncoding` describes the package's **code** (`.42m` / `.42f`):
 
 | Evidence | Recorded |
 |---|---|
 | Every code artifact has no byte ≥ `0x80` | `US-ASCII` |
-| A pure-ASCII `.4gl` / `.per` sits beside each artifact | `US-ASCII` — a pure-ASCII source cannot have produced non-ASCII text |
-| A form carries non-ASCII text, and its prolog names the charset | that charset |
-| Anything else | **nothing**, with a note suggesting you declare it |
+| A form's high bytes decode as UTF-8 | `UTF-8` |
+| A pure-ASCII `.4gl` sits beside each `.42m` | `US-ASCII` — see below for what "pure-ASCII" has to mean |
+| Anything else | **nothing**, with a note naming the file and why |
 
-The source beside the artifact is what makes the ASCII practice provable, since the p-code cannot do it. When you pack from a build tree the sources are there; when you pack a dist directory they are not, and an all-ASCII package then simply records nothing rather than being guessed at.
+A `.42m` is the one artifact a byte scan cannot classify, so it is the one that needs its source. That source is what makes the ASCII practice provable, and `pack` checks it properly:
+
+- **`&include` files are followed**, recursively, because they put their text in the module too. A pure-ASCII `Hi.4gl` that does `&include "greet.inc"` on a UTF-8 `greet.inc` compiles to a `.42m` carrying that text. An include `pack` cannot find — `fglcomp` also searches its `-I` paths, which `pack` cannot know — proves nothing, so the value is left absent.
+- **A source much newer than its module proves nothing**, because it may not be the source the module was built from. Edit a `.4gl` to remove a literal and forget to recompile, and the old rule read the new source as proof about the old p-code. A source newer by a copy's margin is still believed: a checkout or a `cp -r` writes a tree in arbitrary order within one moment, while a forgotten rebuild is minutes or hours apart.
+
+When you pack from a build tree the sources are there; when you pack a dist directory they are not, and an all-ASCII package then simply records nothing rather than being guessed at.
 
 `pack` never consults your shell. An earlier version fell back to `fglrun -i` when the bytes were undecidable — which, given the measurements above, was most packages. Byte-identical artifacts then installed everywhere when packed under `LANG=C` and were refused by ISO-8859-15 consumers when packed under `en_US.UTF-8`. Recording nothing is the honest answer.
 
@@ -2244,12 +2249,21 @@ String resources are recorded **per file**, because a package may ship one `.42s
 
 An ASCII resource constrains nothing and is omitted. Only a declaration can tell `ISO-8859-1` from `ISO-8859-15`, so declare an entry for a resource whose 8-bit charset the bytes cannot name.
 
-If you declare `characterEncoding`, `pack` cross-checks it — but only against a contradiction it can actually **prove**, which is a form that carries non-ASCII text and names a different charset:
+If you declare `characterEncoding`, `pack` cross-checks it — but only against a contradiction it can actually **prove**, which is a form whose own bytes decode as UTF-8 under a declaration that is not UTF-8:
 
 ```console
 $ fglpkg pack
 error: declared characterEncoding "ISO-8859-15" contradicts the package's artifacts:
-  forms/Login.42f carries non-ASCII text and declares UTF-8 in its XML prolog
+  the text in forms/Login.42f decodes as UTF-8
+```
+
+A prolog that contradicts the form's content is reported but never acted on, because it changes nothing fglpkg can check — though it matters to a front end that honours it:
+
+```console
+$ fglpkg pack
+note: forms/Login.42f carries UTF-8 text but its XML prolog declares ASCII. The prolog
+records the locale fglform ran under, not the file's content, so fglpkg ignores it here.
+  Rebuild the form under a UTF-8 locale if your front end honours the prolog.
 ```
 
 Declaring `US-ASCII` for a package whose p-code happens to contain a structure high byte is **correct and accepted**; so is declaring it beside a UTF-8 `.42s`, because that field describes the code.
@@ -2280,9 +2294,11 @@ warning: acme-widget ships string resources this environment (UTF-8) cannot read
 
 ### Best practice for a published package
 
-**Keep your `.4gl` and `.per` sources pure ASCII-7** and put translatable text in `.str` / `.42s` string resources, in whichever languages and encodings you need, letting the consumer select them at runtime.
+**Keep your `.4gl` and `.per` sources pure ASCII-7 — including anything they `&include`** — and put translatable text in `.str` / `.42s` string resources, in whichever languages and encodings you need, letting the consumer select them at runtime.
 
 Following that is what `pack` can prove: with the sources staged beside the artifacts it records `characterEncoding: "US-ASCII"`, which `install` never checks, and names each localized resource separately so a consumer is warned about the one file that does not match instead of being refused the package.
+
+Two things will cost you the proof, and `pack` says which on stderr: a non-ASCII `&include` that the source pulls in, and a source left newer than the module it was supposed to produce. Recompile, or declare `characterEncoding` yourself.
 
 ### Length semantics
 
@@ -2290,7 +2306,9 @@ Following that is what `pack` can prove: with the sources staged beside the arti
 
 Declare it only when your code genuinely depends on it. It restricts who can use the package: an application on Informix uses BYTE semantics even under UTF-8, so a package pinned to `"char"` cannot be used there. Omitting it means "no constraint", which is the right answer for most packages.
 
-Note that `"char"` cannot be combined with a single-byte `characterEncoding` — the runtime reports `CHAR` as `BYTE` under a single-byte charmap, so the combination could never be satisfied, and `pack` rejects it.
+Note that `"char"` cannot be combined with a single-byte `characterEncoding` such as `ISO-8859-15` — the runtime reports `CHAR` as `BYTE` under a single-byte charmap, so the combination could never be satisfied, and `pack` rejects it.
+
+`US-ASCII` is the exception, and it is the common case: that field describes your **code**, and ASCII-7 code is a subset of every charset including the multibyte ones, so it constrains no consumer charmap — which is why `install` skips it. ASCII code that walks a UTF-8 `.42s` string with `getCharAt` genuinely needs `"char"`, and a UTF-8 consumer satisfies both.
 
 ### Testing and CI
 

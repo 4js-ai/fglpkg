@@ -288,3 +288,46 @@ func TestWarnResourceEncodingsSilentWhenEverythingMatches(t *testing.T) {
 		t.Errorf("expected no warning, got:\n%s", out)
 	}
 }
+
+// A localization package — resources only, no characterEncoding and no
+// lengthSemantics — must still reach warnResourceEncodings. Both early returns
+// in checkEncoding have to test the resource map as well as the two scalar
+// fields, or such a package falls out at the first one and its consumer is
+// never warned about a single file.
+func TestCheckEncodingResourceOnlyPackageIsStillChecked(t *testing.T) {
+	t.Setenv("FGLPKG_CHARMAP", "UTF-8")
+	t.Setenv("FGLPKG_LENGTH_SEMANTICS", "")
+
+	i := New(t.TempDir(), "", "", "")
+	zipPath := zipWithManifest(t,
+		`{"name":"a","version":"1.0.0","stringResourceEncodings":{"Msg.latin9.42s":"ISO-8859-15"}}`)
+	out := captureStderr(t, func() {
+		if err := i.checkEncoding(zipPath, "acme-l10n"); err != nil {
+			t.Fatalf("a resource charset mismatch must warn, never refuse: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Msg.latin9.42s") {
+		t.Errorf("a package whose only encoding information is its resources must still be "+
+			"checked, got:\n%s", out)
+	}
+}
+
+// The same package under the US-ASCII early return: a pure-ASCII code
+// encoding exempts the CODE from any check, but it says nothing about the
+// resources, which are a separate constraint.
+func TestCheckEncodingASCIICodeDoesNotExemptItsResources(t *testing.T) {
+	t.Setenv("FGLPKG_CHARMAP", "ISO-8859-15")
+	t.Setenv("FGLPKG_LENGTH_SEMANTICS", "")
+
+	i := New(t.TempDir(), "", "", "")
+	zipPath := zipWithManifest(t, `{"name":"a","version":"1.0.0","characterEncoding":"US-ASCII",`+
+		`"stringResourceEncodings":{"Msg.utf8.42s":"UTF-8"}}`)
+	out := captureStderr(t, func() {
+		if err := i.checkEncoding(zipPath, "acme-widget"); err != nil {
+			t.Fatalf("resources warn, never refuse: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Msg.utf8.42s") {
+		t.Errorf("US-ASCII code must not exempt a non-ASCII resource from the warning, got:\n%s", out)
+	}
+}

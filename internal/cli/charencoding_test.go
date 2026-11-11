@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/charmap"
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
@@ -16,30 +17,64 @@ import (
 // real .42m carries, so a suite built on them agreed with a byte scan that
 // disagrees with 78 of 99 real modules.
 
-// stageFixtures copies named fixtures into a temp dir and returns the staged
-// map pack would have built (archive path -> path on disk). Each artifact is
-// copied with its own basename, and with the SOURCE it was built from when one
-// exists, because the source beside an artifact is what proves its text ASCII.
+const fixtureDir = "testdata/encoding"
+
+// stageFixtures copies the WHOLE fixture directory into a temp dir and returns
+// the staged map pack would have built (archive path -> path on disk) for the
+// named artifacts. Everything is copied so that each artifact keeps the source
+// and the &include files it was built from beside it, which is what proves a
+// .42m's text ASCII.
+//
+// Sources are backdated relative to the artifacts, because that is what a
+// build tree looks like and because pack declines a source NEWER than the
+// module it supposedly produced.
 func stageFixtures(t *testing.T, names ...string) map[string]string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := copyFixtureTree(t)
 	staged := map[string]string{}
 	for _, name := range names {
-		for _, f := range fixtureAndSource(name) {
-			data, err := os.ReadFile(filepath.Join("testdata", "encoding", f))
-			if err != nil {
-				t.Fatalf("read fixture %s: %v", f, err)
-			}
-			dst := filepath.Join(dir, f)
-			if err := os.WriteFile(dst, data, 0o644); err != nil {
-				t.Fatalf("write %s: %v", dst, err)
-			}
-			if f == name {
-				staged[f] = dst
-			}
+		p := filepath.Join(dir, name)
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("fixture %s: %v", name, err)
 		}
+		staged[name] = p
 	}
 	return staged
+}
+
+// copyFixtureTree materializes the fixtures with build-tree timestamps:
+// sources and includes an hour older than the compiled artifacts.
+func copyFixtureTree(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	entries, err := os.ReadDir(fixtureDir)
+	if err != nil {
+		t.Fatalf("read fixture dir: %v", err)
+	}
+	artifact := time.Now()
+	source := artifact.Add(-time.Hour)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(fixtureDir, e.Name()))
+		if err != nil {
+			t.Fatalf("read fixture %s: %v", e.Name(), err)
+		}
+		dst := filepath.Join(dir, e.Name())
+		if err := os.WriteFile(dst, data, 0o644); err != nil {
+			t.Fatalf("write %s: %v", dst, err)
+		}
+		when := source
+		switch filepath.Ext(e.Name()) {
+		case ".42m", ".42f", ".42s":
+			when = artifact
+		}
+		if err := os.Chtimes(dst, when, when); err != nil {
+			t.Fatalf("chtimes %s: %v", dst, err)
+		}
+	}
+	return dir
 }
 
 // stageArtifactOnly copies an artifact WITHOUT the source beside it — a pack
@@ -47,7 +82,7 @@ func stageFixtures(t *testing.T, names ...string) map[string]string {
 func stageArtifactOnly(t *testing.T, name string) map[string]string {
 	t.Helper()
 	dir := t.TempDir()
-	data, err := os.ReadFile(filepath.Join("testdata", "encoding", name))
+	data, err := os.ReadFile(filepath.Join(fixtureDir, name))
 	if err != nil {
 		t.Fatalf("read fixture %s: %v", name, err)
 	}
@@ -58,22 +93,14 @@ func stageArtifactOnly(t *testing.T, name string) map[string]string {
 	return map[string]string{name: dst}
 }
 
-func fixtureAndSource(name string) []string {
-	switch filepath.Ext(name) {
-	case ".42m":
-		return []string{name, strings.TrimSuffix(name, ".42m") + ".4gl"}
-	case ".42f":
-		return []string{name, strings.TrimSuffix(name, ".42f") + ".per"}
-	}
-	return []string{name}
-}
-
 func recordOrFail(t *testing.T, m *manifest.Manifest, staged map[string]string) {
 	t.Helper()
 	if err := recordEncoding(m, staged); err != nil {
 		t.Fatalf("recordEncoding: %v", err)
 	}
 }
+
+// --- .42m: the source beside it is the evidence ---------------------------
 
 // The case the old byte scan got wrong. AsciiBig.42m is compiled from a
 // pure-ASCII source and still contains a byte >= 0x80 (an opcode operand), so
@@ -127,6 +154,113 @@ func TestRecordEncoding_NonASCIISourceIsNotProof(t *testing.T) {
 	}
 }
 
+// &include pulls another file's text into the module, so reading the .4gl
+// alone is not enough. IncUtf8.4gl has no byte >= 0x80 and includes a UTF-8
+// IncUtf8.inc; the compiled IncUtf8.42m really does carry the euro sign.
+// Before the include walk this package shipped "US-ASCII" under every shell —
+// the one tier install never checks — for text that is not portable at all.
+func TestRecordEncoding_IncludeFileDefeatsAPureASCIISource(t *testing.T) {
+	staged := stageFixtures(t, "IncUtf8.42m")
+	m := &manifest.Manifest{}
+	out, err := captureStderr(t, func() error { return recordEncoding(m, staged) })
+	if err != nil {
+		t.Fatalf("recordEncoding: %v", err)
+	}
+	if m.CharacterEncoding != "" {
+		t.Errorf("CharacterEncoding = %q, want it absent: the include carries UTF-8 text",
+			m.CharacterEncoding)
+	}
+	if !strings.Contains(out, "IncUtf8.inc") {
+		t.Errorf("the note must name the include that defeated the proof, got: %s", out)
+	}
+}
+
+// ...and an include that IS pure ASCII must not cost the package its value,
+// or following includes would simply disable the rule for every module that
+// uses one.
+func TestRecordEncoding_PureASCIIIncludeStillProvesASCII(t *testing.T) {
+	staged := stageFixtures(t, "IncAscii.42m")
+	m := &manifest.Manifest{}
+	recordOrFail(t, m, staged)
+	if m.CharacterEncoding != charmap.ASCII {
+		t.Errorf("CharacterEncoding = %q, want %q: the source and its include are both ASCII",
+			m.CharacterEncoding, charmap.ASCII)
+	}
+}
+
+// An include fglpkg cannot find is not evidence of anything. fglcomp also
+// searches its -I paths, which pack cannot know, so an unresolved include
+// means "no value" rather than a silent ASCII.
+func TestRecordEncoding_UnresolvableIncludeProvesNothing(t *testing.T) {
+	staged := stageFixtures(t, "IncAscii.42m")
+	dir := filepath.Dir(staged["IncAscii.42m"])
+	if err := os.Remove(filepath.Join(dir, "IncAscii.inc")); err != nil {
+		t.Fatalf("remove include: %v", err)
+	}
+	m := &manifest.Manifest{}
+	out, err := captureStderr(t, func() error { return recordEncoding(m, staged) })
+	if err != nil {
+		t.Fatalf("recordEncoding: %v", err)
+	}
+	if m.CharacterEncoding != "" {
+		t.Errorf("CharacterEncoding = %q, want it absent: the include could not be read",
+			m.CharacterEncoding)
+	}
+	if !strings.Contains(out, "IncAscii.inc") {
+		t.Errorf("the note must name the missing include, got: %s", out)
+	}
+}
+
+// A source edited after the build does not describe the artifact that ships.
+// Compile a module with a literal, make the .4gl ASCII without recompiling,
+// and the old rule read the new source as proof about the old p-code.
+func TestRecordEncoding_SourceNewerThanTheArtifactProvesNothing(t *testing.T) {
+	staged := stageFixtures(t, "AsciiBig.42m")
+	src := filepath.Join(filepath.Dir(staged["AsciiBig.42m"]), "AsciiBig.4gl")
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(src, later, later); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	m := &manifest.Manifest{}
+	out, err := captureStderr(t, func() error { return recordEncoding(m, staged) })
+	if err != nil {
+		t.Fatalf("recordEncoding: %v", err)
+	}
+	if m.CharacterEncoding != "" {
+		t.Errorf("CharacterEncoding = %q, want it absent: the source is newer than the module",
+			m.CharacterEncoding)
+	}
+	if !strings.Contains(out, "NEWER") {
+		t.Errorf("the note must say the source is newer, got: %s", out)
+	}
+}
+
+// ...but a source a few milliseconds newer is a COPY, not an edit. cp, a git
+// checkout and an unpack all write a tree in arbitrary order within one
+// moment, and rejecting those would cost the value to every package built from
+// a copied tree — including the committed-artifact layout some shops use.
+func TestRecordEncoding_SourceNewerByACopysMarginIsStillBelieved(t *testing.T) {
+	staged := stageFixtures(t, "AsciiBig.42m")
+	artifact := staged["AsciiBig.42m"]
+	src := filepath.Join(filepath.Dir(artifact), "AsciiBig.4gl")
+	st, err := os.Stat(artifact)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	justAfter := st.ModTime().Add(50 * time.Millisecond)
+	if err := os.Chtimes(src, justAfter, justAfter); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	m := &manifest.Manifest{}
+	recordOrFail(t, m, staged)
+	if m.CharacterEncoding != charmap.ASCII {
+		t.Errorf("CharacterEncoding = %q, want %q: a copy's ordering is not a stale source",
+			m.CharacterEncoding, charmap.ASCII)
+	}
+}
+
+// --- .42f: its own bytes are the evidence, never the prolog ---------------
+
 // A pure-ASCII .per built under a UTF-8 shell writes a UTF-8 prolog. The
 // prolog names the BUILD LOCALE, so reading it as the content's encoding
 // labelled an ASCII-only package UTF-8 and refused it on ISO-8859-15
@@ -141,9 +275,9 @@ func TestRecordEncoding_FormPrologIsIgnoredWhenTheFormIsPureASCII(t *testing.T) 
 	}
 }
 
-// ...but a form that really carries non-ASCII text IS described by its prolog,
-// which is the one positive proof of a non-ASCII code encoding available.
-func TestRecordEncoding_FormPrologNamesRealNonASCIIText(t *testing.T) {
+// A form that carries real non-ASCII text is classified by its own BYTES, the
+// same way a .42s is. Utf8Form.42f decodes as UTF-8, so it is UTF-8.
+func TestRecordEncoding_FormCarryingUTF8TextIsProvenByItsBytes(t *testing.T) {
 	staged := stageFixtures(t, "Utf8Form.42f")
 	m := &manifest.Manifest{}
 	recordOrFail(t, m, staged)
@@ -151,6 +285,57 @@ func TestRecordEncoding_FormPrologNamesRealNonASCIIText(t *testing.T) {
 		t.Errorf("CharacterEncoding = %q, want %q", m.CharacterEncoding, charmap.UTF8)
 	}
 }
+
+// The second half of that: the prolog must not override the bytes.
+// Utf8Mislabelled.42f is the SAME .per as Utf8Form.per compiled under LANG=C,
+// so its content bytes are identical UTF-8 while its prolog says ASCII. Under
+// the old rule the same form packed from a C shell recorded US-ASCII — the
+// tier install never checks — and from an ISO-8859-15 shell recorded
+// ISO-8859-15, refusing the UTF-8 consumers it actually works on.
+func TestRecordEncoding_FormPrologNeverOverridesTheBytes(t *testing.T) {
+	staged := stageFixtures(t, "Utf8Mislabelled.42f")
+	m := &manifest.Manifest{}
+	out, err := captureStderr(t, func() error { return recordEncoding(m, staged) })
+	if err != nil {
+		t.Fatalf("recordEncoding: %v", err)
+	}
+	if m.CharacterEncoding != charmap.UTF8 {
+		t.Fatalf("CharacterEncoding = %q, want %q: the bytes are UTF-8 whatever the prolog says",
+			m.CharacterEncoding, charmap.UTF8)
+	}
+	// The disagreement still matters to a front end that honours the prolog,
+	// so it is reported even though it changes nothing here.
+	if !strings.Contains(out, "Utf8Mislabelled.42f") || !strings.Contains(out, "prolog") {
+		t.Errorf("a prolog contradicting the content must be reported, got: %s", out)
+	}
+}
+
+// A form whose high bytes are not UTF-8 is some 8-bit charset, and bytes
+// cannot tell ISO-8859-1 from ISO-8859-15. Its prolog is not evidence either,
+// so the package records nothing and the author declares it.
+func TestRecordEncoding_EightBitFormProvesNothing(t *testing.T) {
+	staged := stageFixtures(t, "Latin9Form.42f")
+	m := &manifest.Manifest{}
+	recordOrFail(t, m, staged)
+	if m.CharacterEncoding != "" {
+		t.Errorf("CharacterEncoding = %q, want it absent: an 8-bit charset cannot be named from bytes",
+			m.CharacterEncoding)
+	}
+}
+
+// An artifact that proves nothing outweighs one that proves something: a
+// package is only as portable as its least portable module. Labelling this
+// pair UTF-8 would claim an encoding for a form that may well be Latin-9.
+func TestRecordEncoding_AnUnprovenArtifactOutweighsAProvenOne(t *testing.T) {
+	staged := stageFixtures(t, "Utf8Form.42f", "Latin9Form.42f")
+	m := &manifest.Manifest{}
+	recordOrFail(t, m, staged)
+	if m.CharacterEncoding != "" {
+		t.Errorf("CharacterEncoding = %q, want it absent", m.CharacterEncoding)
+	}
+}
+
+// --- resources ------------------------------------------------------------
 
 // The practice the guide recommends: pure-ASCII code, localized text in .str.
 // The package must come out portable (US-ASCII code) with the resource named
@@ -171,11 +356,10 @@ func TestRecordEncoding_ASCIICodePlusLocalizedResourcesStaysPortable(t *testing.
 // A resource set in several charsets cannot be one package-wide value, so each
 // file carries its own. An ASCII resource constrains nothing and is omitted.
 func TestRecordEncoding_ResourcesAreRecordedPerFile(t *testing.T) {
-	staged := stageFixtures(t, "Utf8Msg.42s", "AsciiMsg.42s")
+	staged := stageFixtures(t, "Utf8Msg.42s", "AsciiMsg.42s", "Latin9Msg.42s")
 	m := &manifest.Manifest{
 		StringResourceEncodings: map[string]string{"Latin9Msg.42s": "ISO-8859-15"},
 	}
-	staged["Latin9Msg.42s"] = stageArtifactOnly(t, "Latin9Msg.42s")["Latin9Msg.42s"]
 	recordOrFail(t, m, staged)
 	want := map[string]string{
 		"Utf8Msg.42s":   charmap.UTF8,
@@ -206,14 +390,55 @@ func TestRecordEncoding_ResourceDeclarationContradictingBytesFails(t *testing.T)
 	}
 }
 
-// The cross-check that stayed: a form carrying non-ASCII text names its
-// encoding, so a declaration that disagrees is provably wrong.
-func TestRecordEncoding_DeclarationContradictingARealPrologFails(t *testing.T) {
+// The other direction: a file whose high bytes are NOT valid UTF-8 cannot be
+// UTF-8 or ASCII, so those two declarations are provably wrong. Any other
+// name narrows an undecidable result and is accepted.
+func TestRecordEncoding_ResourceDeclaredASCIIOrUTF8AgainstEightBitBytesFails(t *testing.T) {
+	for _, declared := range []string{charmap.ASCII, "ascii", charmap.UTF8, "utf-8"} {
+		t.Run(declared, func(t *testing.T) {
+			staged := stageFixtures(t, "Latin9Msg.42s")
+			m := &manifest.Manifest{
+				StringResourceEncodings: map[string]string{"Latin9Msg.42s": declared},
+			}
+			err := recordEncoding(m, staged)
+			if err == nil {
+				t.Fatalf("declaring %q for bytes that are not valid UTF-8 must fail the pack", declared)
+			}
+			if !strings.Contains(err.Error(), "Latin9Msg.42s") {
+				t.Errorf("the error must name the file, got: %v", err)
+			}
+		})
+	}
+}
+
+// A declaration is stored in its canonical IANA spelling, so two packages
+// declaring the same charset in different cases compare equal on the consumer
+// side and read the same in the shipped manifest.
+func TestRecordEncoding_DeclarationsAreStoredCanonically(t *testing.T) {
+	staged := stageFixtures(t, "Latin9Msg.42s", "AsciiBig.42m")
+	m := &manifest.Manifest{
+		CharacterEncoding:       "ascii",
+		StringResourceEncodings: map[string]string{"Latin9Msg.42s": "iso-8859-15"},
+	}
+	recordOrFail(t, m, staged)
+	if m.CharacterEncoding != charmap.ASCII {
+		t.Errorf("CharacterEncoding = %q, want the canonical %q", m.CharacterEncoding, charmap.ASCII)
+	}
+	if got := m.StringResourceEncodings["Latin9Msg.42s"]; got != "ISO-8859-15" {
+		t.Errorf("StringResourceEncodings[Latin9Msg.42s] = %q, want the canonical %q", got, "ISO-8859-15")
+	}
+}
+
+// --- declarations ---------------------------------------------------------
+
+// The cross-check that stayed: a form whose own bytes decode as UTF-8 proves
+// its text is UTF-8, so a declaration that disagrees is provably wrong.
+func TestRecordEncoding_DeclarationContradictingTheBytesFails(t *testing.T) {
 	staged := stageFixtures(t, "Utf8Form.42f")
 	m := &manifest.Manifest{CharacterEncoding: "ISO-8859-15"}
 	err := recordEncoding(m, staged)
 	if err == nil {
-		t.Fatal("a declaration contradicting a non-ASCII form's prolog must fail")
+		t.Fatal("a declaration contradicting a form's UTF-8 bytes must fail")
 	}
 	if !strings.Contains(err.Error(), "Utf8Form.42f") {
 		t.Errorf("the error must name the form, got: %v", err)
@@ -233,6 +458,9 @@ func TestRecordEncoding_DeclarationsThatUsedToFailWrongly(t *testing.T) {
 		// A pure-ASCII form built under a UTF-8 shell has a UTF-8 prolog, so
 		// "the prolog is authoritative" rejected the correct declaration.
 		{"US-ASCII against a UTF-8 prolog on an ASCII form", []string{"AsciiForm.42f"}, charmap.ASCII},
+		// And a form carrying real UTF-8 text built under LANG=C has an ASCII
+		// prolog, so the same rule rejected a correct UTF-8 declaration.
+		{"UTF-8 against an ASCII prolog on a UTF-8 form", []string{"Utf8Mislabelled.42f"}, charmap.UTF8},
 		// The practice: ASCII code, localized resources. The resource must not
 		// disprove a US-ASCII claim about the CODE.
 		{"US-ASCII code beside a UTF-8 resource", []string{"AsciiBig.42m", "Utf8Msg.42s"}, charmap.ASCII},
@@ -250,6 +478,8 @@ func TestRecordEncoding_DeclarationsThatUsedToFailWrongly(t *testing.T) {
 		})
 	}
 }
+
+// --- invariants -----------------------------------------------------------
 
 // pack must never consult the build environment. Whatever FGLPKG_CHARMAP says,
 // an unprovable package records nothing — that fallback is what made the same
@@ -277,20 +507,23 @@ func TestRecordEncoding_NoCodeArtifactsLeavesFieldAbsent(t *testing.T) {
 	}
 }
 
-// Two forms that each carry non-ASCII text in different charsets cannot both
-// be right, so the pack fails rather than picking one.
-func TestRecordEncoding_DisagreeingFormsFail(t *testing.T) {
-	staged := stageFixtures(t, "Utf8Form.42f")
-	dir := t.TempDir()
-	// A second form carrying a non-UTF-8 high byte and an ISO-8859-15 prolog.
-	latin := []byte("<?xml version='1.0' encoding='ISO-8859-15'?><Form><t>caf\xe9</t></Form>")
-	p := filepath.Join(dir, "Latin9Form.42f")
-	if err := os.WriteFile(p, latin, 0o644); err != nil {
-		t.Fatalf("write: %v", err)
+// Everything pack writes must survive its own validator, or the shipped
+// manifest cannot be read back. ASCII code plus a UTF-8 resource and a "char"
+// declaration is the recommended practice, and it used to pack a manifest that
+// Validate() then rejected.
+func TestRecordEncoding_WhatPackWritesPassesValidate(t *testing.T) {
+	staged := stageFixtures(t, "AsciiBig.42m", "Utf8Msg.42s")
+	m := &manifest.Manifest{
+		Name:            "demo-pkg",
+		Version:         "1.0.0",
+		LengthSemantics: manifest.LengthSemanticsChar,
 	}
-	staged["Latin9Form.42f"] = p
-	if err := recordEncoding(&manifest.Manifest{}, staged); err == nil {
-		t.Fatal("two forms naming different charsets for real non-ASCII text must fail the pack")
+	recordOrFail(t, m, staged)
+	if m.CharacterEncoding != charmap.ASCII {
+		t.Fatalf("CharacterEncoding = %q, want %q", m.CharacterEncoding, charmap.ASCII)
+	}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("pack wrote a manifest its own Validate() rejects: %v", err)
 	}
 }
 
@@ -316,5 +549,36 @@ func TestScanEncoding_NamesAStableFile(t *testing.T) {
 	}
 	if first == "" {
 		t.Fatal("expected an unproven file to be recorded")
+	}
+}
+
+// The include scanner must match what fglcomp treats as a directive, or it
+// chases filenames out of comments and string literals and declines to prove
+// packages that are fine. Verified against fglcomp 6.00.01: the directive is
+// lower-case, takes either quote, and must be the FIRST token on its line.
+func TestIncludeRe_MatchesWhatFglcompTreatsAsADirective(t *testing.T) {
+	cases := []struct {
+		line string
+		want string
+	}{
+		{`&include "greet.inc"`, "greet.inc"},
+		{`   &include "greet.inc"`, "greet.inc"},
+		{"\t&include 'greet.inc'", "greet.inc"},
+		{`&include  "inc/greet.inc"`, "inc/greet.inc"},
+		// Not directives: fglcomp compiles all three without reading a file.
+		{`# &include "greet.inc"`, ""},
+		{`   DISPLAY "&include \"greet.inc\""`, ""},
+		{`&INCLUDE "greet.inc"`, ""}, // error -8053, unknown directive
+		{`&define GREETING "hi"`, ""},
+	}
+	for _, tc := range cases {
+		m := includeRe.FindStringSubmatch(tc.line)
+		got := ""
+		if m != nil {
+			got = m[1]
+		}
+		if got != tc.want {
+			t.Errorf("includeRe on %q = %q, want %q", tc.line, got, tc.want)
+		}
 	}
 }
