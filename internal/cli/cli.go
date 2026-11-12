@@ -2969,13 +2969,18 @@ func publishToArtifactory(home string, m *manifest.Manifest, generoMajor string,
 	variant := artifactVariant(m, generoMajor)
 
 	fmt.Printf("Publishing %s@%s (%s) to %s (%s)...\n", m.Name, m.Version, variantDescription(variant), reg.Name, reg.URL)
+	// Artifactory paths are case-sensitive and the repository stores whatever
+	// it is given, so the slug is what makes the upload findable again: the
+	// folder AND the zip file name both carry it, and variantTag parses the zip
+	// name back using the folder name as its prefix (GIS-610).
+	slug := publishSlug(m.Name)
 	if pf.dryRun {
 		fmt.Printf("DRY RUN — no network calls will be made\n")
 	} else {
 		fmt.Printf("  Package zip: %d bytes (SHA256: %s)\n", len(zipData), checksum)
 	}
 	if err := p.Publish(provider.PublishRequest{
-		Name:     m.Name,
+		Name:     slug,
 		Version:  m.Version,
 		Variant:  variant,
 		Zip:      zipData,
@@ -3018,16 +3023,9 @@ func publishPackage(m *manifest.Manifest, registryURL, generoMajor string, dryRu
 	fmt.Printf("  Package zip: %d bytes (SHA256: %s)\n", len(zipData), checksum)
 
 	variant := artifactVariant(m, generoMajor)
-	// The slug is the canonical (PyPI/PEP 503) form of the name — lowercased,
-	// with runs of '-'/'_'/'.' collapsed to '-' — and is the package's identity
-	// in every /registry/... path. The manifest name is kept as the display
-	// name. Validity is already enforced upstream by ValidateForPublish (which
-	// runs for every publish path, GI and Artifactory alike), so here we only
-	// need the canonical form for the URL (GIS-271).
-	slug := slugutil.Canonical(m.Name)
-	if slug != m.Name {
-		fmt.Printf("  Normalized name %q → slug %q\n", m.Name, slug)
-	}
+	// The slug is the package's identity in every /registry/... path; the
+	// manifest name stays the display name.
+	slug := publishSlug(m.Name)
 	filename := artifactFilename(slug, m.Version, variant)
 	visibility := visibilityOverride
 	if visibility == "" {
@@ -3197,6 +3195,35 @@ func artifactVariant(m *manifest.Manifest, generoMajor string) string {
 		return "webcomponent"
 	}
 	return "genero" + generoMajor
+}
+
+// publishSlug returns the canonical slug a publish must store the package
+// under, announcing the normalization when it differs from the name the author
+// wrote.
+//
+// The slug is the canonical (PyPI/PEP 503) form of the name — lowercased, with
+// runs of '-'/'_'/'.' collapsed to a single '-' — and it is the package's
+// identity everywhere a consumer looks it up, because the resolver canonicalizes
+// every lookup (resolver.state.enqueue, GIS-271). The manifest's own name stays
+// verbatim as the display name.
+//
+// EVERY publish path must call this. It exists because they did not: the GI
+// path canonicalized while the Artifactory path sent the manifest name
+// verbatim, so "DateTime" was stored at DateTime/0.1.0/... on a case-sensitive
+// Artifactory repository while install asked for "datetime" and reported that
+// the package could not be found (GIS-610). The two blocks of code were
+// identical apart from one being absent, which is not a difference any reader
+// could see; one function is (see TestPublishSlug).
+//
+// Validity is not checked here: ValidateForPublish rejects a name whose
+// canonical form is not a well-formed slug, and it runs in cmdPublish before
+// any publish path is chosen.
+func publishSlug(name string) string {
+	slug := slugutil.Canonical(name)
+	if slug != name {
+		fmt.Printf("  Normalized name %q → slug %q\n", name, slug)
+	}
+	return slug
 }
 
 // artifactFilename returns the zip filename for a published artifact:

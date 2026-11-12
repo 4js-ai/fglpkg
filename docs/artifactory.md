@@ -281,6 +281,42 @@ then `PUT`s the sidecar `fglpkg.json`. Notes:
 To stop typing `--registry` on every publish, set a default publish target — see
 below.
 
+### Package names are stored as a lowercase slug
+
+The folder and zip file fglpkg deploys are named after the package's **canonical
+slug**, not the `"name"` you wrote in `fglpkg.json`. The slug is the name
+lowercased, with every run of `-`, `_` or `.` collapsed to a single `-`:
+
+| `"name"` in `fglpkg.json` | Stored under | Install with |
+|---|---|---|
+| `datetime` | `datetime/` | `fglpkg install datetime` |
+| `DateTime` | `datetime/` | `fglpkg install DateTime` *or* `datetime` |
+| `My_Date.Lib` | `my-date-lib/` | any spelling that collapses to `my-date-lib` |
+
+This is the same rule GI uses, and the same one `fglpkg install` applies to
+whatever you type, so the two always agree. A name that needs normalizing is
+reported during publish:
+
+```
+  Normalized name "DateTime" → slug "datetime"
+```
+
+Your `"name"` is kept verbatim in the sidecar manifest and is what `fglpkg
+search` and `fglpkg info` show, so capitalization you want people to read is not
+lost — it just isn't part of the path.
+
+A name must still **be** a valid slug once normalized: 2–64 characters of
+lowercase letters, digits and hyphens, starting and ending with a letter or
+digit. `fglpkg publish` refuses anything else before uploading, in `--dry-run`
+too.
+
+> **Upgrading from fglpkg ≤ 4.2.9.** Older versions deployed to Artifactory
+> under the verbatim name, so a package published as `DateTime` sits in a
+> `DateTime/` folder that no `fglpkg install` can reach — install has always
+> asked for the slug. Re-publish it (the deploy now lands in `datetime/`), or
+> rename the folder in Artifactory. Packages whose names were already lowercase
+> are unaffected and need no action.
+
 ## Choosing a default registry
 
 fglpkg has two **separate** defaults; keep them distinct.
@@ -403,6 +439,7 @@ its own `fglpkg login --registry`, so authenticate each secondary explicitly in 
 | `registry "<name>" (type=artifactory) needs a generic-repo key` | Pass `--repo-key <k>`, or paste the full `…/artifactory/<key>` URL so it's inferred. |
 | `--repo-key "<x>" disagrees with the repo key "<y>" in the URL` | The flag and the URL's trailing segment differ. Pass the base URL with the flag, or drop the flag and let the URL supply the key. |
 | `variant already exists … re-run with --force` on publish | The version+variant is already deployed. Bump the version, or pass `--force` to overwrite (unless the repo is immutable, which returns `409`). |
+| `package "<x>" cannot be found` for something you just published | Most likely the package was deployed by fglpkg ≤ 4.2.9 under a **mixed-case or dotted name**. Artifactory paths are case-sensitive and install asks for the lowercase [slug](#package-names-are-stored-as-a-lowercase-slug), so a `DateTime/` folder is unreachable. Re-publish with 4.2.10 or later, or rename the folder in Artifactory. Check with `fglpkg search --registry <name> --all`: the folder name is what is listed. |
 | `mavenMirror requires a non-empty 'url'` / `… unknown auth …` at pack/publish | The `mavenMirror` block has an empty `url` or an `auth` that isn't `bearer\|basic\|apikey\|anonymous`. Both are caught at pack/publish (an omitted `auth` is fine — it defaults to `bearer`). Fix the block. If downloads still 403 *after* the block is valid, the cause is a credential mismatch — see the next row. |
 | JAR download 403 from your mirror | The mirror credential isn't resolving. Declare the enclosing Artifactory base under `registries`, `fglpkg login --registry <name> --token …`, and make sure `mavenMirror.auth` matches how you logged in. |
 

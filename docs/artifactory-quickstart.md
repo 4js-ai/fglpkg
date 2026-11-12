@@ -69,6 +69,20 @@ Publishing to Artifactory is immediate — there is no review/approval step (tha
 is GI-only). Re-publishing an already-deployed version + Genero variant is refused
 unless you pass `--force`.
 
+**Name it in lowercase.** The deploy path is the package's canonical slug — the
+`"name"` lowercased with runs of `-`, `_` and `.` collapsed to one `-` — because
+that is what `fglpkg install` looks up. `DateTime` is deployed to `datetime/`,
+and publish tells you so:
+
+```
+  Normalized name "DateTime" → slug "datetime"
+```
+
+Your `"name"` stays verbatim in the manifest as the display name. See
+[Package names are stored as a lowercase slug](artifactory.md#package-names-are-stored-as-a-lowercase-slug)
+for the rules, and for what to do about packages published by fglpkg ≤ 4.2.9,
+which deployed under the verbatim name and are unreachable by install.
+
 ## In CI
 
 Commit the `--local` declaration from step 1, give the job a scoped access token,
