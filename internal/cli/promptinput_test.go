@@ -326,3 +326,46 @@ func TestPromptYesNoReadsThroughTheSanitiser(t *testing.T) {
 		})
 	}
 }
+
+// TestSS3FinalSet pins the MEMBERS of the SS3/SS2 final set, which the rest of
+// the suite does not: an always-true isSS3Final and an unconditional three-byte
+// SS3 are both killed above, so the shape of the rule is covered, but dropping
+// a single member from the set, or adding one, passed everything.
+//
+// Both directions corrupt something. Drop a member and that key leaks its bytes
+// into the answer — application-mode Home would write "OH" into fglpkg.json,
+// which is the whole of GIS-613. Add one and a character the user typed after a
+// stray Esc disappears instead.
+func TestSS3FinalSet(t *testing.T) {
+	// Every final a terminal actually sends after ESC O / ESC N, named by the
+	// key that sends it so a deletion fails with the key's name in the message.
+	finals := map[byte]string{
+		'A': "Up", 'B': "Down", 'C': "Right", 'D': "Left",
+		'F': "End", 'H': "Home",
+		'P': "F1", 'Q': "F2", 'R': "F3", 'S': "F4",
+	}
+	for b, key := range finals {
+		// SS3 (ESC O) and SS2 (ESC N) take the same finals.
+		for _, intro := range []string{"O", "N"} {
+			in := "a" + esc + intro + string(b) + "z"
+			if got := stripTerminalControls(in); got != "az" {
+				t.Errorf("%s (ESC %s %c) = %q, want %q — the keystroke leaks into the answer",
+					key, intro, b, got, "az")
+			}
+		}
+	}
+
+	// Nothing else is a final. After a stray Esc, "O" and whatever follows it
+	// are characters the user typed and watched appear, so both must survive.
+	for _, b := range []byte("EGIJKLMNOTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789") {
+		if _, isFinal := finals[b]; isFinal {
+			t.Fatalf("the non-final list contains %c, which is in the set", b)
+		}
+		in := "a" + esc + "O" + string(b) + "z"
+		want := "aO" + string(b) + "z"
+		if got := stripTerminalControls(in); got != want {
+			t.Errorf("ESC O %c = %q, want %q — a non-final must not be read as a keypress",
+				b, got, want)
+		}
+	}
+}
