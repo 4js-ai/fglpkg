@@ -1,0 +1,224 @@
+package cli
+
+import (
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
+)
+
+const (
+	esc = "\x1b"
+	// What a terminal in normal cursor mode sends for the four arrow keys.
+	arrowLeft  = esc + "[D"
+	arrowRight = esc + "[C"
+	// What it sends in APPLICATION cursor mode — the mode a full-screen program
+	// can leave the terminal in, and a shape a CSI-only strip would miss.
+	appArrowUp = esc + "OA"
+)
+
+func TestStripTerminalControls(t *testing.T) {
+	cases := []struct {
+		name, in, want, why string
+	}{
+		{
+			"the reported keystroke",
+			"A descriptin" + arrowLeft + arrowLeft + "o",
+			"A descriptino",
+			"GIS-613: arrow keys insert bytes instead of moving; the text is wrong but CLEAN",
+		},
+		{"clean text is untouched", "A real description", "A real description", ""},
+		{"empty stays empty", "", "", ""},
+		{"a lone arrow leaves nothing", arrowLeft, "", "an empty line, which prompts already read as 'accept the default'"},
+		{"application-mode arrows", "ab" + appArrowUp + "cd", "abcd", "ESC O A is three bytes, not a CSI sequence"},
+		{"home and end", esc + "[H" + "x" + esc + "[F", "x", ""},
+		{"delete key", "ab" + esc + "[3~" + "cd", "abcd", "a CSI sequence with a parameter and a ~ final byte"},
+		{"a parameterised CSI", "a" + esc + "[1;5D" + "b", "ab", "parameters and the ';' separator are part of the sequence"},
+		{
+			"bracketed paste markers",
+			esc + "[200~" + "pasted text" + esc + "[201~",
+			"pasted text",
+			"a terminal with bracketed paste on wraps what is pasted",
+		},
+		{"an OSC sequence ended by BEL", "a" + esc + "]0;a title\x07" + "b", "ab", ""},
+		{"an OSC sequence ended by ST", "a" + esc + "]0;t" + esc + "\\" + "b", "ab", ""},
+		{"a two-byte meta escape", "a" + esc + "b" + "c", "ac", ""},
+		{
+			"an unterminated CSI eats the rest",
+			"keep" + esc + "[12",
+			"keep",
+			"emitting the tail as text is the corruption being prevented",
+		},
+		{"a trailing lone ESC", "keep" + esc, "keep", ""},
+		{"DEL is dropped", "ab\x7fc", "abc", "some terminals send DEL for Backspace"},
+		{"a stray control byte", "a\x01b\x02c", "abc", ""},
+		{"tab survives", "a\tb", "a\tb", "a tab is text a person can legitimately type"},
+		{
+			"tab survives the rebuild too",
+			"a\tb" + arrowLeft + "c",
+			"a\tbc",
+			"a line with no control byte returns early, so only a line that ALSO " +
+				"trips the scanner proves the loop keeps tabs — without this the " +
+				"'tab survives' row above passes even if the loop drops them",
+		},
+		{
+			"UTF-8 survives",
+			"café ünïcode 日本語 — ok",
+			"café ünïcode 日本語 — ok",
+			"bytes >= 0x80 must pass through or every accented author name is mangled",
+		},
+		{
+			"UTF-8 next to an escape",
+			"日本" + arrowRight + "語",
+			"日本語",
+			"the scanner must not resynchronise mid-rune",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stripTerminalControls(tc.in)
+			if got != tc.want {
+				t.Errorf("stripTerminalControls(%q) = %q, want %q (%s)", tc.in, got, tc.want, tc.why)
+			}
+			// The acceptance criterion, on every row: whatever comes out is
+			// safe to write to a manifest.
+			if strings.ContainsAny(got, esc+"\x7f") {
+				t.Errorf("result still carries a control byte: %q", got)
+			}
+		})
+	}
+}
+
+// Idempotence: sanitising already-clean text must be a no-op, or a value read
+// back and re-prompted would keep changing.
+func TestStripTerminalControlsIsIdempotent(t *testing.T) {
+	for _, in := range []string{"plain", "A descriptin" + arrowLeft + "o", "日本語", "", arrowLeft} {
+		once := stripTerminalControls(in)
+		if twice := stripTerminalControls(once); twice != once {
+			t.Errorf("stripTerminalControls(%q) = %q, then %q — not idempotent", in, once, twice)
+		}
+	}
+}
+
+// readPromptLine sanitises a terminal and leaves a pipe alone. The split is the
+// contract GIS-613 is bound by: bytes down a pipe were put there deliberately
+// by a script or a test, and rewriting those would change what every
+// non-interactive caller — the functional suite included — receives.
+func TestReadPromptLineSanitisesOnlyATerminal(t *testing.T) {
+	const typed = "desc" + arrowLeft + "x"
+	cases := []struct {
+		name string
+		tty  bool
+		want string
+	}{
+		{"terminal input is sanitised", true, "descx"},
+		{"piped input is byte-for-byte", false, typed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			origTTY := stdinIsTerminal
+			stdinIsTerminal = func() bool { return tc.tty }
+			t.Cleanup(func() { stdinIsTerminal = origTTY })
+			withStdin(t, typed+"\n")
+
+			got, err := readPromptLine()
+			if err != nil {
+				t.Fatalf("readPromptLine: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("readPromptLine() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The EOF contract must not move: a closed stream still reports the error, so
+// required prompts abort instead of looping on an empty line.
+func TestReadPromptLineKeepsTheEOFContract(t *testing.T) {
+	for _, tty := range []bool{true, false} {
+		origTTY := stdinIsTerminal
+		stdinIsTerminal = func() bool { return tty }
+		withStdin(t, "")
+		line, err := readPromptLine()
+		stdinIsTerminal = origTTY
+		if err == nil {
+			t.Errorf("tty=%v: closed stdin returned no error", tty)
+		}
+		if line != "" {
+			t.Errorf("tty=%v: closed stdin returned %q, want empty", tty, line)
+		}
+	}
+	// A final line with no trailing newline is still input, not EOF-with-nothing.
+	origTTY := stdinIsTerminal
+	stdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { stdinIsTerminal = origTTY })
+	withStdin(t, "no newline"+arrowLeft)
+	line, err := readPromptLine()
+	if line != "no newline" {
+		t.Errorf("unterminated final line = %q, want %q", line, "no newline")
+	}
+	if err == nil {
+		t.Error("an unterminated final line should still report the read error")
+	}
+}
+
+// TestInitNeverWritesEscapeBytesIntoTheManifest is the acceptance criterion
+// end to end: the customer corrected a field mid-entry with the arrow keys, and
+// the escape sequence was saved into fglpkg.json — from where it would travel
+// into the published sidecar and the registry record.
+//
+// The answers are deliberately the ones a person mistypes and fixes: free text,
+// where no later validation would have caught the bytes. (promptPackageSlug
+// already re-prompts until the name is a valid slug, so the name field was
+// never the exposure.)
+func TestInitNeverWritesEscapeBytesIntoTheManifest(t *testing.T) {
+	t.Setenv("FGLPKG_GENERO_VERSION", "5.01.00")
+
+	origTTY := stdinIsTerminal
+	stdinIsTerminal = func() bool { return true }
+	t.Cleanup(func() { stdinIsTerminal = origTTY })
+
+	dir := t.TempDir()
+	gitInitWithOrigin(t, dir, "git@github.com:acme/widget.git")
+	chdir(t, dir)
+
+	answers := strings.Join([]string{
+		"mypkg",
+		"",
+		"A descriptin" + arrowLeft + arrowLeft + "o", // tried to fix a typo
+		"Jane Dev" + appArrowUp,                      // a stray keypress
+		"MIT",
+		"",
+		"current",
+	}, "\n") + "\n"
+	withStdin(t, answers)
+
+	if _, err := captureStdout(t, func() error { return cmdInit(nil) }); err != nil {
+		t.Fatalf("cmdInit: %v", err)
+	}
+
+	raw, err := os.ReadFile(manifest.Filename)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if strings.ContainsAny(string(raw), esc+"\x7f") {
+		t.Errorf("%s contains terminal control bytes:\n%q", manifest.Filename, raw)
+	}
+
+	m, err := manifest.Load(".")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// The text is still wrong — the arrow keys did not edit the line, which is
+	// what GIS-617 has to answer — but it is text, and it round-trips.
+	if m.Description != "A descriptino" {
+		t.Errorf("description = %q, want %q", m.Description, "A descriptino")
+	}
+	if m.Author != "Jane Dev" {
+		t.Errorf("author = %q, want %q", m.Author, "Jane Dev")
+	}
+	if err := m.ValidateForPublish(); err != nil {
+		t.Errorf("manifest should still be publishable: %v", err)
+	}
+}

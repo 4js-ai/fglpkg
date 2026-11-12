@@ -2341,9 +2341,7 @@ func promptYesNo(prompt string, yesDefault bool) bool {
 
 	for {
 		fmt.Printf("%s: ", fullPrompt)
-		res, err := reader.ReadString('\n')
-		// Trim CR and LF to handle both Unix (\n) and Windows (\r\n) endings.
-		res = strings.TrimRight(res, "\r\n")
+		res, err := readPromptLine()
 		switch {
 		case err != nil && res == "":
 			// stdin closed or interrupted (e.g. Ctrl+C): treat as "not
@@ -6277,9 +6275,7 @@ func promptWithDefault(label, def string) (string, error) {
 	} else {
 		fmt.Printf("%s: ", label)
 	}
-	line, err := reader.ReadString('\n')
-	// Trim CR and LF to handle both Unix (\n) and Windows (\r\n) line endings.
-	line = strings.TrimRight(line, "\r\n")
+	line, err := readPromptLine()
 	if line != "" {
 		// Got input, even if EOF immediately followed an unterminated final line.
 		return line, nil
