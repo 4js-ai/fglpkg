@@ -118,3 +118,34 @@ _install_global_dir_named_like_pkg() {
   assert_no_file ".fglpkg"
 }
 it "install --global from a directory named like the package is not a self-dependency" _install_global_dir_named_like_pkg
+
+# GIS-611: the install line carried the lock file's storage sentinel into the
+# user's terminal — "✓ demo-pkg@1.0.0  (required by: <root>)" — and a first-time
+# user had to ask support what "<root>" meant. It means "you asked for this one".
+#
+# The lock file keeps the sentinel: it is the persisted value the SBOM, the
+# dependency tree and the post-install cross-check all match on. Only the
+# rendering changed, and this case asserts both halves at once — if a fix ever
+# "cleans up" the stored value instead of the display, the second assertion
+# fails.
+_install_names_a_direct_dependency_plainly() {
+  mock_registry_start
+  run install demo.pkg@1.0.0
+  assert_success || return 1
+  assert_contains "direct dependency" || return 1
+  assert_not_contains "<root>" || return 1
+  assert_file_contains "fglpkg-lock.json" "<root>"
+}
+it "install calls a direct dependency what it is, not '<root>'" _install_names_a_direct_dependency_plainly
+
+# The tree heading is the other place the sentinel could surface. `fglpkg list`
+# reads the same lock, so a leak here would be the same bug in a second window.
+_list_shows_no_sentinel() {
+  mock_registry_start
+  run install demo.pkg@1.0.0
+  assert_success || return 1
+  run list
+  assert_success || return 1
+  assert_not_contains "<root>"
+}
+it "fglpkg list never shows the storage sentinel either" _list_shows_no_sentinel

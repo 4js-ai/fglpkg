@@ -27,8 +27,9 @@ import (
 )
 
 // rootPkgLabel is the pseudo-package name used for the root project's own
-// declarations in a divergence report.
-const rootPkgLabel = "<root>"
+// declarations in a divergence report. It is the lock file's sentinel, so the
+// two cannot drift; pkgLabel renders it for people (GIS-611).
+const rootPkgLabel = lockfile.RootRequirer
 
 // divergenceClass classifies how a declared dependency differs from the set
 // the installer is actually going to install.
@@ -411,6 +412,12 @@ func formatCoords(deps []manifest.JavaDependency) string {
 // pkgLabel renders a declaring package as "name@version", or just "name" when
 // the version is unknown.
 func pkgLabel(pkg, version string) string {
+	// The root project is not a package, so it gets no coordinate: "<root>@1.0.0"
+	// reads as a package named <root>, and the bare sentinel told a first-time
+	// user nothing at all (GIS-611). "this project declares …" says it plainly.
+	if pkg == rootPkgLabel {
+		return lockfile.DisplayRequirer(pkg)
+	}
 	if version == "" {
 		return pkg
 	}

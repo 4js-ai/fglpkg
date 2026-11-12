@@ -41,7 +41,7 @@ import (
 
 // rootLabel is the lock file's sentinel for "declared by the root project"
 // (lockfile.LockedPackage.RequiredBy, and installer's rootPkgLabel).
-const rootLabel = "<root>"
+const rootLabel = lockfile.RootRequirer
 
 // Tree glyphs. Non-ASCII output is already established in this CLI (the ✓ of
 // the install progress lines, the ─ divider of `outdated`), so there is no
@@ -489,7 +489,10 @@ func buildGlobalForest(pkgs []globalPkg, maxDepth int) []listNode {
 func treeRootLabel(lf *lockfile.LockFile) string {
 	name, version := lf.RootManifest.Name, lf.RootManifest.Version
 	if name == "" {
-		return rootLabel
+		// Not the raw sentinel: "<root>" is a storage value, and a tree whose
+		// heading is an angle-bracketed token reads as a package named <root>
+		// (GIS-611). The grouping below still matches on rootLabel.
+		return lockfile.DisplayRequirer(rootLabel)
 	}
 	if version == "" {
 		return name
