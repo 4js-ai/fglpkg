@@ -89,10 +89,8 @@ func TestPkgLabelDoesNotCoordinateTheRootProject(t *testing.T) {
 	}
 }
 
-// The installer's label and the lock file's stored value are the same string,
-// so a divergence report cannot stop matching what install wrote.
-func TestRootPkgLabelTracksTheLockfileSentinel(t *testing.T) {
-	if rootPkgLabel != lockfile.RootRequirer {
-		t.Fatalf("rootPkgLabel = %q but lockfile.RootRequirer = %q", rootPkgLabel, lockfile.RootRequirer)
-	}
-}
+// (A test asserting rootPkgLabel == lockfile.RootRequirer used to sit here. It
+// could not fail: crosscheck.go DEFINES rootPkgLabel as that constant, so the
+// compiler folds the comparison away. What it was named for — that the value
+// the resolver writes is the value every consumer matches on — is pinned where
+// it can actually fail, in lockfile's TestResolverWritesTheRootSentinel.)

@@ -48,13 +48,14 @@ const (
 
 	// RootRequirer is the value stored in a RequiredBy list for a dependency
 	// the root project declares itself, as opposed to one pulled in by another
-	// package. It is a sentinel, not a name: no real package can be called
-	// "<root>", because a slug holds only lowercase letters, digits and hyphens.
+	// package. It is re-exported from the resolver, which mints it, so the
+	// written value and the persisted value are one constant and not two
+	// literals that could drift (GIS-611).
 	//
 	// It is PERSISTED. The SBOM generator, `fglpkg list` and the post-install
 	// cross-check all match on this exact string, and so do lock files already
-	// written, so the value must not change.
-	RootRequirer = "<root>"
+	// written, so the value must not change. requirer_test.go pins it.
+	RootRequirer = resolver.RootRequirer
 )
 
 // DisplayRequirer renders one RequiredBy entry for a person to read.
