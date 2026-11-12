@@ -24,6 +24,8 @@ import (
 	"strings"
 	"time"
 
+	slugutil "github.com/4js-mikefolcher/fglpkg/internal/slug"
+
 	"github.com/4js-mikefolcher/fglpkg/internal/atomicfile"
 )
 
@@ -383,13 +385,36 @@ func validate(r Registry) error {
 
 // Admits reports whether this registry may serve the given package name, per
 // its optional 'packages' glob allow-list. An empty list admits every name.
+//
+// A name is matched BOTH as written and as its canonical slug, because a
+// package's name identity is its slug: the resolver canonicalizes every lookup,
+// and the providers canonicalize at their own boundaries, so a scope that
+// matched only the spelling a user happened to type would admit `fglpkg install
+// datetime` and reject `fglpkg install DateTime` for the same package — and the
+// rejection comes with the repository missing from the diagnostic, because this
+// runs before the lookup (GIS-610).
+//
+// The pattern is matched verbatim, never canonicalized, because Canonical
+// rewrites glob syntax: it collapses a separator run wherever it finds one, so
+// the class "acme[._]utils" becomes "acme[-]utils" — two alternatives merged
+// into one. A scope is therefore written in the canonical form of the names it
+// means to admit, which is also how they are displayed and installed.
+//
+// Testing the extra form can only ever widen the allow-list, so no scope that
+// admits a name today can stop admitting it.
 func (r Registry) Admits(name string) bool {
 	if len(r.Packages) == 0 {
 		return true
 	}
+	canonical := slugutil.Canonical(name)
 	for _, pat := range r.Packages {
 		if ok, _ := path.Match(pat, name); ok {
 			return true
+		}
+		if canonical != name {
+			if ok, _ := path.Match(pat, canonical); ok {
+				return true
+			}
 		}
 	}
 	return false

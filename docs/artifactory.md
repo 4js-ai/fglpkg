@@ -120,7 +120,7 @@ fglpkg registry add acme https://artifactory.acme.example/artifactory \
 | `--repo-key <k>` | The Artifactory generic-repo key. Required for `artifactory` unless the URL already carries it (see below). |
 | `--auth <scheme>` | `bearer` \| `basic` \| `apikey` \| `anonymous`. Default `bearer`. |
 | `--priority <n>` | Lower is tried first; must be unique. Defaults to `max + 1` when omitted (the built-in `gi` is priority `1`). |
-| `--packages <globs>` | Comma-separated name-scope allow-list, e.g. `'acme-*,foo-*'`. Omit to consult the repo for any name. |
+| `--packages <globs>` | Comma-separated name-scope allow-list, e.g. `'acme-*,foo-*'`. Write the globs in lowercase — they are matched as written, against the package's [canonical slug](#package-names-are-stored-as-a-lowercase-slug) as well as the name you type. Omit to consult the repo for any name. |
 | `--local` | Write to the project `fglpkg.json` instead of `~/.fglpkg/config.json`. Requires an `fglpkg.json` in the current directory. |
 | `--consume-default` | Also make this the default consume registry (see [Choosing a default](#choosing-a-default-registry)). |
 | `--type <t>` | `genero` \| `artifactory` (default `artifactory`). Only the built-in `gi` may be `genero`. |

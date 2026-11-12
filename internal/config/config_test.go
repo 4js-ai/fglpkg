@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -367,5 +368,82 @@ func TestAdmits(t *testing.T) {
 	// No allow-list admits everything.
 	if !(Registry{}).Admits("anything") {
 		t.Fatal("empty allow-list should admit all")
+	}
+}
+
+// A scope is an allow-list of package NAMES, and a package's name identity is
+// its canonical slug — the resolver canonicalizes every lookup and the
+// providers canonicalize at their own boundaries. Matching only the spelling a
+// user happened to type split a scoped repository in two: `fglpkg install
+// datetime` resolved and `fglpkg install DateTime` reported the package missing
+// "in any configured repository", with the scoped repository absent from that
+// list because this predicate runs before the lookup (GIS-610).
+func TestAdmitsMatchesTheCanonicalName(t *testing.T) {
+	cases := []struct {
+		name     string
+		patterns []string
+		pkg      string
+		want     bool
+		why      string
+	}{
+		{"the canonical spelling", []string{"datetime"}, "datetime", true, ""},
+		{"the author's spelling", []string{"datetime"}, "DateTime", true,
+			"the same package; this is the case the customer hit"},
+		{"upper case throughout", []string{"datetime"}, "DATETIME", true, ""},
+		{"separators collapse to the slug", []string{"acme-*"}, "Acme_Utils", true,
+			"Acme_Utils and acme-utils are one package"},
+		{"a dotted spelling", []string{"acme-*"}, "ACME.Utils", true, ""},
+		{"a name outside the scope is still refused", []string{"acme-*"}, "logft", false,
+			"widening to the canonical form must not admit everything"},
+		{"a name that only looks close is still refused", []string{"datetime"}, "datetimes", false, ""},
+		{"a mixed-case name outside the scope", []string{"acme-*"}, "LogFT", false,
+			"the canonical form 'logft' does not match either"},
+		{
+			"a pattern containing a dot is matched verbatim",
+			[]string{"acme.*"}, "acme.utils", true,
+			"the PATTERN is never canonicalized: Canonical collapses '.', so 'acme.*' " +
+				"would become 'acme-' and stop matching what its author wrote",
+		},
+		{
+			"the PATTERN is used as written, so a scope is written canonically",
+			[]string{"DateTime"}, "datetime", false,
+			"Canonical rewrites glob syntax — the class 'acme[._]utils' becomes " +
+				"'acme[-]utils', merging two alternatives — so patterns are matched " +
+				"verbatim and a mixed-case scope matches nothing. Widening the pattern " +
+				"side too is a separate decision, deliberately not taken here",
+		},
+		{"an empty allow-list still admits any spelling", nil, "DateTime", true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := (Registry{Packages: tc.patterns}).Admits(tc.pkg); got != tc.want {
+				t.Errorf("Registry{Packages: %v}.Admits(%q) = %v, want %v (%s)",
+					tc.patterns, tc.pkg, got, tc.want, tc.why)
+			}
+		})
+	}
+}
+
+// Widening can only add. Whatever a scope admitted before the canonical form
+// was consulted, it must still admit — a narrowed scope silently stops routing
+// to a repository, which surfaces as a package that cannot be found rather than
+// as an error anyone can read.
+func TestAdmitsOnlyWidens(t *testing.T) {
+	patterns := []string{"acme-*", "internal-*", "datetime", "x.y"}
+	for _, pkg := range []string{
+		"acme-utils", "internal-x", "datetime", "x.y",
+		"logft", "other", "ACME-UTILS", "acme.utils",
+	} {
+		r := Registry{Packages: patterns}
+		rawMatched := false
+		for _, pat := range patterns {
+			if ok, _ := path.Match(pat, pkg); ok {
+				rawMatched = true
+				break
+			}
+		}
+		if rawMatched && !r.Admits(pkg) {
+			t.Errorf("Admits(%q) = false although the raw name matches a pattern", pkg)
+		}
 	}
 }
