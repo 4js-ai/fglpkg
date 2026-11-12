@@ -133,7 +133,16 @@ func (a *ArtifactoryProvider) getJSON(url string, out interface{}) error {
 // warning. GeneroConstraint is left empty here and filled lazily by FetchInfo
 // from the per-version sidecar (avoids a metadata read per version).
 func (a *ArtifactoryProvider) FetchVersions(name string) ([]resolver.CandidateVersion, error) {
-	name = slugutil.Canonical(name) // see "Package names" above
+	return a.listVersions(slugutil.Canonical(name)) // see "Package names" above
+}
+
+// listVersions lists the version folders under an EXACT folder name, with no
+// canonicalizing. It exists for Search, whose argument is a folder the
+// repository reported rather than a name someone asked for: a legacy
+// mixed-case folder left by fglpkg <= 4.2.9 must be described by its own
+// contents, not by a canonical folder that may hold something else entirely.
+// Everything that starts from a name people type goes through FetchVersions.
+func (a *ArtifactoryProvider) listVersions(name string) ([]resolver.CandidateVersion, error) {
 	var fi folderInfo
 	if err := a.getJSON(a.storageURL(name), &fi); err != nil {
 		return nil, err
@@ -258,7 +267,8 @@ func (a *ArtifactoryProvider) Search(term string) ([]registry.SearchResult, erro
 			continue
 		}
 		res := registry.SearchResult{Name: name, Source: a.reg.Name}
-		if versions, err := a.FetchVersions(name); err == nil {
+		// listVersions, not FetchVersions: name here IS the folder (GIS-610).
+		if versions, err := a.listVersions(name); err == nil {
 			latest := highestVersion(versions).String()
 			res.LatestVersion = latest
 			// Best-effort: read the latest version's sidecar so the result carries

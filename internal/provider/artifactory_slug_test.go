@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/config"
+	"github.com/4js-mikefolcher/fglpkg/internal/registry"
 )
 
 // A package is stored under its canonical slug, so a read must ask for the
@@ -119,5 +120,75 @@ func TestArtifactory_PublishStoresTheCanonicalSlug(t *testing.T) {
 		if strings.Contains(got[i], "My_Date") || strings.Contains(got[i], "My_date") {
 			t.Errorf("PUT[%d] stored the verbatim name: %q", i, got[i])
 		}
+	}
+}
+
+// Search is the one read whose argument is NOT a name someone typed: it lists
+// the repository's folders and then describes each one. Canonicalizing there
+// makes a row lie about its own folder — and a legacy mixed-case folder is
+// exactly what the repository will hold, because that is what fglpkg <= 4.2.9
+// deployed and what docs/artifactory.md sends people to `search --all` to find.
+//
+// The repository below holds both: a legacy DateTime/ at 0.1.0 and the
+// republished datetime/ at 0.2.0, which is the upgrade path the docs prescribe.
+// With FetchVersions' canonicalizing in this path, the DateTime row reported
+// 0.2.0 (read out of the OTHER folder) and a blank description (its sidecar
+// lookup, which does not canonicalize, then 404'd).
+func TestArtifactory_SearchDescribesEachFolderItself(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/storage/generic-local", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, `{"children":[{"uri":"/DateTime","folder":true},{"uri":"/datetime","folder":true}]}`)
+	})
+	mux.HandleFunc("/api/storage/generic-local/DateTime", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, `{"children":[{"uri":"/0.1.0","folder":true}]}`)
+	})
+	mux.HandleFunc("/api/storage/generic-local/datetime", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, `{"children":[{"uri":"/0.2.0","folder":true}]}`)
+	})
+	mux.HandleFunc("/generic-local/DateTime/0.1.0/fglpkg.json", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, `{"name":"DateTime","version":"0.1.0","description":"legacy","genero":"^6.0.0"}`)
+	})
+	mux.HandleFunc("/generic-local/datetime/0.2.0/fglpkg.json", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, `{"name":"DateTime","version":"0.2.0","description":"current","genero":"^7.0.0"}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	reg := config.Registry{Name: "acme", Type: config.TypeArtifactory, URL: srv.URL, RepoKey: "generic-local", Auth: config.AuthAnonymous}
+	results, err := NewArtifactoryProvider(reg, nil, nil).Search("")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+
+	// Every field of a row has to come from the folder the row names: version
+	// from its own version list, description and constraint from its own
+	// sidecar. The two folders disagree on all three, so a row filled from the
+	// wrong one cannot look right by accident.
+	want := map[string]registry.SearchResult{
+		"DateTime": {LatestVersion: "0.1.0", Description: "legacy", GeneroConstraint: "^6.0.0"},
+		"datetime": {LatestVersion: "0.2.0", Description: "current", GeneroConstraint: "^7.0.0"},
+	}
+	if len(results) != len(want) {
+		t.Fatalf("got %d rows, want %d: %+v", len(results), len(want), results)
+	}
+	for _, got := range results {
+		w, ok := want[got.Name]
+		if !ok {
+			t.Errorf("unexpected row %q", got.Name)
+			continue
+		}
+		delete(want, got.Name)
+		if got.LatestVersion != w.LatestVersion {
+			t.Errorf("row %q: version = %q, want %q", got.Name, got.LatestVersion, w.LatestVersion)
+		}
+		if got.Description != w.Description {
+			t.Errorf("row %q: description = %q, want %q", got.Name, got.Description, w.Description)
+		}
+		if got.GeneroConstraint != w.GeneroConstraint {
+			t.Errorf("row %q: genero = %q, want %q", got.Name, got.GeneroConstraint, w.GeneroConstraint)
+		}
+	}
+	for name := range want {
+		t.Errorf("row %q missing from the results", name)
 	}
 }
