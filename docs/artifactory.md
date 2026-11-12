@@ -301,9 +301,12 @@ reported during publish:
   Normalized name "DateTime" → slug "datetime"
 ```
 
-Your `"name"` is kept verbatim in the sidecar manifest and is what `fglpkg
-search` and `fglpkg info` show, so capitalization you want people to read is not
-lost — it just isn't part of the path.
+Your `"name"` is kept verbatim inside the published package's `fglpkg.json` and
+in the sidecar manifest beside it, so the capitalization you want people to read
+is not lost. It is not what the commands print, though: `fglpkg search` lists
+the repository's folder names, and `fglpkg info` reports the package under the
+slug it resolved, so both show the lowercase form. Reading and writing both go
+through the slug, which is why any spelling works at the command line.
 
 A name must still **be** a valid slug once normalized: 2–64 characters of
 lowercase letters, digits and hyphens, starting and ending with a letter or

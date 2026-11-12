@@ -15,6 +15,7 @@ import (
 	"github.com/4js-mikefolcher/fglpkg/internal/registry"
 	"github.com/4js-mikefolcher/fglpkg/internal/resolver"
 	"github.com/4js-mikefolcher/fglpkg/internal/semver"
+	slugutil "github.com/4js-mikefolcher/fglpkg/internal/slug"
 )
 
 // AuthApplier applies a repository's configured auth scheme to an outbound
@@ -29,6 +30,24 @@ type AuthApplier func(*http.Request)
 //
 //	{url}/{repoKey}/{name}/{version}/{name}-{version}-{variant}.zip
 //	{url}/{repoKey}/{name}/{version}/fglpkg.json      (sidecar manifest)
+//
+// # Package names
+//
+// {name} in that layout is the package's CANONICAL SLUG — lowercase, with every
+// run of "-", "_" or "." collapsed to a single "-" (PEP 503, GIS-271) — never
+// the spelling an author wrote in fglpkg.json or a user typed on the command
+// line. The slug is the identity the resolver, the lock file and the GI
+// registry all key on, and Artifactory paths are case-sensitive, so this
+// provider canonicalizes at its own boundary exactly as the GI client does:
+// every method that turns a name into a repository path calls
+// slugutil.Canonical before building the URL.
+//
+// Skip it on either side and the two halves disagree. A package published as
+// "DateTime" landed in DateTime/ while install asked for datetime/; once the
+// publish half stored the slug, `fglpkg install DateTime` still asked for
+// DateTime/ and got a 404 from a repository that did hold the package. Both are
+// GIS-610, and one boundary rather than one fix per call site is what stops a
+// third spelling path appearing.
 type ArtifactoryProvider struct {
 	reg    config.Registry
 	client *http.Client
@@ -114,6 +133,7 @@ func (a *ArtifactoryProvider) getJSON(url string, out interface{}) error {
 // warning. GeneroConstraint is left empty here and filled lazily by FetchInfo
 // from the per-version sidecar (avoids a metadata read per version).
 func (a *ArtifactoryProvider) FetchVersions(name string) ([]resolver.CandidateVersion, error) {
+	name = slugutil.Canonical(name) // see "Package names" above
 	var fi folderInfo
 	if err := a.getJSON(a.storageURL(name), &fi); err != nil {
 		return nil, err
@@ -141,6 +161,7 @@ func (a *ArtifactoryProvider) FetchVersions(name string) ([]resolver.CandidateVe
 // variants, selects one for generoMajor, reads the file's SHA-256 + download
 // URL, and reads the sidecar manifest for dependencies + genero constraint.
 func (a *ArtifactoryProvider) FetchInfo(name, version, generoMajor string) (*registry.PackageInfo, error) {
+	name = slugutil.Canonical(name) // see "Package names" above
 	var fi folderInfo
 	if err := a.getJSON(a.storageURL(name, version), &fi); err != nil {
 		return nil, err
@@ -324,9 +345,10 @@ type PublishRequest struct {
 // clobber an existing variant unless Force is set. There is no pending/approval
 // step and visibility is not sent (both are GI-specific).
 func (a *ArtifactoryProvider) Publish(req PublishRequest) error {
-	zipName := fmt.Sprintf("%s-%s-%s.zip", req.Name, req.Version, req.Variant)
-	zipURL := a.contentURL(req.Name, req.Version, zipName)
-	sideURL := a.contentURL(req.Name, req.Version, manifest.Filename)
+	name := slugutil.Canonical(req.Name) // see "Package names" above
+	zipName := fmt.Sprintf("%s-%s-%s.zip", name, req.Version, req.Variant)
+	zipURL := a.contentURL(name, req.Version, zipName)
+	sideURL := a.contentURL(name, req.Version, manifest.Filename)
 
 	if req.DryRun {
 		fmt.Printf("  PUT %s  (X-Checksum-Sha256: %s)\n", zipURL, req.Checksum)
@@ -337,7 +359,7 @@ func (a *ArtifactoryProvider) Publish(req PublishRequest) error {
 	// Overwrite guard: refuse to clobber an existing variant unless forced.
 	if !req.Force {
 		var existing fileInfo
-		err := a.getJSON(a.storageURL(req.Name, req.Version, zipName), &existing)
+		err := a.getJSON(a.storageURL(name, req.Version, zipName), &existing)
 		switch {
 		case err == nil:
 			return fmt.Errorf(

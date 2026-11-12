@@ -1,4 +1,4 @@
-suite "Artifactory publish naming (GIS-610)"
+suite "publish name canonicalization (GIS-610)"
 
 # A package published to an Artifactory repository under the manifest's verbatim
 # name is unreachable. Install always asks for the CANONICAL slug — lowercase,
@@ -91,3 +91,28 @@ _pub_artifactory_rejects_an_unusable_name() {
   assert_contains "not a valid package name"
 }
 it "a name with no valid slug is refused before any upload" _pub_artifactory_rejects_an_unusable_name
+
+# The GI path has canonicalized since GIS-271, and both paths now call the same
+# publishSlug() — which is the whole argument for extracting it, since the bug
+# was that one path had the logic and the other did not. Pin the GI call site
+# too: without this, replacing its publishSlug() call with the raw manifest name
+# passes every unit test and all eighteen other functional publish cases.
+#
+# --dry-run prints the request bodies and the artifact URL, so the slug and the
+# display name are both observable with no network access. FGLPKG_TOKEN is a
+# dummy: a dry run never sends it.
+_pub_gi_canonicalizes_the_name() {
+  mkpkg DateTime 0.1.0
+  export FGLPKG_TOKEN="dummy-token-for-dry-run"
+  run publish --dry-run
+  assert_success || return 1
+  assert_contains "Normalized name" || return 1
+  # The slug is the identity in every /registry/... path...
+  assert_contains 'slug:"datetime"' || return 1
+  assert_contains "/registry/packages/datetime/versions" || return 1
+  assert_contains "filename=datetime-0.1.0-" || return 1
+  # ...while the name the author wrote travels as the display name.
+  assert_contains 'name:"DateTime"' || return 1
+  assert_not_contains "/registry/packages/DateTime"
+}
+it "the GI path publishes under the slug and keeps the display name" _pub_gi_canonicalizes_the_name
