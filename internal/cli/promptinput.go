@@ -87,13 +87,28 @@ func isControlByte(r rune) bool {
 	return r == 0x7f || (r < 0x20 && r != '\t')
 }
 
-// escapeSequenceLen returns the length of the escape sequence starting at s[0],
-// which the caller guarantees is ESC. An unterminated sequence consumes the
-// rest of the line: the alternative is to emit its tail as text, which is the
-// corruption being prevented.
+// escapeSequenceLen returns the number of bytes to discard for the escape
+// starting at s[0], which the caller guarantees is ESC.
+//
+// Cooked mode is ambiguous: the terminal sends the same bytes for Alt+f as for
+// Esc then "f", and fglpkg cannot tell them apart. The rule here resolves that
+// in favour of the reading that loses no typed text — ESC is dropped alone
+// unless what follows is unmistakably a sequence (a CSI or OSC introducer, or
+// an SS3/SS2 with a final byte terminals actually send). fglpkg binds no Meta
+// key, so an Alt chord carries no meaning to discard, while a stray Esc — a vim
+// reflex, or an attempt to cancel — is a real thing people do at a prompt.
+// Consuming a fixed two or three bytes instead ate the characters they then
+// typed ("\x1bOverview" became "erview") and, worse, cut a multi-byte rune in
+// half when the next character was not ASCII, leaving invalid UTF-8 for the
+// JSON encoder to replace with U+FFFD. Dropping only the ESC cannot split a
+// rune, because every byte this function consumes past the ESC is ASCII.
+//
+// An unterminated CSI or OSC still consumes the rest of the line: there the
+// introducer settles what it is, and the alternative is to emit its tail as
+// text, which is the corruption being prevented.
 func escapeSequenceLen(s string) int {
 	if len(s) < 2 {
-		return len(s) // a lone trailing ESC
+		return 1 // a lone trailing ESC
 	}
 	switch s[1] {
 	case '[':
@@ -122,15 +137,35 @@ func escapeSequenceLen(s string) int {
 		}
 		return len(s)
 	case 'O', 'N':
-		// SS3/SS2 — what an arrow key sends in application cursor mode, which
-		// is the mode a terminal is often left in by a previous full-screen
-		// program. Three bytes: ESC O A.
-		if len(s) >= 3 {
+		// SS3/SS2 — what an arrow or function key sends in application cursor
+		// mode, which is the mode a terminal is often left in by a previous
+		// full-screen program. Three bytes: ESC O A.
+		//
+		// Only when the third byte is one a terminal actually sends. "O" is
+		// also a letter, so ESC followed by a typed "Overview" must not be read
+		// as a keypress and swallow two characters.
+		if len(s) >= 3 && isSS3Final(s[2]) {
 			return 3
 		}
-		return len(s)
+		return 1
 	default:
-		// A two-byte escape, e.g. the ESC-prefixed Meta keys.
-		return 2
+		// Anything else, including a second ESC: a stray Esc keypress. Drop it
+		// alone and let the next byte be judged on its own — ESC ESC [ D (one
+		// shape of Alt+Left) then strips as the CSI it is, where consuming two
+		// bytes left a literal "[D" in the answer.
+		return 1
 	}
+}
+
+// isSS3Final reports whether c is a final byte a terminal actually sends after
+// ESC O / ESC N: the four cursor keys (A-D), End (F), Home (H) and F1-F4 (P-S).
+// Keypad finals in application mode are deliberately left out — they are
+// ordinary lower-case letters, and treating a typed one as a keypress would
+// delete text to suppress a key fglpkg does nothing with.
+func isSS3Final(c byte) bool {
+	switch c {
+	case 'A', 'B', 'C', 'D', 'F', 'H', 'P', 'Q', 'R', 'S':
+		return true
+	}
+	return false
 }

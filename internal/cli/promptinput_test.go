@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/4js-mikefolcher/fglpkg/internal/manifest"
 )
@@ -43,7 +44,27 @@ func TestStripTerminalControls(t *testing.T) {
 		},
 		{"an OSC sequence ended by BEL", "a" + esc + "]0;a title\x07" + "b", "ab", ""},
 		{"an OSC sequence ended by ST", "a" + esc + "]0;t" + esc + "\\" + "b", "ab", ""},
-		{"a two-byte meta escape", "a" + esc + "b" + "c", "ac", ""},
+		{
+			"a stray Esc keeps the text that follows it",
+			"a" + esc + "b" + "c",
+			"abc",
+			"cooked mode cannot tell Alt+b from Esc then 'b'; fglpkg binds no Meta " +
+				"key, so the reading that keeps what the user typed is the right one",
+		},
+		{
+			"a stray Esc before a capital O",
+			"name " + esc + "Overview",
+			"name Overview",
+			"ESC O is only SS3 when the third byte is one a terminal sends; 'v' is " +
+				"not, and reading it as a keypress ate two typed characters",
+		},
+		{
+			"Esc, then a real sequence",
+			"a" + esc + arrowLeft + "b",
+			"ab",
+			"ESC ESC [ D is one shape of Alt+Left; consuming the pair as a two-byte " +
+				"escape left a literal '[D' in the answer",
+		},
 		{
 			"an unterminated CSI eats the rest",
 			"keep" + esc + "[12",
@@ -74,6 +95,19 @@ func TestStripTerminalControls(t *testing.T) {
 			"日本語",
 			"the scanner must not resynchronise mid-rune",
 		},
+		{
+			"UTF-8 directly after an ESC",
+			"a" + esc + "éb",
+			"aéb",
+			"consuming a fixed byte count here cut the rune in half and left invalid " +
+				"UTF-8, which the JSON encoder writes out as U+FFFD",
+		},
+		{
+			"UTF-8 directly after an SS3 introducer",
+			"a" + esc + "O日b",
+			"aO日b",
+			"the same split one byte further in: 日 is not an SS3 final byte",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -85,6 +119,12 @@ func TestStripTerminalControls(t *testing.T) {
 			// safe to write to a manifest.
 			if strings.ContainsAny(got, esc+"\x7f") {
 				t.Errorf("result still carries a control byte: %q", got)
+			}
+			// Valid UTF-8 is part of that criterion: a scan that stops mid-rune
+			// leaves orphan bytes that are neither an escape nor readable text,
+			// and Go's JSON encoder writes them into the manifest as U+FFFD.
+			if !utf8.ValidString(got) {
+				t.Errorf("result is not valid UTF-8: %q", got)
 			}
 		})
 	}
@@ -220,5 +260,69 @@ func TestInitNeverWritesEscapeBytesIntoTheManifest(t *testing.T) {
 	}
 	if err := m.ValidateForPublish(); err != nil {
 		t.Errorf("manifest should still be publishable: %v", err)
+	}
+}
+
+// TestPromptYesNoReadsThroughTheSanitiser pins the OTHER caller of
+// readPromptLine. GIS-613 is a claim about every prompt, not about `fglpkg
+// init` alone, and a y/n prompt guards things worth not mis-answering
+// (overwrite, publish, prune). Restoring a raw reader.ReadString inside
+// promptYesNo survives every other test in the repo, so this one is the whole
+// of its coverage.
+//
+// Each row is chosen so the sanitised and unsanitised readings DISAGREE.
+// Unsanitised, the answer starts with ESC, which isValidYesNo rejects, so the
+// prompt re-reads — and the re-read hits EOF, which promptYesNo deliberately
+// treats as "not confirmed" whatever the default is. Both rows therefore come
+// back false if the sanitiser is bypassed.
+func TestPromptYesNoReadsThroughTheSanitiser(t *testing.T) {
+	cases := []struct {
+		name       string
+		typed      string
+		yesDefault bool
+		want       bool
+		why        string
+	}{
+		{
+			"an arrow key alone accepts the default",
+			arrowLeft + "\n",
+			true,
+			true,
+			"the keystroke leaves nothing, and an empty line is a bare enter",
+		},
+		{
+			"an arrow key before a real answer keeps the answer",
+			arrowLeft + "y\n",
+			false,
+			true,
+			"the 'y' the user typed must still count against a [y/N] default",
+		},
+		{
+			"an application-mode arrow is discarded too",
+			appArrowUp + "n\n",
+			true,
+			false,
+			"ESC O A is three bytes and would otherwise mask the 'n'",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			origTTY := stdinIsTerminal
+			stdinIsTerminal = func() bool { return true }
+			t.Cleanup(func() { stdinIsTerminal = origTTY })
+			withStdin(t, tc.typed)
+
+			var got bool
+			if _, err := captureStdout(t, func() error {
+				got = promptYesNo("Continue?", tc.yesDefault)
+				return nil
+			}); err != nil {
+				t.Fatalf("captureStdout: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("promptYesNo(%q, default=%v) = %v, want %v (%s)",
+					tc.typed, tc.yesDefault, got, tc.want, tc.why)
+			}
+		})
 	}
 }

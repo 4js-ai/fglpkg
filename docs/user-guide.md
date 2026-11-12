@@ -519,7 +519,7 @@ Pass `--yes` (or run with a non-interactive stdin, e.g. in CI or scaffolding) to
 fglpkg init --yes
 ```
 
-> **Editing your answer.** The prompts read a whole line and have no line editor, so **Backspace works but the arrow keys do not** — left/right, Home/End and Delete do nothing. To change something you have already typed, backspace over it, or press Enter and edit `fglpkg.json` afterwards. Earlier versions let those keypresses through as raw escape characters, which could end up saved in the manifest and published with the package; they are now discarded. In-place line editing is being considered separately.
+> **Editing your answer.** The prompts read a whole line and have no line editor, so **Backspace works but the arrow keys do not** — left/right, Home/End and Delete do nothing. To change something you have already typed, backspace over it, or press Enter and edit `fglpkg.json` afterwards. Earlier versions let those keypresses through as raw escape characters, which could end up saved in the manifest and published with the package; they are now discarded. A stray <kbd>Esc</kbd> is discarded on its own, so anything you type after it is still kept. In-place line editing is being considered separately.
 
 ### Scaffolding from a template
 
