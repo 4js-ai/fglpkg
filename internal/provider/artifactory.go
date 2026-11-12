@@ -247,6 +247,18 @@ func (a *ArtifactoryProvider) Search(term string) ([]registry.SearchResult, erro
 			if side, err := a.fetchSidecar(name, latest); err == nil {
 				res.Description = side.Description
 				res.Author = side.Author
+				// The declared Genero constraint drives the GENERO column and
+				// the ✓/✗ grade. Without it an Artifactory row carries NEITHER
+				// compatibility signal, which gradeCompat correctly reports as
+				// "-" / "?" — so a package declaring "genero": "^6.0.0" looked
+				// like one that had declared nothing, while the same package on
+				// GI graded fine (GIS-609).
+				//
+				// Variants stays nil on purpose: nil means "this source does not
+				// report builds", not "this package has none" (see the Variants
+				// contract on registry.SearchResult), and filling it would cost
+				// one storage call per result row.
+				res.GeneroConstraint = side.GeneroConstraint
 			}
 		}
 		results = append(results, res)
