@@ -147,6 +147,71 @@ func TestScanMermaid(t *testing.T) {
 			wantLines: []int{3},
 			why:       "end of file closes the block; a missing fence must not silence the check",
 		},
+
+		// The fence shapes below are GitHub's answer, not this package's:
+		// each was put to `gh api markdown` and the verdict recorded here is
+		// what that renderer does with it.
+		{
+			name: "a tilde fence is a diagram too",
+			src: "~~~mermaid\n" +
+				"sequenceDiagram\n" +
+				"    A->>B: one; two\n" +
+				"~~~\n",
+			wantLines: []int{3},
+			why:       "GitHub renders ~~~mermaid as a diagram, so a hazard in one must be reported",
+		},
+		{
+			name: "an info string may say more than the language",
+			src: "```mermaid title=\"Resolution\"\n" +
+				"sequenceDiagram\n" +
+				"    A->>B: one; two\n" +
+				"```\n",
+			wantLines: []int{3},
+			why:       "GitHub keys off the FIRST word of the info string; the rest is still mermaid",
+		},
+		{
+			name: "the language word is matched without case",
+			src: "```Mermaid\n" +
+				"sequenceDiagram\n" +
+				"    A->>B: one; two\n" +
+				"```\n",
+			wantLines: []int{3},
+			why:       "GitHub renders ```Mermaid as a diagram, so EqualFold is not a courtesy",
+		},
+		{
+			name: "a diagram quoted inside a longer fence is not scanned",
+			src: "````markdown\n" +
+				"```mermaid\n" +
+				"sequenceDiagram\n" +
+				"    A->>B: one; two\n" +
+				"```\n" +
+				"````\n",
+			wantLines: nil,
+			why: "GitHub shows this as code, not a diagram — a page may quote a broken " +
+				"diagram to explain it, and must not fail the build for doing so",
+		},
+		{
+			name: "a fence is closed only by its own character",
+			src: "~~~markdown\n" +
+				"```mermaid\n" +
+				"sequenceDiagram\n" +
+				"    A->>B: one; two\n" +
+				"```\n" +
+				"~~~\n",
+			wantLines: nil,
+			why:       "the backtick fence cannot close the tilde one, so all of this is quoted text",
+		},
+		{
+			name: "a shorter run does not close a longer fence",
+			src: "````mermaid\n" +
+				"sequenceDiagram\n" +
+				"    A->>B: clean\n" +
+				"```\n" +
+				"    A->>B: one; two\n" +
+				"````\n",
+			wantLines: []int{5},
+			why:       "the block runs to the four-backtick line, so line 5 is still inside the diagram",
+		},
 	}
 
 	for _, tc := range cases {
@@ -164,6 +229,61 @@ func TestScanMermaid(t *testing.T) {
 					gotLines, tc.wantLines, tc.why, got)
 			}
 		})
+	}
+}
+
+// TestFenceDetection pins the two CommonMark rules the block walk rests on: a
+// fence is closed only by its own character, and only by a run at least as long
+// as the one that opened it. Both are checked here rather than through a
+// document because a document can only tell them apart with an odd number of
+// nested fence lines — an arrangement no page would really contain, which makes
+// for a case that pins the rule by accident rather than on purpose.
+func TestFenceDetection(t *testing.T) {
+	opens := []struct {
+		line    string
+		ok      bool
+		char    byte
+		width   int
+		mermaid bool
+	}{
+		{"```mermaid", true, '`', 3, true},
+		{"~~~mermaid", true, '~', 3, true},
+		{"````mermaid", true, '`', 4, true},
+		{"```mermaid title=x", true, '`', 3, true},
+		{"```Mermaid", true, '`', 3, true},
+		{"``` mermaid", true, '`', 3, true},
+		{"```text", true, '`', 3, false},
+		{"```", true, '`', 3, false},
+		{"``mermaid", false, 0, 0, false},
+		{"~~mermaid", false, 0, 0, false},
+		{"a->>b: not a fence", false, 0, 0, false},
+	}
+	for _, tc := range opens {
+		f, ok := openFence(tc.line)
+		if ok != tc.ok || (ok && (f.char != tc.char || f.width != tc.width || f.mermaid != tc.mermaid)) {
+			t.Errorf("openFence(%q) = %+v, %v; want {char:%q width:%d mermaid:%v}, %v",
+				tc.line, f, ok, tc.char, tc.width, tc.mermaid, tc.ok)
+		}
+	}
+
+	closes := []struct {
+		line string
+		open fence
+		want bool
+	}{
+		{"```", fence{char: '`', width: 3}, true},
+		{"````", fence{char: '`', width: 3}, true},
+		{"```", fence{char: '`', width: 4}, false},
+		{"~~~", fence{char: '~', width: 3}, true},
+		{"~~~", fence{char: '`', width: 3}, false},
+		{"```", fence{char: '~', width: 3}, false},
+		{"```text", fence{char: '`', width: 3}, false},
+		{"", fence{char: '`', width: 3}, false},
+	}
+	for _, tc := range closes {
+		if got := closesFence(tc.line, tc.open); got != tc.want {
+			t.Errorf("closesFence(%q, %+v) = %v, want %v", tc.line, tc.open, got, tc.want)
+		}
 	}
 }
 
@@ -197,7 +317,11 @@ func TestRepositoryMermaidBlocksAreClean(t *testing.T) {
 		}
 		// Counted independently of the scanner's own fence detection, so a
 		// broken detector cannot also report that there was nothing to find.
-		n := strings.Count(strings.ToLower(string(src)), "```mermaid")
+		// Both fence characters, because a ~~~mermaid block is a diagram on
+		// GitHub and a tripwire blind to it would be blind to the shape that
+		// used to escape the scan entirely.
+		lower := strings.ToLower(string(src))
+		n := strings.Count(lower, "```mermaid") + strings.Count(lower, "~~~mermaid")
 		blocks += n
 		if n > 0 {
 			files++

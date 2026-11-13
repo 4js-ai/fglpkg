@@ -59,15 +59,21 @@ func ScanMermaid(src string) []Finding {
 
 	var findings []Finding
 	for i := 0; i < len(lines); i++ {
-		if !isMermaidFenceOpen(strings.TrimSpace(lines[i])) {
+		f, ok := openFence(strings.TrimSpace(lines[i]))
+		if !ok {
 			continue
 		}
 		start := i + 1
 		end := start
-		for end < len(lines) && !isFenceClose(strings.TrimSpace(lines[end])) {
+		for end < len(lines) && !closesFence(strings.TrimSpace(lines[end]), f) {
 			end++
 		}
-		findings = append(findings, scanBlock(lines[start:end], start+1)...)
+		if f.mermaid {
+			findings = append(findings, scanBlock(lines[start:end], start+1)...)
+		}
+		// Past the whole block either way. Skipping a block that is NOT a
+		// diagram is what keeps a quoted mermaid fence inside it from being
+		// read as one, so a page may show a broken diagram as an example.
 		i = end
 	}
 	return findings
@@ -110,17 +116,53 @@ func isSequenceDiagram(block []string) bool {
 	return false
 }
 
-// isMermaidFenceOpen reports whether a trimmed line opens a mermaid code fence.
-func isMermaidFenceOpen(trimmed string) bool {
-	if !strings.HasPrefix(trimmed, "```") {
-		return false
-	}
-	return strings.EqualFold(strings.TrimSpace(strings.TrimLeft(trimmed, "`")), "mermaid")
+// fence describes an open Markdown code fence.
+type fence struct {
+	char    byte // '`' or '~'; a fence is closed only by its own character
+	width   int  // how many of them opened it; a closer needs at least as many
+	mermaid bool // whether GitHub renders this block as a diagram
 }
 
-// isFenceClose reports whether a trimmed line is a bare closing fence.
-func isFenceClose(trimmed string) bool {
-	return len(trimmed) >= 3 && strings.Trim(trimmed, "`") == ""
+// openFence reports whether a trimmed line opens a code fence, and what kind.
+//
+// The shapes accepted are the ones GitHub actually draws as a diagram, asked of
+// its own Markdown renderer (`gh api markdown`) rather than assumed: three or
+// more backticks OR tildes, with an info string whose first word is "mermaid"
+// in any case. The info string may carry more after that word, and more than
+// three fence characters are allowed — "~~~mermaid", "```mermaid title=x",
+// "```Mermaid" and a four-backtick "mermaid" are all rendered as diagrams, and
+// the first two used to slip past this check with their hazards intact.
+//
+// Indentation is the one place this is knowingly looser than CommonMark, which
+// makes four or more leading spaces an indented code block rather than a fence
+// unless it sits in a list item. Treating it as a fence anyway over-reports,
+// which is the side to be wrong on.
+func openFence(trimmed string) (fence, bool) {
+	var f fence
+	switch {
+	case strings.HasPrefix(trimmed, "```"):
+		f.char = '`'
+	case strings.HasPrefix(trimmed, "~~~"):
+		f.char = '~'
+	default:
+		return fence{}, false
+	}
+	info := strings.TrimLeft(trimmed, string(f.char))
+	f.width = len(trimmed) - len(info)
+	f.mermaid = strings.EqualFold(firstWord(info), "mermaid")
+	return f, true
+}
+
+// closesFence reports whether a trimmed line closes the open fence f: the same
+// character, at least as many of them, and nothing else on the line.
+//
+// A shorter run, or a run of the other character, is content. That is what
+// makes a ```mermaid fence inside a four-backtick block part of that block,
+// exactly as GitHub shows it, so quoting a broken diagram in prose no longer
+// fails the build for the page that explains it.
+func closesFence(trimmed string, f fence) bool {
+	rest := strings.TrimLeft(trimmed, string(f.char))
+	return len(trimmed)-len(rest) >= f.width && strings.TrimSpace(rest) == ""
 }
 
 // stripComment blanks a mermaid comment line, and leaves every other line
