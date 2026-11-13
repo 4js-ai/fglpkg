@@ -103,9 +103,12 @@ func isControlByte(r rune) bool {
 // JSON encoder to replace with U+FFFD. Dropping only the ESC cannot split a
 // rune, because every byte this function consumes past the ESC is ASCII.
 //
-// An unterminated CSI or OSC still consumes the rest of the line: there the
-// introducer settles what it is, and the alternative is to emit its tail as
-// text, which is the corruption being prevented.
+// A CSI is settled by its introducer: "ESC [" is not something a person types
+// by accident, and an unterminated one consumes what is left of the line rather
+// than emitting its tail as text. An unterminated OSC is treated as a stray Esc
+// instead, because a prompt reads a whole line at once and a real OSC therefore
+// always arrives terminated — so an unterminated one is a typed "]", and
+// swallowing the rest of the line for it would be the same loss as for "O".
 func escapeSequenceLen(s string) int {
 	if len(s) < 2 {
 		return 1 // a lone trailing ESC
@@ -126,7 +129,13 @@ func escapeSequenceLen(s string) int {
 		}
 		return i
 	case ']':
-		// OSC — runs to BEL or to the string terminator ESC \.
+		// OSC — runs to BEL or to the string terminator ESC \. An UNTERMINATED
+		// one is not an OSC at all: a prompt reads a whole line at once, so a
+		// real OSC arrives with its terminator in the same read. What reaches
+		// here without one is a stray Esc followed by a typed ']', and the same
+		// rule applies as for a letter — drop the ESC alone and keep the text.
+		// Consuming to end-of-line instead silently deleted everything after
+		// the ']', which is the loss this function exists to prevent.
 		for i := 2; i < len(s); i++ {
 			if s[i] == 0x07 {
 				return i + 1
@@ -135,7 +144,7 @@ func escapeSequenceLen(s string) int {
 				return i + 2
 			}
 		}
-		return len(s)
+		return 1
 	case 'O', 'N':
 		// SS3/SS2 — what an arrow or function key sends in application cursor
 		// mode, which is the mode a terminal is often left in by a previous

@@ -45,6 +45,26 @@ func TestStripTerminalControls(t *testing.T) {
 		{"an OSC sequence ended by BEL", "a" + esc + "]0;a title\x07" + "b", "ab", ""},
 		{"an OSC sequence ended by ST", "a" + esc + "]0;t" + esc + "\\" + "b", "ab", ""},
 		{
+			"an UNTERMINATED OSC is a stray Esc, not an OSC",
+			"a" + esc + "]b c",
+			"a]b c",
+			"a prompt reads a whole line at once, so a real OSC always arrives with " +
+				"its terminator; an unterminated one is a typed ']'. Consuming to " +
+				"end-of-line here deleted everything after it",
+		},
+		{
+			"Esc then a bare bracket at the end of a line",
+			esc + "]",
+			"]",
+			"the ']' is the whole answer; there is nothing for an OSC to terminate",
+		},
+		{
+			"UTF-8 directly after an unterminated OSC introducer",
+			"a" + esc + "]\u65e5b",
+			"a]\u65e5b",
+			"every byte consumed past the ESC is ASCII, so a rune cannot be split",
+		},
+		{
 			"a stray Esc keeps the text that follows it",
 			"a" + esc + "b" + "c",
 			"abc",
