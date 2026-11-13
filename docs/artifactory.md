@@ -312,6 +312,15 @@ A `--packages` scope is matched on the slug too, on both sides: the glob you
 wrote and the name you typed are each reduced to it, so a scope cannot admit one
 spelling of a package and refuse another.
 
+> **Upgrading to fglpkg 4.2.10 with a scope that was not in canonical form.**
+> Before 4.2.10 a glob such as `acme_*` or `ACME.*` matched only the spelling
+> typed at the command line, so it admitted almost nothing and the repository
+> was effectively unreachable. It now covers its family, as it was written to.
+> If a *second* repository also serves one of those names, that name is now
+> genuinely ambiguous and fglpkg stops rather than guessing — see
+> [the collision guard](#the-collision-guard-dependency-confusion) for how to
+> pin it.
+
 A name must still **be** a valid slug once normalized: 2–64 characters of
 lowercase letters, digits and hyphens, starting and ending with a letter or
 digit. `fglpkg publish` refuses anything else before uploading, in `--dry-run`

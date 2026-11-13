@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/4js-mikefolcher/fglpkg/internal/slug"
+	slugutil "github.com/4js-mikefolcher/fglpkg/internal/slug"
 )
 
 func TestResolve_BuiltinOnly(t *testing.T) {
@@ -468,7 +468,7 @@ func TestAdmitsOnlyWidens(t *testing.T) {
 		"logft", "other", "ACME-UTILS", "acme.utils",
 		"acme.__utils", "ACME-Utils", "Acme_Utils", "DateTime",
 	} {
-		canonical := slug.Canonical(pkg)
+		canonical := slugutil.Canonical(pkg)
 		for _, pat := range patterns {
 			// One pattern per registry: a scope is a disjunction over its
 			// patterns, so another pattern admitting the name would hide a
