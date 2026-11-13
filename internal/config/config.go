@@ -386,35 +386,51 @@ func validate(r Registry) error {
 // Admits reports whether this registry may serve the given package name, per
 // its optional 'packages' glob allow-list. An empty list admits every name.
 //
-// A name is matched BOTH as written and as its canonical slug, because a
-// package's name identity is its slug: the resolver canonicalizes every lookup,
-// and the providers canonicalize at their own boundaries, so a scope that
-// matched only the spelling a user happened to type would admit `fglpkg install
-// datetime` and reject `fglpkg install DateTime` for the same package — and the
-// rejection comes with the repository missing from the diagnostic, because this
-// runs before the lookup (GIS-610).
+// # Both sides are reduced to the package's identity
 //
-// The pattern is matched verbatim, never canonicalized, because Canonical
-// rewrites glob syntax: it collapses a separator run wherever it finds one, so
-// the class "acme[._]utils" becomes "acme[-]utils" — two alternatives merged
-// into one. A scope is therefore written in the canonical form of the names it
-// means to admit, which is also how they are displayed and installed.
+// A package's name identity is its canonical slug: the resolver canonicalizes
+// every lookup, the providers canonicalize at their own boundaries, and the
+// Artifactory layout stores the folder under it. So the rule is that the
+// pattern, in canonical form, is matched against the name in canonical form.
 //
-// Testing the extra form can only ever widen the allow-list, so no scope that
-// admits a name today can stop admitting it.
+// Matching only the spellings as written split a scoped repository in two, on
+// both sides in turn (GIS-610). On the name side, a scope ["datetime"] admitted
+// `fglpkg install datetime` and rejected `fglpkg install DateTime` for the same
+// package. On the pattern side, a scope ["acme_*"] — written for a package
+// whose manifest says "Acme_Utils" — admitted the typed spelling `acme_utils`
+// and then rejected the slug `acme-utils` that the very same command had just
+// resolved it to, so the only spelling the scope accepted was the one certain
+// to fail a step later. Both rejections come with the repository missing from
+// the diagnostic, because this predicate runs before the lookup.
+//
+// # Why the raw matches stay
+//
+// Canonical rewrites glob syntax as well as names: it collapses a separator run
+// wherever it finds one, so the class "acme[._]utils" becomes "acme[-]utils",
+// merging two alternatives into one. That costs nothing against a canonical
+// name, which can hold neither "." nor "_" — but to keep this change incapable
+// of NARROWING a scope, the pattern as written is still matched too. A scope
+// that routes a name today therefore still routes it; the canonical form only
+// ever adds. Narrowing is the dangerous direction, because it surfaces as a
+// package that cannot be found rather than as an error anyone can read.
+//
+// The canonical pattern is matched only against the canonical name: pairing a
+// canonicalized pattern with a raw name would compare two different forms of
+// the same thing, which is the defect above rather than a fix for it.
 func (r Registry) Admits(name string) bool {
 	if len(r.Packages) == 0 {
 		return true
 	}
 	canonical := slugutil.Canonical(name)
 	for _, pat := range r.Packages {
-		if ok, _ := path.Match(pat, name); ok {
+		if ok, _ := path.Match(pat, name); ok { // as written, both sides
 			return true
 		}
-		if canonical != name {
-			if ok, _ := path.Match(pat, canonical); ok {
-				return true
-			}
+		if ok, _ := path.Match(pat, canonical); ok { // raw pattern, slug
+			return true
+		}
+		if ok, _ := path.Match(slugutil.Canonical(pat), canonical); ok { // identity
+			return true
 		}
 	}
 	return false
