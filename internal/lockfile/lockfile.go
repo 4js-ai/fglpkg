@@ -45,7 +45,36 @@ const (
 
 	// lockVersion is bumped when the lock file schema changes incompatibly.
 	lockVersion = 1
+
+	// RootRequirer is the value stored in a RequiredBy list for a dependency
+	// the root project declares itself, as opposed to one pulled in by another
+	// package. It is re-exported from the resolver, which mints it, so the
+	// written value and the persisted value are one constant and not two
+	// literals that could drift (GIS-611).
+	//
+	// It is PERSISTED. The SBOM generator, `fglpkg list` and the post-install
+	// cross-check all match on this exact string, and so do lock files already
+	// written, so the value must not change. requirer_test.go pins it.
+	RootRequirer = resolver.RootRequirer
 )
+
+// DisplayRequirer renders one RequiredBy entry for a person to read.
+//
+// It sits beside the constant deliberately. The sentinel is a storage detail
+// that reached the install output verbatim — "✓ dt@0.2.1 (required by: <root>)"
+// — and a first-time user had to ask support what it meant (GIS-611). Keeping
+// the stored form and the human form in one place is what stops the raw value
+// being printed again by the next caller that reaches for RequiredBy.
+//
+// Callers that need the "this package was declared by the project itself" case
+// to read differently (the install line says "direct dependency") special-case
+// it before calling; everything else can render a mixed list through this.
+func DisplayRequirer(name string) string {
+	if name == RootRequirer {
+		return "this project"
+	}
+	return name
+}
 
 // LockFile is the top-level lock file structure.
 type LockFile struct {

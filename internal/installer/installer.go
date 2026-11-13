@@ -991,8 +991,8 @@ func (i *Installer) installFromPlan(plan *resolver.Plan, root *manifest.Manifest
 			kindHint = " (webcomponent)"
 		}
 		if len(pkg.RequiredBy) > 0 {
-			printSync("  ✓ %s@%s%s  (required by: %s)\n",
-				pkg.Name, pkg.Version.String(), kindHint, strings.Join(pkg.RequiredBy, ", "))
+			printSync("  ✓ %s@%s%s  (%s)\n",
+				pkg.Name, pkg.Version.String(), kindHint, requiredByPhrase(pkg.RequiredBy))
 		} else {
 			printSync("  ✓ %s@%s%s\n", pkg.Name, pkg.Version.String(), kindHint)
 		}
@@ -1052,6 +1052,27 @@ func (i *Installer) installFromPlan(plan *resolver.Plan, root *manifest.Manifest
 		return err
 	}
 	return nil
+}
+
+// requiredByPhrase renders a package's RequiredBy list for the install line.
+//
+// The list holds a storage sentinel, "<root>", for anything the project
+// declares itself, and printing it verbatim is what made a first-time user ask
+// support what "(required by: <root>)" meant (GIS-611). A package the project
+// declared is simply a direct dependency and says so; anything else names its
+// requirers, with the sentinel spelled out if it appears beside a real package.
+//
+// Display only. The lock file, the SBOM and `fglpkg list`'s grouping all keep
+// matching on lockfile.RootRequirer, and none of them read this.
+func requiredByPhrase(requiredBy []string) string {
+	if len(requiredBy) == 1 && requiredBy[0] == rootPkgLabel {
+		return "direct dependency"
+	}
+	names := make([]string, len(requiredBy))
+	for i, r := range requiredBy {
+		names[i] = lockfile.DisplayRequirer(r)
+	}
+	return "required by: " + strings.Join(names, ", ")
 }
 
 // Install downloads, verifies, and unpacks a single package — dispatching

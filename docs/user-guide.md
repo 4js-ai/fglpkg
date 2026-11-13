@@ -519,6 +519,8 @@ Pass `--yes` (or run with a non-interactive stdin, e.g. in CI or scaffolding) to
 fglpkg init --yes
 ```
 
+> **Editing your answer.** The prompts read a whole line and have no line editor, so **Backspace works but the arrow keys do not** — left/right, Home/End and Delete do nothing. To change something you have already typed, backspace over it, or press Enter and edit `fglpkg.json` afterwards. Earlier versions let those keypresses through as raw escape characters, which could end up saved in the manifest and published with the package; they are now discarded. A stray <kbd>Esc</kbd> is discarded on its own, so anything you type after it is still kept. In-place line editing is being considered separately.
+
 ### Scaffolding from a template
 
 Pass `--template` (`-t`) to scaffold a starter layout instead of writing a bare `fglpkg.json`. Three templates are built in:
@@ -586,6 +588,20 @@ fglpkg install
 ```
 
 This resolves the dependency graph, writes a lock file (`fglpkg-lock.json`), downloads BDL packages from the registry, and downloads Java JARs from Maven Central. Because `fglpkg.json` exists, packages are installed locally to `.fglpkg/` by default.
+
+Each installed package reports **why it is there**:
+
+```
+  ✓ poiapi@1.6.5  (direct dependency)
+  ✓ myutils@1.0.0  (required by: poiapi)
+  ✓ logft@2.0.0  (required by: this project, poiapi)
+```
+
+- **`(direct dependency)`** — your own `fglpkg.json` asks for it. These are the packages you chose.
+- **`(required by: …)`** — something else pulled it in. Removing the named package removes the need for this one.
+- A package can be both: listed in your `fglpkg.json` *and* needed by a dependency, which reads as `required by: this project, poiapi`.
+
+In `fglpkg-lock.json` the same relationship is stored as a `requiredBy` list, in which your own project appears as the fixed marker `"<root>"`. That is a storage value, not a package name — nothing is published under it, and you never need to type it.
 
 ### Adding a Package
 
@@ -774,7 +790,7 @@ The top level is what your `fglpkg.json` declares; everything nested below it ca
 
 Where the tree comes from matters when the output surprises you:
 
-- **Package parentage is exact.** It is read from the `requiredBy` fields in `fglpkg-lock.json`, recorded during resolution.
+- **Package parentage is exact.** It is read from the `requiredBy` fields in `fglpkg-lock.json`, recorded during resolution. Your own project is stored there as the marker `"<root>"`, which is why the top level of the tree is everything your `fglpkg.json` declares; the heading above it is your project's own name and version.
 - **JAR parentage is reconstructed.** The lock does not record which package asked for a JAR, so `list` reads the bundled `fglpkg.json` of each installed package to find out (see [Working with Java JARs](#working-with-java-jars)). A JAR that no installed manifest declares is shown at the top level — including a JAR whose declaring package has no manifest on disk.
 - **JARs never have children.** fglpkg does no transitive POM resolution, so a JAR is always a leaf. A package that needs ten JARs lists all ten itself.
 

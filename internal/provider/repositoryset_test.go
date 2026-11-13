@@ -124,6 +124,48 @@ func TestRoute_CollisionIsHardError(t *testing.T) {
 	}
 }
 
+// A repository's `packages` scope decides whether it is in the fan-out at all,
+// so widening the scope widens what the COLLISION GUARD is shown. This is the
+// one place where "the scope only ever admits more" is not the same as "nothing
+// that worked stops working". A scope written non-canonically used to exclude
+// every name, so it could never collide with anything; now it covers its family,
+// and a name two repositories both serve is ambiguous. That is the guard doing
+// its job — the alternative is silently picking one — but it turns an install
+// that used to succeed into a hard error, so both directions are pinned here.
+func TestRoute_ScopeDecidesWhoCanCollide(t *testing.T) {
+	newSet := func(globs []string) *RepositorySet {
+		gi := &fakeProvider{name: "gi", versions: map[string][]string{"acme-utils": {"1.0.0"}}}
+		acme := &fakeProvider{name: "acme", versions: map[string][]string{"acme-utils": {"0.9.0"}}}
+		d := descriptors()
+		d[1].Packages = globs
+		return NewRepositorySet([]Provider{gi, acme}, d, nil)
+	}
+
+	// However the glob is spelled, it names this package's family, so the scoped
+	// repository answers and the name is ambiguous.
+	for _, globs := range [][]string{{"acme-*"}, {"acme_*"}, {"ACME.*"}, {"Acme_Utils"}} {
+		_, err := newSet(globs).Versions("acme-utils")
+		if err == nil {
+			t.Errorf("scope %v: expected a collision, got none — the scoped "+
+				"repository was left out of the fan-out", globs)
+			continue
+		}
+		if !strings.Contains(err.Error(), "more than one repository") {
+			t.Errorf("scope %v: error = %q, want the collision guard", globs, err)
+		}
+	}
+
+	// Out of scope, the repository is never consulted, so there is nothing to be
+	// ambiguous with and gi answers alone.
+	vs, err := newSet([]string{"other-*"}).Versions("acme-utils")
+	if err != nil {
+		t.Fatalf("out-of-scope repository should not participate: %v", err)
+	}
+	if len(vs) != 1 || vs[0].Version.String() != "1.0.0" {
+		t.Fatalf("want only gi's 1.0.0, got %+v", vs)
+	}
+}
+
 func TestRoute_PinResolvesToOne(t *testing.T) {
 	gi := &fakeProvider{name: "gi", versions: map[string][]string{"utils": {"1.2.0"}}}
 	acme := &fakeProvider{name: "acme", versions: map[string][]string{"utils": {"0.9.0"}}}

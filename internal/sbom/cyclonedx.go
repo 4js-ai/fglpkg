@@ -314,7 +314,7 @@ func buildDependencyEdges(pkgs []lockfile.LockedPackage, jars []lockfile.LockedJ
 			continue
 		}
 		for _, parent := range p.RequiredBy {
-			if parent == "<root>" {
+			if parent == lockfile.RootRequirer {
 				add(rootRef, child)
 				continue
 			}
