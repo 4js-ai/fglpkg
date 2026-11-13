@@ -140,7 +140,7 @@ sequenceDiagram
         I->>R: Resolve(manifest, generoMajor)
         loop BFS over deps
             R->>Reg: version list + PackageInfo
-            R->>R: filter by genero constraint + semver; pick variant; promote scope
+            R->>R: filter by genero constraint + semver#semi; pick variant#semi; promote scope
         end
         R-->>I: Plan (packages, JARs)
         I->>L: write fglpkg-lock.json
@@ -186,8 +186,8 @@ sequenceDiagram
     P->>P: check this variant not already published
     P->>P: build zip (Files globs, bin, docs, .fglpkgignore) + SHA256
     P->>P: collect metadata: repo/author/license/genero/deps<br/>+ README/USERGUIDE (256 KB truncate)
-    P->>Reg: POST /registry/packages (create slug; 409 ok)
-    P->>Reg: POST .../versions (version + metadata; 409 => add variant)
+    P->>Reg: POST /registry/packages (create slug#semi; 409 ok)
+    P->>Reg: POST .../versions (version + metadata#semi; 409 => add variant)
     P->>Reg: PUT  .../versions/:v/artifacts/:variant (stream zip -> R2)
     P->>Reg: POST .../versions/:v/submit (pending admin review)
 ```
