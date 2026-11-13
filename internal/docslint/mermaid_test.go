@@ -48,14 +48,45 @@ func TestScanMermaid(t *testing.T) {
 			why:       "docs/architecture.md §2 uses these two correctly — flagging them would be wrong",
 		},
 		{
-			name: "a comment is not a statement",
+			name: "a whole-line comment is not a statement",
 			src: "```mermaid\n" +
 				"sequenceDiagram\n" +
 				"    %% a note to the author; harmless\n" +
 				"    A->>B: fine\n" +
 				"```\n",
 			wantLines: nil,
-			why:       "mermaid consumes %% to end of line, so a ';' in there breaks nothing",
+			why:       "a line that STARTS with %% is a comment, so a ';' in there breaks nothing",
+		},
+		{
+			name: "%% mid-line is message text, not a comment",
+			src: "```mermaid\n" +
+				"sequenceDiagram\n" +
+				"    A->>B: 100%% done; more\n" +
+				"```\n",
+			wantLines: []int{3},
+			why: "mermaid's message rule stops at '#', ';' or newline and not at '%%', so this " +
+				"is a parse error in real mermaid (11.4.1) however much it looks commented",
+		},
+		{
+			name: "a ';' that mermaid accepts is reported anyway",
+			src: "```mermaid\n" +
+				"sequenceDiagram\n" +
+				"    A->>B: hello;\n" +
+				"    A->>B: one; B->>A: two\n" +
+				"```\n",
+			wantLines: []int{3, 4},
+			why: "both lines parse in real mermaid (11.4.1) — ';' is a legal statement " +
+				"separator — and are reported all the same: see ScanMermaid on which way " +
+				"to be wrong. A later reader may change that, but not by accident",
+		},
+		{
+			name: "an underscore belongs to the entity code",
+			src: "```mermaid\n" +
+				"sequenceDiagram\n" +
+				"    A->>B: one #a_b; two\n" +
+				"```\n",
+			wantLines: nil,
+			why:       "mermaid rewrites every /#\\w+;/ before parsing, and \\w includes '_'",
 		},
 		{
 			name: "another language's fence is not a diagram",
