@@ -2,10 +2,13 @@ package config
 
 import (
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	slugutil "github.com/4js-mikefolcher/fglpkg/internal/slug"
 )
 
 func TestResolve_BuiltinOnly(t *testing.T) {
@@ -367,5 +370,117 @@ func TestAdmits(t *testing.T) {
 	// No allow-list admits everything.
 	if !(Registry{}).Admits("anything") {
 		t.Fatal("empty allow-list should admit all")
+	}
+}
+
+// A scope is an allow-list of package NAMES, and a package's name identity is
+// its canonical slug — the resolver canonicalizes every lookup and the
+// providers canonicalize at their own boundaries. Matching the spellings as
+// written split a scoped repository in two, on each side in turn (GIS-610):
+// `fglpkg install datetime` resolved while `fglpkg install DateTime` reported
+// the package missing "in any configured repository", and a scope written
+// ["acme_*"] admitted the typed `acme_utils` only to reject the slug
+// `acme-utils` the same command had just resolved it to. In both cases the
+// scoped repository is absent from that list, because this predicate runs
+// before the lookup.
+func TestAdmitsMatchesTheCanonicalName(t *testing.T) {
+	cases := []struct {
+		name     string
+		patterns []string
+		pkg      string
+		want     bool
+		why      string
+	}{
+		// The name side.
+		{"the canonical spelling", []string{"datetime"}, "datetime", true, ""},
+		{"the author's spelling", []string{"datetime"}, "DateTime", true,
+			"the same package; this is the case the customer hit"},
+		{"upper case throughout", []string{"datetime"}, "DATETIME", true, ""},
+		{"separators collapse to the slug", []string{"acme-*"}, "Acme_Utils", true,
+			"Acme_Utils and acme-utils are one package"},
+		{"a dotted spelling", []string{"acme-*"}, "ACME.Utils", true, ""},
+
+		// The pattern side. A scope written for a package whose manifest name is
+		// "Acme_Utils" is naturally spelled with the underscore; all three of
+		// these reach the same package, so all three must be admitted.
+		{"an underscored pattern, the typed spelling", []string{"acme_*"}, "acme_utils", true, ""},
+		{"an underscored pattern, the slug", []string{"acme_*"}, "acme-utils", true,
+			"the resolver and the manifest carry the slug, so this is the form the " +
+				"SECOND phase of an install asks about; refusing it here is what made " +
+				"`fglpkg install acme_utils` write the manifest and then fail"},
+		{"an underscored pattern, the manifest's own name", []string{"acme_*"}, "Acme_Utils", true,
+			"the spelling the scope was written to cover"},
+		{"a dotted pattern", []string{"acme.*"}, "Acme.Utils", true, ""},
+		{"a mixed-case pattern", []string{"DateTime"}, "datetime", true,
+			"the pattern names one package, and this is that package's slug"},
+		{"an upper-case pattern against a name needing both", []string{"ACME-*"}, "Acme_Utils", true,
+			"pattern and name are each reduced to the identity before comparing"},
+
+		// Widening must stop at the scope's edge.
+		{"a name outside the scope is still refused", []string{"acme-*"}, "logft", false,
+			"widening to the canonical form must not admit everything"},
+		{"a name that only looks close is still refused", []string{"datetime"}, "datetimes", false, ""},
+		{"a mixed-case name outside the scope", []string{"acme-*"}, "LogFT", false,
+			"the canonical form 'logft' does not match either"},
+		{"an underscored pattern does not admit another family", []string{"acme_*"}, "datetime", false,
+			"canonicalizing the pattern widens the spellings it covers, not the names"},
+		{"a dotted pattern does not admit another family", []string{"acme.*"}, "logft", false, ""},
+
+		// The pattern as written is matched as well, so that canonicalizing it can
+		// only ever ADD. '?' is the case where that is load-bearing: it matches
+		// exactly one character, so collapsing a separator run changes the length
+		// the pattern has to span and the canonical comparison cannot match.
+		{"a fixed-width wildcard across a separator run", []string{"acme???utils"}, "acme.__utils", true,
+			"only the pattern-as-written against the name-as-written matches this: " +
+				"the canonical forms are 'acme???utils' and 'acme-utils'"},
+
+		{"an empty allow-list still admits any spelling", nil, "DateTime", true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := (Registry{Packages: tc.patterns}).Admits(tc.pkg); got != tc.want {
+				t.Errorf("Registry{Packages: %v}.Admits(%q) = %v, want %v (%s)",
+					tc.patterns, tc.pkg, got, tc.want, tc.why)
+			}
+		})
+	}
+}
+
+// Canonicalizing the pattern may only ADD to a scope. Whatever the earlier
+// forms of this predicate admitted — the pattern as written against the name as
+// written, and against the name's slug — must still be admitted, because a
+// narrowed scope silently stops routing to a repository and surfaces as a
+// package that cannot be found rather than as an error anyone can read.
+//
+// This is a property, not a table: it states the contract and leaves the inputs
+// free. The inputs below include one case for each earlier form that no other
+// case covers, so deleting either raw match from Admits fails here.
+func TestAdmitsOnlyWidens(t *testing.T) {
+	patterns := []string{
+		"acme-*", "internal-*", "datetime", "x.y",
+		"acme???utils", // only the name AS WRITTEN can match this (see above)
+		"[^A]cme-*",    // only the pattern AS WRITTEN can match a slug: canonicalizing
+		// lower-cases the negated 'A', and the class then excludes the very
+		// character it was written to allow.
+	}
+	for _, pkg := range []string{
+		"acme-utils", "internal-x", "datetime", "x.y",
+		"logft", "other", "ACME-UTILS", "acme.utils",
+		"acme.__utils", "ACME-Utils", "Acme_Utils", "DateTime",
+	} {
+		canonical := slugutil.Canonical(pkg)
+		for _, pat := range patterns {
+			// One pattern per registry: a scope is a disjunction over its
+			// patterns, so another pattern admitting the name would hide a
+			// match this one has stopped making.
+			r := Registry{Packages: []string{pat}}
+			rawName, _ := path.Match(pat, pkg)
+			rawSlug, _ := path.Match(pat, canonical)
+			if (rawName || rawSlug) && !r.Admits(pkg) {
+				t.Errorf("Admits(%q) = false under scope [%q], although the pattern "+
+					"matches it as written (%v) or matches its slug %q (%v)",
+					pkg, pat, rawName, canonical, rawSlug)
+			}
+		}
 	}
 }

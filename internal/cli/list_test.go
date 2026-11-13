@@ -303,14 +303,16 @@ func TestBuildListTreeDepthLimit(t *testing.T) {
 	}
 }
 
-// A lock naming no project still needs a heading for the tree to hang off.
+// A lock naming no project still needs a heading for the tree to hang off —
+// and that heading goes on screen, so it is the readable form, not the storage
+// sentinel the grouping matches on (GIS-611).
 func TestTreeRootLabelFallbacks(t *testing.T) {
 	tests := []struct {
 		name, version, want string
 	}{
 		{"myproject", "1.0.0", "myproject@1.0.0"},
 		{"myproject", "", "myproject"},
-		{"", "", rootLabel},
+		{"", "", "this project"},
 	}
 	for _, tc := range tests {
 		lf := &lockfile.LockFile{RootManifest: lockfile.RootEntry{Name: tc.name, Version: tc.version}}

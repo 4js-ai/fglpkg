@@ -32,6 +32,17 @@ import (
 	"github.com/4js-mikefolcher/fglpkg/internal/workspace"
 )
 
+// RootRequirer is what the resolver records in RequiredBy for a dependency the
+// root project declares itself, as opposed to one pulled in by another package.
+// It is a sentinel, not a name: no real package can be called "<root>", because
+// a slug holds only lowercase letters, digits and hyphens.
+//
+// The resolver mints it, so it is defined here; the lock file persists it, so
+// lockfile.RootRequirer re-exports it and carries the rule that the value must
+// never change. lockfile imports this package, which is why the constant cannot
+// live the other way round. Nothing should write the literal again (GIS-611).
+const RootRequirer = "<root>"
+
 // ResolvedPackage is a single package in the final install plan. Despite
 // the legacy name, this entry may refer to either a BDL package or a
 // webcomponent package — the Variant field discriminates and the installer
@@ -505,7 +516,7 @@ func (r *Resolver) enqueueRootBucket(deps manifest.Dependencies, scope manifest.
 			}
 			continue
 		}
-		state.enqueue(workItem{name: name, constraint: constraint, requiredBy: "<root>", scope: scope})
+		state.enqueue(workItem{name: name, constraint: constraint, requiredBy: RootRequirer, scope: scope})
 	}
 	for _, dep := range deps.Java {
 		state.addJARScoped(dep, scope)

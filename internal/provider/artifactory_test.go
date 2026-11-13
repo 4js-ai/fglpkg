@@ -172,6 +172,19 @@ func TestArtifactory_Search(t *testing.T) {
 	if results[0].Source != "acme" {
 		t.Fatalf("source = %q, want acme", results[0].Source)
 	}
+	// GIS-609: the sidecar's Genero constraint is the signal that lets the row
+	// grade ✓/✗ instead of "?". The customer saw "-" / "?" for a package whose
+	// manifest declares "genero": "^6.0.0".
+	if results[0].GeneroConstraint != "^6.0.0" {
+		t.Fatalf("genero constraint = %q, want %q — the search row has no compatibility signal (GIS-609)",
+			results[0].GeneroConstraint, "^6.0.0")
+	}
+	// Variants must stay nil, not empty: nil means "this source does not report
+	// builds" and empty would mean "this version published none", which would
+	// grade the row ✗ instead of letting the constraint decide.
+	if results[0].Variants != nil {
+		t.Errorf("variants = %v, want nil (unknown, not none)", results[0].Variants)
+	}
 }
 
 // TestArtifactory_Search_MissingSidecarIsBlankNotError covers ISSUE-E's
@@ -192,6 +205,15 @@ func TestArtifactory_Search_MissingSidecarIsBlankNotError(t *testing.T) {
 	}
 	if results[0].Description != "" {
 		t.Fatalf("missing sidecar should leave description blank, got %q", results[0].Description)
+	}
+	// GIS-609 must not invent a signal it does not have: with no sidecar there
+	// is no declared constraint, so the row stays unknown ("-" / "?") rather
+	// than claiming a compatibility it was never told about.
+	if results[0].GeneroConstraint != "" {
+		t.Errorf("missing sidecar should leave the constraint blank, got %q", results[0].GeneroConstraint)
+	}
+	if results[0].Variants != nil {
+		t.Errorf("variants = %v, want nil", results[0].Variants)
 	}
 }
 
