@@ -148,6 +148,76 @@ func TestScanMermaid(t *testing.T) {
 			why:       "end of file closes the block; a missing fence must not silence the check",
 		},
 
+		{
+			name: "a header terminated by a semicolon is still a header",
+			src: "```mermaid\n" +
+				"sequenceDiagram;\n" +
+				"    A->>B: one; two\n" +
+				"```\n",
+			wantLines: []int{3},
+			why: "mermaid 11.4.1 parses 'sequenceDiagram;' as a sequence diagram, so a " +
+				"block that opens with one must be checked as one",
+		},
+		{
+			name: "front matter is YAML, not statements",
+			src: "```mermaid\n" +
+				"---\n" +
+				"title: a; b\n" +
+				"---\n" +
+				"sequenceDiagram\n" +
+				"    A->>B: fine\n" +
+				"```\n",
+			wantLines: nil,
+			why:       "verified against mermaid 11.4.1: this diagram parses, ';' and all",
+		},
+		{
+			name: "an unterminated --- is not front matter",
+			src: "```mermaid\n" +
+				"---\n" +
+				"sequenceDiagram\n" +
+				"    A->>B: one; two\n" +
+				"```\n",
+			wantLines: []int{4},
+			why:       "without a closing ---, nothing is skipped and the block is scanned whole",
+		},
+		{
+			name: "a diagram inside a blockquote is still a diagram",
+			src: "> ```mermaid\n" +
+				"> sequenceDiagram\n" +
+				">     A->>B: one; two\n" +
+				"> ```\n",
+			wantLines: []int{3},
+			why:       "GitHub draws a blockquoted fence; the '>' is markup, not diagram text",
+		},
+		{
+			name: "a quoted diagram's own semicolons are not quoted away",
+			src: "> ```mermaid\n" +
+				"> sequenceDiagram\n" +
+				">     A->>B: clean\n" +
+				"> ```\n",
+			wantLines: nil,
+			why:       "stripping the marker must not turn a clean diagram into findings either",
+		},
+		{
+			name: "a marker with no space after it is not a list item",
+			src: "-```mermaid\n" +
+				"sequenceDiagram\n" +
+				"    A->>B: one; two\n" +
+				"```\n",
+			wantLines: nil,
+			why: "CommonMark needs a space after the marker, so GitHub shows this as a " +
+				"paragraph — and a fence it does not draw is not a diagram to check",
+		},
+		{
+			name: "a diagram in a list item is a diagram",
+			src: "- ```mermaid\n" +
+				"  sequenceDiagram\n" +
+				"      A->>B: one; two\n" +
+				"  ```\n",
+			wantLines: []int{3},
+			why:       "GitHub draws this one too; the indentation is all that distinguishes it",
+		},
+
 		// The fence shapes below are GitHub's answer, not this package's:
 		// each was put to `gh api markdown` and the verdict recorded here is
 		// what that renderer does with it.
