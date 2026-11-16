@@ -92,6 +92,13 @@ func cmdInfo(args []string) error {
 		slugutil.Canonical(name) != name {
 		if vs, vErr := rs.VersionsVerbatim(name); vErr == nil {
 			versions, err, legacyFolder = candidateVersionList(vs), nil, true
+		} else if !errors.Is(vErr, registry.ErrNotFound) {
+			// A collision or an auth failure is an ANSWER, not an absence: the
+			// folder is in two repositories and no scoping says which, or a
+			// repository refused to say. Reporting the canonical "not found in
+			// any configured repository" for either tells the reader the
+			// opposite of what was measured, and 4.2.9 reported both.
+			err = vErr
 		}
 	}
 	if err != nil {
@@ -136,7 +143,7 @@ func cmdInfo(args []string) error {
 		return nil
 	}
 
-	printInfo(info, versions, resolvedVersion == latestVersion(versions.Versions))
+	printInfo(info, versions, resolvedVersion == latestVersion(versions.Versions), legacyFolder)
 	return nil
 }
 
@@ -229,7 +236,10 @@ func latestVersion(vs []string) string {
 	return sorted[len(sorted)-1]
 }
 
-func printInfo(info *registry.PackageInfo, versions *registry.VersionList, isLatest bool) {
+// printInfo renders the human-readable summary. legacyFolder says the package
+// was described from a folder named before fglpkg canonicalized names, which
+// changes only the last line: there is no install command that reaches it.
+func printInfo(info *registry.PackageInfo, versions *registry.VersionList, isLatest, legacyFolder bool) {
 	header := fmt.Sprintf("%s@%s", info.Name, info.Version)
 	if isLatest {
 		header += " (latest)"
@@ -296,6 +306,16 @@ func printInfo(info *registry.PackageInfo, versions *registry.VersionList, isLat
 		fmt.Printf("\nVersions (%d): %s\n", len(versions.Versions), strings.Join(versions.Versions, ", "))
 	}
 
+	if legacyFolder {
+		// The warning that goes with this is on stderr, so that --json stays a
+		// clean document; printing the usual hint here would contradict it on
+		// stdout, and a reader who redirected stdout to a file would see only
+		// the hint. Say it where the hint would have been instead (GIS-610).
+		fmt.Printf("\nInstall: not possible — %q is stored under that exact name, not %q.\n"+
+			"         Re-publish it with fglpkg >= 4.2.10, or rename the folder in the repository.\n",
+			info.Name, slugutil.Canonical(info.Name))
+		return
+	}
 	fmt.Printf("\nInstall: fglpkg install %s@%s\n", info.Name, info.Version)
 }
 

@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/4js-mikefolcher/fglpkg/internal/registry"
 )
 
 func TestLatestVersionSemverOrdering(t *testing.T) {
@@ -282,4 +284,49 @@ func captureStdout(t *testing.T, fn func() error) (string, error) {
 	}
 	_ = r.Close()
 	return string(buf), fnErr
+}
+
+// TestPrintInfoLegacyFolderOffersNoInstallCommand pins the last line of a
+// description read out of a folder named before fglpkg canonicalized names
+// (GIS-610).
+//
+// `install` cannot address such a folder — that is the whole shape of the
+// problem — and the warning that says so goes to stderr, so that --json stays a
+// clean document. Printing the usual "Install: fglpkg install <name>@<version>"
+// on stdout would contradict it there, and a reader who redirected stdout to a
+// file would keep only the contradiction.
+func TestPrintInfoLegacyFolderOffersNoInstallCommand(t *testing.T) {
+	info := &registry.PackageInfo{Name: "DateTime", Version: "0.1.0"}
+	versions := &registry.VersionList{Versions: []string{"0.1.0"}}
+
+	legacy, err := captureStdout(t, func() error {
+		printInfo(info, versions, true, true)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("printInfo: %v", err)
+	}
+	if strings.Contains(legacy, "fglpkg install") {
+		t.Errorf("legacy folder output offers an install command that cannot work:\n%s", legacy)
+	}
+	for _, want := range []string{"Install: not possible", `"datetime"`, "4.2.10"} {
+		if !strings.Contains(legacy, want) {
+			t.Errorf("legacy folder output missing %q\n---\n%s", want, legacy)
+		}
+	}
+
+	// The ordinary case is unchanged: same record, no legacy folder.
+	normal, err := captureStdout(t, func() error {
+		printInfo(info, versions, true, false)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("printInfo: %v", err)
+	}
+	if !strings.Contains(normal, "Install: fglpkg install DateTime@0.1.0") {
+		t.Errorf("normal output lost its install hint:\n%s", normal)
+	}
+	if strings.Contains(normal, "not possible") {
+		t.Errorf("normal output claims the package cannot be installed:\n%s", normal)
+	}
 }

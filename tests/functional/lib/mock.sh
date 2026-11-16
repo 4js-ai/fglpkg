@@ -88,9 +88,15 @@ mock_maven_start() {  # mock_maven_start [--require-token <tok>]
 }
 
 # ---- Artifactory (the storage API, with real contents) ----
+# The repository keys the mock serves. They are set here rather than by
+# mock_artifactory_start because a --pkg spec names the repository that holds
+# it, so a test needs them to build the call that starts the server.
+ARTI_REPO="generic-local"
+ARTI_REPO2="generic-local-2"
+
 # Starts artifactory_server.py over an explicit package tree and reports its base
-# URL in ARTI_URL (repo key in ARTI_REPO, request log in ARTI_LOG). Each argument
-# is one package, as <folder>:<version>[:<variant>].
+# URL in ARTI_URL (request log in ARTI_LOG). Each argument is one spec, listed
+# further down.
 #
 # The FOLDER name is the point. fglpkg <= 4.2.9 published to Artifactory under
 # the manifest's name as its author typed it, 4.2.10 publishes under the
@@ -102,14 +108,32 @@ mock_maven_start() {  # mock_maven_start [--require-token <tok>]
 # This is the complement of mock_secondary_url below, not a replacement: that
 # one is a repository that answers "not found" to everything, for asserting
 # whether a repository was consulted at all. This one has contents.
-mock_artifactory_start() {  # mock_artifactory_start <folder:version[:variant]>...
+#
+# One process serves SEVERAL repository keys, so that two repositories holding
+# the same folder, or a repository that answers beside one that refuses, need no
+# second instance (and no second port to pass around):
+#
+#   DateTime:0.1.0            a package in the default repository, $ARTI_REPO
+#   $ARTI_REPO2/DateTime:0.1.0  the same folder in the second repository
+#   401:<repo>                that repository answers 401 to everything
+#   401:<repo>/<folder>       it answers 401 only under that folder
+#
+# The narrow 401 is a repository whose credentials do not cover one package, and
+# it is the shape that proves fglpkg never reads a refusal as an absence: the
+# canonical and the legacy spelling of one name then get different answers from
+# the same repository.
+mock_artifactory_start() {  # mock_artifactory_start <spec>...
   [[ $# -gt 0 ]] || { _diag "mock_artifactory_start needs at least one package"; return 1; }
   local args=() spec
-  for spec in "$@"; do args+=(--pkg "$spec"); done
+  for spec in "$@"; do
+    case "$spec" in
+      401:*) args+=(--refuse "${spec#401:}") ;;
+      *)     args+=(--pkg "$spec") ;;
+    esac
+  done
   _mock_launch "$_MOCK_ARTIFACTORY_SERVER" "${args[@]}" || return 1
   ARTI_LOG="$_ML_LOG"; ARTI_PID="$_ML_PID"; ARTI_PORT="$_ML_PORT"
   ARTI_URL="http://127.0.0.1:$ARTI_PORT"
-  ARTI_REPO="generic-local"
   return 0
 }
 
@@ -121,6 +145,24 @@ mock_artifactory_project() {
 { "name":"$name", "version":"1.0.0", "genero":">=3.20",
   "registries":[{"name":"arti","type":"artifactory","url":"$ARTI_URL",
                  "repoKey":"$ARTI_REPO","priority":2$extra}] }
+EOF
+}
+
+# Write an fglpkg.json with one descriptor per repository key given, all served
+# by the same mock. Named arti1, arti2, ... in the order listed, which is also
+# their priority order.
+# mock_artifactory_project_repos <repoKey>...
+mock_artifactory_project_repos() {
+  local descs="" sep="" i=0 repo
+  for repo in "$@"; do
+    i=$((i + 1))
+    descs+="$sep{\"name\":\"arti$i\",\"type\":\"artifactory\",\"url\":\"$ARTI_URL\","
+    descs+="\"repoKey\":\"$repo\",\"priority\":$((i + 1))}"
+    sep=","
+  done
+  cat > fglpkg.json <<EOF
+{ "name":"app", "version":"1.0.0", "genero":">=3.20",
+  "registries":[$descs] }
 EOF
 }
 
