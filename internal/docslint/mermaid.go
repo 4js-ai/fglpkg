@@ -55,7 +55,8 @@ const semicolonWhy = "a raw ';' inside a sequenceDiagram separates statements in
 // Semicolons outside a sequence diagram are left alone: in a flowchart they are
 // real statement terminators, and docs/architecture.md §2 uses two correctly.
 //
-// Two known limits, both measured against mermaid 11.4.1 rather than guessed:
+// Three known limits, measured against mermaid 11.4.1 and GitHub's own renderer
+// rather than guessed:
 //
 //   - A raw ';' also breaks classDiagram, journey and erDiagram, which are not
 //     checked. Each has its own lexer, and a rule this file cannot read off one
@@ -66,6 +67,12 @@ const semicolonWhy = "a raw ';' inside a sequenceDiagram separates statements in
 //     comment rule applies depends on the lexer state the line has reached, and
 //     an approximation of that would turn some of these over-reports into
 //     silence — the one direction this check must not be wrong in.
+//   - A fence indented four or more spaces is an indented code block, which
+//     GitHub draws as text rather than as a diagram, and it is scanned all the
+//     same. The same indentation inside a list item IS a diagram, so telling
+//     the two apart means tracking list context — and getting that wrong leaves
+//     a real diagram unchecked, which is again the direction this must not be
+//     wrong in. See openFence.
 func ScanMermaid(src string) []Finding {
 	lines := strings.Split(strings.ReplaceAll(src, "\r\n", "\n"), "\n")
 	// What a reader of the Markdown sees, which is not always the line as
