@@ -40,6 +40,10 @@ type RepositorySet struct {
 	mu           sync.Mutex
 	declaredPins map[string]string // package name → registry declared by a depending package's manifest
 	routes       map[string]routeDecision
+	// verbatimRoutes memoizes the legacy-folder lookups `info` makes, kept
+	// apart from routes because the two ask different questions about the same
+	// name and both answers can exist (see verbatim.go).
+	verbatimRoutes map[string]routeDecision
 }
 
 type routeDecision struct {
@@ -62,11 +66,12 @@ func NewRepositorySet(providers []Provider, descriptors []config.Registry, pins 
 		pins = map[string]string{}
 	}
 	return &RepositorySet{
-		providers:    ordered,
-		descriptors:  dmap,
-		pins:         pins,
-		declaredPins: map[string]string{},
-		routes:       map[string]routeDecision{},
+		providers:      ordered,
+		descriptors:    dmap,
+		pins:           pins,
+		declaredPins:   map[string]string{},
+		routes:         map[string]routeDecision{},
+		verbatimRoutes: map[string]routeDecision{},
 	}
 }
 

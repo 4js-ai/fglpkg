@@ -13,6 +13,7 @@
 _MOCK_REGISTRY_SERVER="$_LIBDIR/../mock/registry_server.py"
 _MOCK_OSV_SERVER="$_LIBDIR/../mock/osv_server.py"
 _MOCK_MAVEN_SERVER="$_LIBDIR/../mock/maven_server.py"
+_MOCK_ARTIFACTORY_SERVER="$_LIBDIR/../mock/artifactory_server.py"
 
 _MOCK_PIDS=()
 _mock_track() { _MOCK_PIDS+=("$1"); trap _mock_stop_all EXIT; }
@@ -84,6 +85,43 @@ mock_maven_start() {  # mock_maven_start [--require-token <tok>]
   MAVEN_URL="http://127.0.0.1:$MAVEN_PORT"
   MAVEN_HOST="127.0.0.1:$MAVEN_PORT"
   return 0
+}
+
+# ---- Artifactory (the storage API, with real contents) ----
+# Starts artifactory_server.py over an explicit package tree and reports its base
+# URL in ARTI_URL (repo key in ARTI_REPO, request log in ARTI_LOG). Each argument
+# is one package, as <folder>:<version>[:<variant>].
+#
+# The FOLDER name is the point. fglpkg <= 4.2.9 published to Artifactory under
+# the manifest's name as its author typed it, 4.2.10 publishes under the
+# canonical slug, so "DateTime" and "datetime" are two different packages in a
+# real repository. The mock holds its tree in memory and matches it exactly, so
+# the two stay apart on a macOS filesystem, which would merge a fixture
+# directory of the same two names without a word.
+#
+# This is the complement of mock_secondary_url below, not a replacement: that
+# one is a repository that answers "not found" to everything, for asserting
+# whether a repository was consulted at all. This one has contents.
+mock_artifactory_start() {  # mock_artifactory_start <folder:version[:variant]>...
+  [[ $# -gt 0 ]] || { _diag "mock_artifactory_start needs at least one package"; return 1; }
+  local args=() spec
+  for spec in "$@"; do args+=(--pkg "$spec"); done
+  _mock_launch "$_MOCK_ARTIFACTORY_SERVER" "${args[@]}" || return 1
+  ARTI_LOG="$_ML_LOG"; ARTI_PID="$_ML_PID"; ARTI_PORT="$_ML_PORT"
+  ARTI_URL="http://127.0.0.1:$ARTI_PORT"
+  ARTI_REPO="generic-local"
+  return 0
+}
+
+# Write an fglpkg.json whose one secondary repository is the Artifactory mock.
+# mock_artifactory_project [<name>] [<extra descriptor json, leading comma>]
+mock_artifactory_project() {
+  local name="${1:-app}" extra="${2:-}"
+  cat > fglpkg.json <<EOF
+{ "name":"$name", "version":"1.0.0", "genero":">=3.20",
+  "registries":[{"name":"arti","type":"artifactory","url":"$ARTI_URL",
+                 "repoKey":"$ARTI_REPO","priority":2$extra}] }
+EOF
 }
 
 # ---- a reachable secondary repository (served by the SAME mock process) ----

@@ -166,11 +166,36 @@ func (a *ArtifactoryProvider) listVersions(name string) ([]resolver.CandidateVer
 	return out, nil
 }
 
+// FetchVersionsVerbatim lists the versions under the EXACT folder name given,
+// with no canonicalizing — the read half of the legacy-folder support fglpkg
+// <= 4.2.9 left behind (GIS-610).
+//
+// It is deliberately NOT what `install` uses. install resolves a name to a slug
+// and writes that slug into fglpkg.json and the lock, so a folder reachable
+// only under another spelling would be recorded under a name the next install
+// cannot find. `info` only describes, so it can afford to look.
+func (a *ArtifactoryProvider) FetchVersionsVerbatim(folder string) ([]resolver.CandidateVersion, error) {
+	return a.listVersions(folder)
+}
+
+// FetchInfoVerbatim is FetchInfo against the EXACT folder name given. Same
+// reasoning as FetchVersionsVerbatim: describing a legacy folder is safe,
+// installing from one is not.
+func (a *ArtifactoryProvider) FetchInfoVerbatim(folder, version, generoMajor string) (*registry.PackageInfo, error) {
+	return a.fetchInfo(folder, version, generoMajor)
+}
+
 // FetchInfo resolves name@version: lists the version folder to discover
 // variants, selects one for generoMajor, reads the file's SHA-256 + download
 // URL, and reads the sidecar manifest for dependencies + genero constraint.
 func (a *ArtifactoryProvider) FetchInfo(name, version, generoMajor string) (*registry.PackageInfo, error) {
-	name = slugutil.Canonical(name) // see "Package names" above
+	return a.fetchInfo(slugutil.Canonical(name), version, generoMajor) // see "Package names" above
+}
+
+// fetchInfo is FetchInfo's body, over a folder name the caller has already
+// settled: canonicalized for everything that starts from a name someone typed,
+// verbatim for the legacy read path.
+func (a *ArtifactoryProvider) fetchInfo(name, version, generoMajor string) (*registry.PackageInfo, error) {
 	var fi folderInfo
 	if err := a.getJSON(a.storageURL(name, version), &fi); err != nil {
 		return nil, err
