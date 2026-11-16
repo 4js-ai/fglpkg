@@ -331,3 +331,107 @@ func TestCheckEncodingASCIICodeDoesNotExemptItsResources(t *testing.T) {
 		t.Errorf("US-ASCII code must not exempt a non-ASCII resource from the warning, got:\n%s", out)
 	}
 }
+
+// zipWithEntries writes a zip holding exactly the given name → contents.
+func zipWithEntries(t *testing.T, entries map[string]string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "pkg.zip")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create zip: %v", err)
+	}
+	defer f.Close()
+	zw := zip.NewWriter(f)
+	for name, body := range entries {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("create entry %s: %v", name, err)
+		}
+		if _, err := w.Write([]byte(body)); err != nil {
+			t.Fatalf("write entry %s: %v", name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close zip: %v", err)
+	}
+	return path
+}
+
+// TestReadEncodingFromZipSource pins WHERE the encoding facts are read from.
+//
+// They ship in fglpkg-encoding.json, beside the manifest rather than in it,
+// because fglpkg <= 4.2.9 loads an installed package's manifest strictly and
+// refuses a field it does not know (GIS-285). The manifest stays readable as a
+// fallback: fglpkg 4.2.10 wrote the fields there before they moved, and an
+// Artifactory sidecar is the author's own manifest, declared fields and all.
+func TestReadEncodingFromZipSource(t *testing.T) {
+	const sideFile = `{"characterEncoding":"UTF-8","lengthSemantics":"char"}`
+	const inManifest = `{"name":"p","characterEncoding":"ISO-8859-15","lengthSemantics":"byte"}`
+
+	cases := []struct {
+		name       string
+		entries    map[string]string
+		wantEnc    string
+		wantLength string
+		why        string
+	}{
+		{
+			name:       "the side file alone",
+			entries:    map[string]string{manifest.EncodingFilename: sideFile, manifest.Filename: `{"name":"p"}`},
+			wantEnc:    "UTF-8",
+			wantLength: "char",
+			why:        "where pack ships them",
+		},
+		{
+			name:       "the manifest alone",
+			entries:    map[string]string{manifest.Filename: inManifest},
+			wantEnc:    "ISO-8859-15",
+			wantLength: "byte",
+			why:        "a package packed before the facts moved must still be checked",
+		},
+		{
+			name:       "both: the side file decides",
+			entries:    map[string]string{manifest.EncodingFilename: sideFile, manifest.Filename: inManifest},
+			wantEnc:    "UTF-8",
+			wantLength: "char",
+			why:        "the dedicated file is the newer statement, and the two must not be merged",
+		},
+		{
+			name:       "neither",
+			entries:    map[string]string{manifest.Filename: `{"name":"p"}`},
+			wantEnc:    "",
+			wantLength: "",
+			why:        "every package published before GIS-285 looks like this",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			enc, err := readEncodingFromZip(zipWithEntries(t, tc.entries))
+			if err != nil {
+				t.Fatalf("readEncodingFromZip: %v", err)
+			}
+			if enc.CharacterEncoding != tc.wantEnc || enc.LengthSemantics != tc.wantLength {
+				t.Errorf("read %q/%q, want %q/%q (%s)",
+					enc.CharacterEncoding, enc.LengthSemantics, tc.wantEnc, tc.wantLength, tc.why)
+			}
+		})
+	}
+}
+
+// TestReadEncodingFromZipInvalidSideFile: an unreadable statement is not the
+// same as no statement. It must fail rather than fall through to the manifest
+// or install unchecked — and the error has to name the file that could not be
+// read, because "manifest" would send the reader to the wrong one.
+func TestReadEncodingFromZipInvalidSideFile(t *testing.T) {
+	z := zipWithEntries(t, map[string]string{
+		manifest.EncodingFilename: "{ not json",
+		manifest.Filename:         `{"name":"p","characterEncoding":"UTF-8"}`,
+	})
+	_, err := readEncodingFromZip(z)
+	if err == nil {
+		t.Fatal("readEncodingFromZip accepted an unreadable encoding file")
+	}
+	if !strings.Contains(err.Error(), manifest.EncodingFilename) {
+		t.Errorf("error = %q, want it to name %s", err, manifest.EncodingFilename)
+	}
+}

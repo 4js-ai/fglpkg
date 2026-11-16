@@ -3395,6 +3395,13 @@ func stagePackage(stageDir string, m *manifest.Manifest) (empty bool, err error)
 	if err := recordEncoding(pub, staged); err != nil {
 		return false, err
 	}
+	// ...and ship them BESIDE the manifest rather than in it, so an older
+	// fglpkg can still read the package (see stageEncodingFile). This empties
+	// the three fields on `pub`, so it must run before the manifest is
+	// serialized just below.
+	if err := stageEncodingFile(stageDir, pub); err != nil {
+		return false, err
+	}
 	mfData, err := json.MarshalIndent(pub, "", "  ")
 	if err != nil {
 		return false, fmt.Errorf("cannot serialize publishable %s: %w", manifest.Filename, err)
