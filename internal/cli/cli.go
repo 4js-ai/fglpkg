@@ -2907,7 +2907,13 @@ func cmdPublish(args []string) error {
 	}
 
 	if dryRun {
-		fmt.Printf("DRY RUN — no network calls will be made\n\n")
+		// Not "no network calls": the overwrite pre-check above has already
+		// made one, and it asked this registry about this package by name. On
+		// the public registry that is a disclosure, so say it rather than
+		// promise the opposite of what happened.
+		fmt.Printf("DRY RUN — nothing will be uploaded or created.\n")
+		fmt.Printf("  One read has already happened: %s was asked whether %s@%s is published.\n\n",
+			registryURL, m.Name, m.Version)
 	}
 	if !ci {
 		checkForRecompile(built)
