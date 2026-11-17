@@ -99,9 +99,15 @@ it "a name with no valid slug is refused before any upload" _pub_artifactory_rej
 # passes every unit test and all eighteen other functional publish cases.
 #
 # --dry-run prints the request bodies and the artifact URL, so the slug and the
-# display name are both observable with no network access. FGLPKG_TOKEN is a
-# dummy: a dry run never sends it.
+# display name are both observable without publishing anything. FGLPKG_TOKEN is
+# a dummy: a dry run never sends it.
+#
+# The one request a dry run does make is the overwrite pre-check, and with no
+# registry configured it goes to the PUBLIC one: this case used to send
+# "datetime" to service.generointelligence.ai on every run of the suite, and to
+# fail on a machine that could not reach it. The mock answers it instead.
 _pub_gi_canonicalizes_the_name() {
+  mock_registry_start || return 1
   mkpkg DateTime 0.1.0
   export FGLPKG_TOKEN="dummy-token-for-dry-run"
   run publish --dry-run

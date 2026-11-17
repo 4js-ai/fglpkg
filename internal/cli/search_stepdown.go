@@ -111,12 +111,42 @@ func stepDownRow(r *searchRow, target *genero.Version) {
 	if err != nil || !sel.Found {
 		return // nothing runs here: the ✗ was right, and now it is confirmed
 	}
+	moved := false
 	if picked := sel.Best.Version.String(); picked != r.version {
 		r.latest = r.version
 		r.version = picked
+		moved = true
 	}
-	r.constraint = sel.Best.GeneroConstraint
-	r.variants = sel.Best.Variants
+	// Take the candidate's signals only when it HAS some, or when the row has
+	// moved to the version they describe.
+	//
+	// An Artifactory version list carries none: FetchVersions leaves
+	// GeneroConstraint empty and fills it lazily from the per-version sidecar,
+	// to save one metadata read per version. registry.Runnable reads "nothing
+	// declared" as "no reason to refuse", so every candidate in such a list
+	// looks runnable and the selection lands back on the version the row is
+	// already showing — whose constraint FetchInfo DID fill in. Copying the
+	// candidate's empty string over it turned a correct "^6.0.0 ✗" into "- ?",
+	// losing the answer that matters most: telling a Genero 4 user that a
+	// Genero 6 package is not for them.
+	//
+	// The test is "!= nil" rather than a length, because nil and an empty slice
+	// are different claims in this codebase (GIS-574): nil is "no build list
+	// was reported", an empty one is "reported, and there are none". Only the
+	// first is the absence this guard withholds. The two cannot actually be
+	// told apart from here — a version that publishes no builds is not runnable,
+	// so SelectInstallable has already refused it and sel.Found is false — but
+	// the line says the thing it means, and the day a caller reaches this with
+	// an empty list it will do the right thing with it.
+	//
+	// When the row HAS moved, the candidate's signals replace the row's even if
+	// they are empty, because the row's describe a version that is no longer in
+	// the VERSION column, and a cell that describes a different version than
+	// the one beside it is the disagreement this whole file exists to prevent.
+	if moved || sel.Best.GeneroConstraint != "" || sel.Best.Variants != nil {
+		r.constraint = sel.Best.GeneroConstraint
+		r.variants = sel.Best.Variants
+	}
 	r.grade = gradeCompat(target, r.constraint, r.variants)
 	r.genero = displayGenero(target, r.constraint, r.variants)
 }

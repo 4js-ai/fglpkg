@@ -66,19 +66,43 @@ it "the refusal happens before anything is built" _pub_no_target_before_build
 # --dry-run uploads nothing by definition, so it is NOT blocked — failing it
 # would break pipelines that use it to validate a manifest. It states the target
 # instead, which is the other half of the complaint: the fallback was invisible.
+#
+# The warning exists ONLY when nothing is configured, and that is the same state
+# that sends the dry run's overwrite pre-check to the PUBLIC registry, by name:
+# pointing this case at the mock with FGLPKG_REGISTRY would configure a target
+# and remove the very thing under test (confirmPublishTarget returns early when
+# the fallback is not the public service). So the case kept its public call, and
+# every run of this suite disclosed a package name to
+# service.generointelligence.ai and depended on reaching it — measured here with
+# a black-hole proxy, and seen as a flake in a full suite run. Case 60 had the
+# same defect and was fixed by pointing it at the mock; this one cannot be.
+#
+# The network is closed off instead. Nothing leaves the machine, and what the
+# guard did is still fully visible: it warned, it named the target, and it let
+# the command go on to the pre-check — the step AFTER the guard, which a block
+# would never have reached. With the network open the same run goes on to print
+# the whole dry run; what it must not do is stop at the guard.
 _pub_dryrun_warns_not_blocked() {
   mkpkg
   export FGLPKG_TOKEN="dummy-token"
+  export HTTP_PROXY="http://127.0.0.1:9" HTTPS_PROXY="http://127.0.0.1:9"
+  export http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY"
+  export NO_PROXY="" no_proxy=""
   run publish --dry-run
-  assert_success
-  assert_contains "no publish target is configured"
+  assert_contains "no publish target is configured" || return 1
+  assert_contains "service.generointelligence.ai" || return 1
+  # Past the guard: this message comes from the pre-check, which runs after it.
+  assert_contains "cannot check whether version" || return 1
+  # And the guard did not turn into a refusal.
+  assert_not_contains "not an interactive terminal" || return 1
 }
-it "publish --dry-run warns about the fallback but still runs" _pub_dryrun_warns_not_blocked
+it "publish --dry-run warns about the fallback and is not blocked" _pub_dryrun_warns_not_blocked
 
 # Naming the target is the user making the choice, so there is nothing to warn
 # about — and no prompt, which would otherwise appear on every publish.
 _pub_explicit_gi_no_warning() {
-  mkpkg
+  mock_registry_start || return 1        # the pre-check needs an answer; see above
+  mkpkg demo.pkg 9.9.9
   export FGLPKG_TOKEN="dummy-token"
   run publish --registry gi --dry-run
   assert_success

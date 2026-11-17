@@ -2907,7 +2907,13 @@ func cmdPublish(args []string) error {
 	}
 
 	if dryRun {
-		fmt.Printf("DRY RUN — no network calls will be made\n\n")
+		// Not "no network calls": the overwrite pre-check above has already
+		// made one, and it asked this registry about this package by name. On
+		// the public registry that is a disclosure, so say it rather than
+		// promise the opposite of what happened.
+		fmt.Printf("DRY RUN — nothing will be uploaded or created.\n")
+		fmt.Printf("  One read has already happened: %s was asked whether %s@%s is published.\n\n",
+			registryURL, m.Name, m.Version)
 	}
 	if !ci {
 		checkForRecompile(built)
@@ -3393,6 +3399,13 @@ func stagePackage(stageDir string, m *manifest.Manifest) (empty bool, err error)
 	// packer's shell (GIS-285). Anything unproven is left absent. Runs here,
 	// after every stager, so it sees the final tree.
 	if err := recordEncoding(pub, staged); err != nil {
+		return false, err
+	}
+	// ...and ship them BESIDE the manifest rather than in it, so an older
+	// fglpkg can still read the package (see stageEncodingFile). This empties
+	// the three fields on `pub`, so it must run before the manifest is
+	// serialized just below.
+	if err := stageEncodingFile(stageDir, pub); err != nil {
 		return false, err
 	}
 	mfData, err := json.MarshalIndent(pub, "", "  ")

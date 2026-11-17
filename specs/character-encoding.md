@@ -223,6 +223,39 @@ coupling by the back door.
 
 ## Manifest schema
 
+The author **declares** these three in their own `fglpkg.json`, and `pack` **ships** them in a
+separate file inside the archive, `fglpkg-encoding.json`, leaving the shipped `fglpkg.json` without
+them:
+
+```
+mypkg-1.0.0-genero6.zip
+├── fglpkg.json            the shipped manifest — no encoding fields
+├── fglpkg-encoding.json   characterEncoding, lengthSemantics, stringResourceEncodings
+└── ...
+```
+
+They live beside the manifest rather than in it because **fglpkg ≤ 4.2.9 loads an installed
+package's manifest strictly** and refuses a field it does not know. A manifest carrying them makes
+an older client fail to build the merged FGLLDPATH root, and with it `docs`, `run`, the version in
+`list` and the `chmod` of a package's `bin` scripts — for *every* package packed by 4.2.10, since
+`pack` records `characterEncoding` even for pure-ASCII code. An extra file in the archive is
+ignored by a client that knows nothing about it.
+
+Two consequences worth stating:
+
+- A package that proves no encoding facts ships **no** `fglpkg-encoding.json` at all, so its bytes
+  are what they were before this feature existed.
+- An author who **declares** any of the three in their own `fglpkg.json` needs fglpkg ≥ 4.2.10 to
+  work on *that project*, because a project's own manifest is loaded strictly — that is the typo
+  guard, and it is not relaxed here. Consumers of the published package are unaffected. The
+  Artifactory sidecar is a copy of the author's manifest and so carries a declared field too;
+  fglpkg ≤ 4.2.9 reads sidecars leniently and installs such a package without complaint.
+
+`install` reads `fglpkg-encoding.json` first and falls back to the fields inside the shipped
+manifest, which is where fglpkg 4.2.10 put them before this change.
+
+The three fields, wherever they travel:
+
 ```jsonc
 {
   "characterEncoding": "US-ASCII",              // IANA name; the CODE's text
@@ -253,7 +286,8 @@ constrains no consumer charmap, which is why `install` skips it. ASCII code that
 resource string with `getCharAt` legitimately needs `"char"`, and a UTF-8 consumer satisfies both.
 Without the exemption `pack` produced a manifest its own `Validate()` rejected: ASCII code plus a
 declared `"char"` ships `{"characterEncoding": "US-ASCII", "lengthSemantics": "char"}`, which then
-failed to load.
+failed to load. (That pair now ships in `fglpkg-encoding.json`; the author's own manifest still
+declares it, and is still what `Validate()` runs against.)
 
 ## Derivation algorithm (`pack`)
 
@@ -386,8 +420,11 @@ module proves nothing; ASCII code plus a UTF-8 `.42s`
 stays portable with the resource named; `US-ASCII` + `"char"` packs and reads back; a correct
 `US-ASCII` declaration survives real p-code, a UTF-8 prolog and a `.42s`; a contradicted declaration
 fails; install refuses a code mismatch, accepts `--force-character-encoding`, warns on a resource
-mismatch, and is silent for a package that declares nothing — asserted on the shipped manifest, not
-assumed.
+mismatch, and is silent for a package that declares nothing — asserted on what is actually shipped,
+not assumed. The helper that reads it fails if the shipped `fglpkg.json` carries any of the three
+fields, so an "absent" assertion cannot pass by looking at the wrong file; separate cases cover a
+package that ships no encoding file, the fallback to fields left inside an older manifest, and a
+corrupt encoding file, which is refused before anything is extracted.
 
 ## Non-goals
 

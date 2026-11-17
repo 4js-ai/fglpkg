@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -390,6 +391,53 @@ func modTime(path string) (time.Time, error) {
 		return time.Time{}, err
 	}
 	return st.ModTime(), nil
+}
+
+// encodingFile is what ships in fglpkg-encoding.json. The three fields are the
+// manifest's own, with the same JSON names, so a reader can decode either file
+// into the same struct.
+type encodingFile struct {
+	CharacterEncoding       string            `json:"characterEncoding,omitempty"`
+	LengthSemantics         string            `json:"lengthSemantics,omitempty"`
+	StringResourceEncodings map[string]string `json:"stringResourceEncodings,omitempty"`
+}
+
+// stageEncodingFile moves the encoding facts out of the shipped manifest and
+// into fglpkg-encoding.json beside it, leaving pub without them.
+//
+// The move is what keeps fglpkg <= 4.2.9 working. An older client loads an
+// installed package's manifest strictly, so a field it does not know makes it
+// refuse the package: no merged FGLLDPATH root, no `docs`, no `run`, no
+// version in `list`, and the bin scripts never chmodded. That would have hit
+// EVERY package packed by 4.2.10, because `pack` records characterEncoding
+// even for pure-ASCII code. An extra file in the archive is simply ignored by
+// a client that does not look for it (manifest.EncodingFilename).
+//
+// Nothing is written when there is nothing to say, so a package that states no
+// encoding facts ships exactly the bytes it shipped before GIS-285.
+//
+// It writes straight into stageDir rather than through the stager, so the file
+// never counts toward the "package contains nothing" verdict — the same rule
+// fglpkg.json itself follows.
+func stageEncodingFile(stageDir string, pub *manifest.Manifest) error {
+	ef := encodingFile{
+		CharacterEncoding:       pub.CharacterEncoding,
+		LengthSemantics:         pub.LengthSemantics,
+		StringResourceEncodings: pub.StringResourceEncodings,
+	}
+	pub.CharacterEncoding, pub.LengthSemantics, pub.StringResourceEncodings = "", "", nil
+	if ef.CharacterEncoding == "" && ef.LengthSemantics == "" && len(ef.StringResourceEncodings) == 0 {
+		return nil
+	}
+	data, err := json.MarshalIndent(ef, "", "  ")
+	if err != nil {
+		return fmt.Errorf("cannot serialize %s: %w", manifest.EncodingFilename, err)
+	}
+	path := filepath.Join(stageDir, manifest.EncodingFilename)
+	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+		return fmt.Errorf("cannot stage %s: %w", manifest.EncodingFilename, err)
+	}
+	return nil
 }
 
 // recordEncoding sets the shipped manifest's encoding fields from the staged

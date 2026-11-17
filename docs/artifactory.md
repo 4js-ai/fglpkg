@@ -332,6 +332,13 @@ too.
 > asked for the slug. Re-publish it (the deploy now lands in `datetime/`), or
 > rename the folder in Artifactory. Packages whose names were already lowercase
 > are unaffected and need no action.
+>
+> Two commands can still see such a folder, so you can find out what is in one
+> before deciding: `fglpkg search` lists it under its own name, and `fglpkg
+> info DateTime` — the name spelled exactly as the folder is — describes it and
+> says that install cannot reach it. Neither spelling of `install` works, and
+> `info datetime` does not either: a lowercase name is already a slug, so there
+> is no second spelling to try.
 
 ## Choosing a default registry
 

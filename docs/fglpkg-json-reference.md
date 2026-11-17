@@ -1062,7 +1062,7 @@ authority (see [§5](#5-parsing--validation-rules)).
 | `keywords` | string[] | No | Search/discovery tags. |
 | `visibility` | `"public"`\|`"private"` | No | Registry visibility (first publish only). |
 | `genero` | string | No | Genero runtime semver constraint. |
-| `characterEncoding` | string | No | IANA charset the compiled **code** carries. Recorded by `pack` only when the artifacts prove it; declare it otherwise. |
+| `characterEncoding` | string | No | IANA charset the compiled **code** carries. Recorded by `pack` only when the artifacts prove it; declare it otherwise. Ships in `fglpkg-encoding.json` inside the archive, not in the shipped manifest. |
 | `stringResourceEncodings` | object | No | Charset of each `.42s` carrying non-ASCII text, per file. Derived by `pack`; advisory — `install` warns, never refuses. |
 | `lengthSemantics` | string | No | `"char"` or `"byte"` — the `FGL_LENGTH_SEMANTICS` a consumer must use. Author-declared only. |
 | `main` | string | No | Primary `.42m` entry point. |

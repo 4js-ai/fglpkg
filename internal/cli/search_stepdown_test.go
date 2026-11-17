@@ -347,3 +347,122 @@ func TestStepDownAgreesWithTheInstallSelector(t *testing.T) {
 		}
 	}
 }
+
+// TestStepDownKeepsWhatACandidateListCannotSay is F3 from the v4.2.10 release
+// test. An Artifactory version list carries no compatibility signal at all —
+// FetchVersions leaves GeneroConstraint empty and fills it lazily from the
+// per-version sidecar, to avoid one metadata read per version — so every
+// candidate in it looks runnable to registry.Runnable, which reads "nothing
+// declared" as "no reason to refuse".
+//
+// The row, however, DOES know the constraint: FetchInfo filled it for the one
+// version the listing describes. Overwriting that with the candidate's empty
+// string turned a correct "^6.0.0 ✗" into "- ?" — the answer that matters most,
+// telling a Genero 4 user that a Genero 6 package is not for them, replaced by
+// a shrug.
+func TestStepDownKeepsWhatACandidateListCannotSay(t *testing.T) {
+	v4 := genero.MustParse("4.01.12")
+	rows := []searchRow{{
+		name:       "fgl-dbconnect",
+		version:    "1.0.0",
+		constraint: ">=5.0.0",
+		versions: candidates(
+			versionSpec{"0.9.0", "", nil},
+			versionSpec{"1.0.0", "", nil},
+		),
+	}}
+	gradeSearchRows(rows, &v4)
+
+	if rows[0].grade != gradeIncompatible {
+		t.Errorf("grade = %q, want %q — the row's own constraint rules Genero 4 out",
+			rows[0].grade, gradeIncompatible)
+	}
+	if rows[0].genero != ">=5.0.0" {
+		t.Errorf("GENERO = %q, want the declared constraint", rows[0].genero)
+	}
+	if rows[0].version != "1.0.0" || rows[0].latest != "" {
+		t.Errorf("version = %q latest = %q, want 1.0.0 and no step-down",
+			rows[0].version, rows[0].latest)
+	}
+}
+
+// TestStepDownReplacesTheSignalsWhenTheRowMoves is the other half of that
+// guard. Once the step-down has moved the VERSION column onto a different
+// version, the row's own constraint describes a version that is no longer on
+// screen, so it goes — even when the candidate has nothing to put in its place
+// and the honest answer becomes "?".
+//
+// The shape is a listing whose latest version is not in the version list: a
+// folder removed from the repository after the listing was read, or GI's
+// "latest" pointer naming a version that is not the highest (the stale-pointer
+// case gradeSearchRows describes).
+func TestStepDownReplacesTheSignalsWhenTheRowMoves(t *testing.T) {
+	v4 := genero.MustParse("4.01.12")
+	rows := []searchRow{{
+		name:       "gone",
+		version:    "2.0.0",
+		constraint: ">=5.0.0",
+		versions:   candidates(versionSpec{"1.0.0", "", nil}),
+	}}
+	gradeSearchRows(rows, &v4)
+
+	if rows[0].version != "1.0.0" || rows[0].latest != "2.0.0" {
+		t.Fatalf("version = %q latest = %q, want 1.0.0 stepped down from 2.0.0",
+			rows[0].version, rows[0].latest)
+	}
+	if rows[0].genero != "-" || rows[0].grade != gradeUnknown {
+		t.Errorf("GENERO = %q grade = %q, want - / ? — 2.0.0's constraint cannot describe 1.0.0",
+			rows[0].genero, rows[0].grade)
+	}
+}
+
+// TestStepDownTakesFresherSignalsForTheSameVersion: not moving is no reason to
+// ignore what the candidate reported. A listing row and the version list can
+// disagree about the same version — the listing is a snapshot — and the version
+// list is the one install resolves from, so it wins. The guard above withholds
+// ONLY the candidate that reported nothing at all.
+func TestStepDownTakesFresherSignalsForTheSameVersion(t *testing.T) {
+	v4 := genero.MustParse("4.01.12")
+	cases := []struct {
+		name       string
+		cand       versionSpec
+		wantGrade  string
+		wantGenero string
+		why        string
+	}{
+		{
+			name:       "a build list the listing did not have",
+			cand:       versionSpec{"1.0.0", "", []string{"genero4", "genero6"}},
+			wantGrade:  gradeCompatible,
+			wantGenero: "4, 6",
+			why:        "the version list reports a genero4 build; the listing's row did not",
+		},
+		{
+			name:       "a declared constraint and no build list",
+			cand:       versionSpec{"1.0.0", "^4.0.0", nil},
+			wantGrade:  gradeCompatible,
+			wantGenero: "^4.0.0",
+			why:        "a constraint on its own is a signal, and the row's stale builds must not outlive it",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := []searchRow{{
+				name:     "stale",
+				version:  "1.0.0",
+				variants: []string{"genero6"}, // what the listing said: ✗ here
+				versions: candidates(tc.cand),
+			}}
+			gradeSearchRows(rows, &v4)
+
+			if rows[0].grade != tc.wantGrade || rows[0].genero != tc.wantGenero {
+				t.Errorf("grade = %q GENERO = %q, want %q / %q (%s)",
+					rows[0].grade, rows[0].genero, tc.wantGrade, tc.wantGenero, tc.why)
+			}
+			if rows[0].version != "1.0.0" || rows[0].latest != "" {
+				t.Errorf("version = %q latest = %q, want 1.0.0 with no step-down",
+					rows[0].version, rows[0].latest)
+			}
+		})
+	}
+}

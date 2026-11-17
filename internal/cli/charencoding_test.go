@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -686,5 +687,87 @@ func TestIncludeRe_MatchesWhatFglcompTreatsAsADirective(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("includeRe on %q = %q, want %q", tc.line, got, tc.want)
 		}
+	}
+}
+
+// TestStageEncodingFile_MovesTheFactsOutOfTheManifest is the contract that
+// keeps fglpkg <= 4.2.9 able to read a package packed by 4.2.10: the three
+// encoding fields must leave the shipped manifest, not be copied out of it.
+// An older client refuses a manifest field it does not know, and that refusal
+// costs the merged FGLLDPATH root, `docs`, `run`, the version in `list` and
+// the chmod of bin scripts — for every package, since pack records
+// characterEncoding even for pure-ASCII code.
+func TestStageEncodingFile_MovesTheFactsOutOfTheManifest(t *testing.T) {
+	dir := t.TempDir()
+	m := &manifest.Manifest{
+		Name:                    "p",
+		CharacterEncoding:       "UTF-8",
+		LengthSemantics:         "char",
+		StringResourceEncodings: map[string]string{"msg.42s": "UTF-8"},
+	}
+	if err := stageEncodingFile(dir, m); err != nil {
+		t.Fatalf("stageEncodingFile: %v", err)
+	}
+	if m.CharacterEncoding != "" || m.LengthSemantics != "" || m.StringResourceEncodings != nil {
+		t.Errorf("the manifest still carries %q/%q/%v — these must MOVE, not be copied",
+			m.CharacterEncoding, m.LengthSemantics, m.StringResourceEncodings)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, manifest.EncodingFilename))
+	if err != nil {
+		t.Fatalf("reading the staged %s: %v", manifest.EncodingFilename, err)
+	}
+	var got encodingFile
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("the staged %s is not valid JSON: %v", manifest.EncodingFilename, err)
+	}
+	if got.CharacterEncoding != "UTF-8" || got.LengthSemantics != "char" ||
+		got.StringResourceEncodings["msg.42s"] != "UTF-8" {
+		t.Errorf("staged %+v, want every fact carried over", got)
+	}
+}
+
+// TestStageEncodingFile_WritesNothingWhenThereIsNothingToSay: a package that
+// proves no encoding facts must ship exactly the bytes it shipped before
+// GIS-285 — not an empty object, not an empty file.
+func TestStageEncodingFile_WritesNothingWhenThereIsNothingToSay(t *testing.T) {
+	dir := t.TempDir()
+	if err := stageEncodingFile(dir, &manifest.Manifest{Name: "p"}); err != nil {
+		t.Fatalf("stageEncodingFile: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, manifest.EncodingFilename)); !os.IsNotExist(err) {
+		t.Errorf("stat %s = %v, want it absent", manifest.EncodingFilename, err)
+	}
+}
+
+// Each of the three facts travels on its own: a package may declare only
+// lengthSemantics, or only resource encodings, and either one alone has to
+// move out of the manifest and into the file.
+func TestStageEncodingFile_EachFactAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		m    manifest.Manifest
+	}{
+		{"characterEncoding", manifest.Manifest{CharacterEncoding: "UTF-8"}},
+		{"lengthSemantics", manifest.Manifest{LengthSemantics: "char"}},
+		{"stringResourceEncodings", manifest.Manifest{
+			StringResourceEncodings: map[string]string{"msg.42s": "UTF-8"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			m := tc.m
+			if err := stageEncodingFile(dir, &m); err != nil {
+				t.Fatalf("stageEncodingFile: %v", err)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, manifest.EncodingFilename))
+			if err != nil {
+				t.Fatalf("reading the staged %s: %v", manifest.EncodingFilename, err)
+			}
+			if !strings.Contains(string(data), tc.name) {
+				t.Errorf("staged file = %s, want it to carry %s", data, tc.name)
+			}
+			if m.CharacterEncoding != "" || m.LengthSemantics != "" || m.StringResourceEncodings != nil {
+				t.Errorf("%s stayed in the manifest: %+v", tc.name, m)
+			}
+		})
 	}
 }

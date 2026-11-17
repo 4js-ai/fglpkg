@@ -36,6 +36,70 @@ _mkpkg_enc() {
 EOF
 }
 
+# _enc_shipped <zip> <out> — the encoding facts a package SHIPS, as a file the
+# assertions below can read.
+#
+# They travel in fglpkg-encoding.json, beside the shipped manifest rather than
+# inside it: fglpkg <= 4.2.9 loads an installed package's manifest strictly and
+# refuses a field it does not know, which would have broken the merged
+# FGLLDPATH root, `docs`, `run`, `list` and the chmod of bin scripts for every
+# package packed by 4.2.10 — `pack` records characterEncoding even for
+# pure-ASCII code.
+#
+# Reading the side file is only half the job. The shipped MANIFEST must carry
+# none of the three keys, or every "records nothing" assertion in this file
+# would pass without looking at anything. So this fails when it finds one
+# there, and that check is why the helper exists rather than a plain unzip.
+_enc_shipped() {  # _enc_shipped <zip> <out>
+  local zip="$1" out="$2" mf
+  mf="$(unzip -p "$zip" fglpkg.json)" || return 1
+  case "$mf" in
+    *'"characterEncoding"'*|*'"lengthSemantics"'*|*'"stringResourceEncodings"'*)
+      _diag "the shipped fglpkg.json carries an encoding field — fglpkg <= 4.2.9 cannot read it"
+      return 1 ;;
+  esac
+  # Absent is a normal answer: a package that proves nothing ships no side file.
+  unzip -p "$zip" fglpkg-encoding.json > "$out" 2>/dev/null || : > "$out"
+}
+
+# _enc_as_packed_by_the_rc <zip> — rewrite an archive into the shape fglpkg
+# 4.2.10 produced before the facts moved: the three fields inside fglpkg.json,
+# no side file. That shape has to keep working, because the reader falls back
+# to the manifest for packages built by that build — and for the sidecar an
+# Artifactory repository serves, which is the author's manifest verbatim.
+_enc_as_packed_by_the_rc() {  # _enc_as_packed_by_the_rc <zip>
+  python3 - "$1" <<'PY'
+import json, shutil, sys, zipfile
+src = sys.argv[1]
+with zipfile.ZipFile(src) as z:
+    enc = json.loads(z.read("fglpkg-encoding.json"))
+    with zipfile.ZipFile(src + ".tmp", "w", zipfile.ZIP_DEFLATED) as out:
+        for n in z.namelist():
+            if n == "fglpkg-encoding.json":
+                continue
+            data = z.read(n)
+            if n == "fglpkg.json":
+                m = json.loads(data)
+                m.update(enc)
+                data = (json.dumps(m, indent=2) + "\n").encode()
+            out.writestr(n, data)
+shutil.move(src + ".tmp", src)
+PY
+}
+
+# _enc_corrupt_side_file <zip> — leave the side file in place but unreadable.
+_enc_corrupt_side_file() {  # _enc_corrupt_side_file <zip>
+  python3 - "$1" <<'PY'
+import shutil, sys, zipfile
+src = sys.argv[1]
+with zipfile.ZipFile(src) as z:
+    with zipfile.ZipFile(src + ".tmp", "w", zipfile.ZIP_DEFLATED) as out:
+        for n in z.namelist():
+            out.writestr(n, b"{ not json" if n == "fglpkg-encoding.json" else z.read(n))
+shutil.move(src + ".tmp", src)
+PY
+}
+
 # ---------------------------------------------------------------- pack ------
 
 # The case a byte scan of the artifact gets wrong. AsciiBig.42m is compiled
@@ -48,7 +112,7 @@ _enc_pack_proves_ascii_from_source() {
   _enc_fixture AsciiBig.42m AsciiBig.4gl || return 1
   run pack -o p.zip
   assert_success || return 1
-  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  _enc_shipped p.zip shipped.json || return 1
   # Not ISO-8859-15: the packer's shell is not evidence.
   assert_file_contains shipped.json '"characterEncoding": "US-ASCII"' || return 1
 }
@@ -62,7 +126,7 @@ _enc_pack_records_nothing_without_evidence() {
   _enc_fixture AsciiBig.42m || return 1
   run pack -o p.zip
   assert_success || return 1
-  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  _enc_shipped p.zip shipped.json || return 1
   assert_file_not_contains shipped.json 'characterEncoding' || return 1
 }
 it "pack records no encoding when the artifacts prove none" _enc_pack_records_nothing_without_evidence
@@ -79,7 +143,7 @@ _enc_pack_ignores_the_build_environment() {
     _enc_fixture AsciiBig.42m AsciiBig.4gl || { cd ..; return 1; }
     run pack -o p.zip
     assert_success || { cd ..; return 1; }
-    unzip -p p.zip fglpkg.json > shipped.json || { cd ..; return 1; }
+    _enc_shipped p.zip shipped.json || { cd ..; return 1; }
     got="$(grep -c 'characterEncoding.*US-ASCII' shipped.json || true)"
     cd .. || return 1
     [ -z "$first" ] && first="$got"
@@ -100,7 +164,7 @@ _enc_pack_form_prolog_is_not_the_content() {
   _enc_fixture AsciiForm.42f || return 1
   run pack -o p.zip
   assert_success || return 1
-  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  _enc_shipped p.zip shipped.json || return 1
   assert_file_contains shipped.json '"characterEncoding": "US-ASCII"' || return 1
 }
 it "a pure-ASCII form is US-ASCII even though its prolog says UTF-8" _enc_pack_form_prolog_is_not_the_content
@@ -113,7 +177,7 @@ _enc_pack_form_with_real_text_uses_its_bytes() {
   _enc_fixture Utf8Form.42f || return 1
   run pack -o p.zip
   assert_success || return 1
-  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  _enc_shipped p.zip shipped.json || return 1
   assert_file_contains shipped.json '"characterEncoding": "UTF-8"' || return 1
 }
 it "a form carrying non-ASCII text takes its encoding from its bytes" _enc_pack_form_with_real_text_uses_its_bytes
@@ -128,7 +192,7 @@ _enc_pack_form_prolog_never_overrides_the_bytes() {
   _enc_fixture Utf8Mislabelled.42f || return 1
   run pack -o p.zip
   assert_success || return 1
-  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  _enc_shipped p.zip shipped.json || return 1
   assert_file_contains shipped.json '"characterEncoding": "UTF-8"' || return 1
   # Nor is the disagreement reported. fglrun uses a form's bytes as stored
   # whatever the prolog says (measured over three build locales and two
@@ -148,7 +212,7 @@ _enc_pack_eight_bit_form_proves_nothing() {
   _enc_fixture Latin9Form.42f || return 1
   run pack -o p.zip
   assert_success || return 1
-  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  _enc_shipped p.zip shipped.json || return 1
   assert_file_not_contains shipped.json 'characterEncoding' || return 1
 }
 it "a form in an 8-bit charset records nothing, prolog or no prolog" _enc_pack_eight_bit_form_proves_nothing
@@ -163,7 +227,7 @@ _enc_pack_include_defeats_an_ascii_source() {
   _enc_fixture IncUtf8.42m IncUtf8.4gl IncUtf8.inc || return 1
   run pack -o p.zip
   assert_success || return 1
-  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  _enc_shipped p.zip shipped.json || return 1
   assert_file_not_contains shipped.json 'characterEncoding' || return 1
   assert_contains "IncUtf8.inc" || return 1
 }
@@ -180,7 +244,7 @@ _enc_pack_include_without_a_space_is_still_an_include() {
   _enc_fixture IncTight.42m IncTight.4gl IncTight.inc || return 1
   run pack -o p.zip
   assert_success || return 1
-  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  _enc_shipped p.zip shipped.json || return 1
   assert_file_not_contains shipped.json 'characterEncoding' || return 1
   assert_contains "IncTight.inc" || return 1
 }
@@ -194,7 +258,7 @@ _enc_pack_ascii_include_still_proves_ascii() {
   _enc_fixture IncAscii.42m IncAscii.4gl IncAscii.inc || return 1
   run pack -o p.zip
   assert_success || return 1
-  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  _enc_shipped p.zip shipped.json || return 1
   assert_file_contains shipped.json '"characterEncoding": "US-ASCII"' || return 1
 }
 it "a pure-ASCII &include still proves the module ASCII" _enc_pack_ascii_include_still_proves_ascii
@@ -208,7 +272,7 @@ _enc_pack_include_two_levels_down_is_followed() {
   _enc_fixture IncDeep.42m IncDeep.4gl IncDeepA.inc IncDeepB.inc || return 1
   run pack -o p.zip
   assert_success || return 1
-  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  _enc_shipped p.zip shipped.json || return 1
   assert_file_not_contains shipped.json 'characterEncoding' || return 1
   assert_contains "IncDeepB.inc" || return 1
 }
@@ -223,7 +287,7 @@ _enc_pack_stale_include_proves_nothing() {
   touch -t "$(date -u -v+1H '+%Y%m%d%H%M' 2>/dev/null || date -u -d '+1 hour' '+%Y%m%d%H%M')" IncAscii.inc || return 1
   run pack -o p.zip
   assert_success || return 1
-  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  _enc_shipped p.zip shipped.json || return 1
   assert_file_not_contains shipped.json 'characterEncoding' || return 1
   assert_contains "IncAscii.inc" || return 1
   assert_contains "NEWER" || return 1
@@ -239,7 +303,7 @@ _enc_pack_stale_source_proves_nothing() {
   touch -t "$(date -u -v+1H '+%Y%m%d%H%M' 2>/dev/null || date -u -d '+1 hour' '+%Y%m%d%H%M')" AsciiBig.4gl || return 1
   run pack -o p.zip
   assert_success || return 1
-  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  _enc_shipped p.zip shipped.json || return 1
   assert_file_not_contains shipped.json 'characterEncoding' || return 1
   assert_contains "NEWER" || return 1
 }
@@ -254,7 +318,7 @@ _enc_pack_ascii_code_plus_localized_resources() {
   _enc_fixture AsciiBig.42m AsciiBig.4gl Utf8Msg.42s || return 1
   run pack -o p.zip
   assert_success || return 1
-  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  _enc_shipped p.zip shipped.json || return 1
   assert_file_contains shipped.json '"characterEncoding": "US-ASCII"' || return 1
   assert_file_contains shipped.json '"Utf8Msg.42s": "UTF-8"' || return 1
 }
@@ -267,7 +331,7 @@ _enc_pack_ascii_resource_is_not_recorded() {
   _enc_fixture AsciiMsg.42s || return 1
   run pack -o p.zip
   assert_success || return 1
-  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  _enc_shipped p.zip shipped.json || return 1
   assert_file_not_contains shipped.json 'stringResourceEncodings' || return 1
 }
 it "an ASCII string resource constrains nothing and is not recorded" _enc_pack_ascii_resource_is_not_recorded
@@ -281,7 +345,7 @@ _enc_pack_accepts_correct_ascii_declaration() {
   _enc_fixture AsciiBig.42m AsciiForm.42f Utf8Msg.42s || return 1
   run pack -o p.zip
   assert_success || return 1
-  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  _enc_shipped p.zip shipped.json || return 1
   assert_file_contains shipped.json '"characterEncoding": "US-ASCII"' || return 1
 }
 it "a correct US-ASCII declaration survives real p-code, a UTF-8 prolog and a .42s" _enc_pack_accepts_correct_ascii_declaration
@@ -330,11 +394,14 @@ _enc_accepts_char_with_ascii_code_and_utf8_resources() {
   _enc_fixture AsciiBig.42m AsciiBig.4gl Utf8Msg.42s || return 1
   run pack -o p.zip
   assert_success || return 1
-  unzip -p p.zip fglpkg.json > shipped.json || return 1
+  _enc_shipped p.zip shipped.json || return 1
   assert_file_contains shipped.json '"characterEncoding": "US-ASCII"' || return 1
   assert_file_contains shipped.json '"lengthSemantics": "char"' || return 1
-  # And the shipped manifest must be readable back, which is where this failed.
-  rm -f fglpkg.json && cp shipped.json fglpkg.json || return 1
+  # And the shipped MANIFEST must be readable back, which is where this failed:
+  # pack wrote a pair its own Validate() then rejected. The pair now ships in
+  # fglpkg-encoding.json (asserted above) while the author's fglpkg.json still
+  # declares it, so what is reloaded here is the manifest, not the facts.
+  rm -f fglpkg.json && unzip -p p.zip fglpkg.json > fglpkg.json || return 1
   run pack --list
   assert_success || return 1
 }
@@ -387,6 +454,10 @@ _enc_install_refuses_mismatch() {
   export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
   local fx; fx="$(mktemp -d "$_SANDBOX_ROOT/fx.XXXXXX")"
   _enc_build_fixtures "$fx" '"characterEncoding": "ISO-8859-15"' AsciiTiny.42m || return 1
+  # The gate reads the facts from where they now ship, and _enc_shipped fails
+  # if the manifest carries them, so this is the side-file path end to end.
+  _enc_shipped "$fx/demo-pkg-1.0.0-genero6.zip" shipped.json || return 1
+  assert_file_contains shipped.json 'ISO-8859-15' || return 1
   mock_registry_start "$fx" || return 1
 
   run install demo.pkg@1.0.0
@@ -454,7 +525,7 @@ _enc_install_absent_is_silent() {
   export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
   local fx; fx="$(mktemp -d "$_SANDBOX_ROOT/fx.XXXXXX")"
   _enc_build_fixtures "$fx" '' AsciiBig.42m || return 1
-  unzip -p "$fx/demo-pkg-1.0.0-genero6.zip" fglpkg.json > shipped.json || return 1
+  _enc_shipped "$fx/demo-pkg-1.0.0-genero6.zip" shipped.json || return 1
   assert_file_not_contains shipped.json 'characterEncoding' || return 1
   assert_file_not_contains shipped.json 'stringResourceEncodings' || return 1
   mock_registry_start "$fx" || return 1
@@ -464,3 +535,74 @@ _enc_install_absent_is_silent() {
   assert_not_match "character encoding|characterEncoding" || return 1
 }
 it "a package declaring no encoding installs silently" _enc_install_absent_is_silent
+
+# ------------------------------------------------- how the facts ship -------
+
+# The facts ship beside the manifest, not in it (GIS-285). An older fglpkg
+# ignores a file it does not know; it refuses a manifest FIELD it does not
+# know, and refusing it costs the merged FGLLDPATH root, `docs`, `run`, the
+# version in `list` and the chmod of bin scripts — for every package, because
+# pack records characterEncoding even for pure-ASCII code.
+_enc_ships_the_facts_beside_the_manifest() {
+  export FGLPKG_CHARMAP=ISO-8859-15 FGLPKG_LENGTH_SEMANTICS=BYTE
+  _mkpkg_enc '"files": ["*.42m", "*.4gl"]'
+  _enc_fixture AsciiBig.42m AsciiBig.4gl || return 1
+  run pack -o p.zip
+  assert_success || return 1
+  _enc_shipped p.zip shipped.json || return 1
+  assert_file_contains shipped.json '"characterEncoding": "US-ASCII"' || return 1
+  # Named in the archive listing like any other shipped file.
+  run pack --list
+  assert_success || return 1
+  assert_contains "fglpkg-encoding.json" || return 1
+}
+it "the encoding facts ship beside the manifest, not in it" _enc_ships_the_facts_beside_the_manifest
+
+# A package that proves nothing ships exactly the bytes it shipped before
+# GIS-285 — no side file, no empty object.
+_enc_ships_no_file_when_there_is_nothing_to_say() {
+  export FGLPKG_CHARMAP=ISO-8859-15 FGLPKG_LENGTH_SEMANTICS=BYTE
+  _mkpkg_enc
+  _enc_fixture AsciiBig.42m || return 1
+  run pack -o p.zip
+  assert_success || return 1
+  run_raw unzip -l p.zip
+  assert_success || return 1
+  assert_not_contains "fglpkg-encoding.json" || return 1
+}
+it "a package that proves nothing ships no encoding file" _enc_ships_no_file_when_there_is_nothing_to_say
+
+# The reader still accepts the other shape: fields inside the manifest, which
+# is what fglpkg 4.2.10 wrote before they moved, and what an Artifactory
+# sidecar carries when the author declared them.
+_enc_install_falls_back_to_the_manifest() {
+  export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
+  local fx; fx="$(mktemp -d "$_SANDBOX_ROOT/fx.XXXXXX")"
+  _enc_build_fixtures "$fx" '"characterEncoding": "ISO-8859-15"' AsciiTiny.42m || return 1
+  _enc_as_packed_by_the_rc "$fx/demo-pkg-1.0.0-genero6.zip" || return 1
+  mock_registry_start "$fx" || return 1
+
+  run install demo.pkg@1.0.0
+  assert_failure || return 1
+  assert_contains "ISO-8859-15" || return 1
+  assert_no_file ".fglpkg/packages/demo-pkg/fglpkg.json" || return 1
+}
+it "the gate still reads facts left inside an older manifest" _enc_install_falls_back_to_the_manifest
+
+# A side file that cannot be read is not the same as a package that says
+# nothing. The gate runs before extraction, so the refusal must leave the
+# project exactly as it was.
+_enc_install_refuses_a_corrupt_encoding_file() {
+  export FGLPKG_CHARMAP=UTF-8 FGLPKG_LENGTH_SEMANTICS=CHAR
+  local fx; fx="$(mktemp -d "$_SANDBOX_ROOT/fx.XXXXXX")"
+  _enc_build_fixtures "$fx" '"characterEncoding": "UTF-8"' AsciiTiny.42m || return 1
+  _enc_corrupt_side_file "$fx/demo-pkg-1.0.0-genero6.zip" || return 1
+  mock_registry_start "$fx" || return 1
+
+  run install demo.pkg@1.0.0
+  assert_failure || return 1
+  assert_contains "fglpkg-encoding.json" || return 1
+  assert_no_file ".fglpkg/packages/demo-pkg/fglpkg.json" || return 1
+  assert_no_file "fglpkg-lock.json" || return 1
+}
+it "a corrupt encoding file is refused before anything is extracted" _enc_install_refuses_a_corrupt_encoding_file

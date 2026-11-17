@@ -29,10 +29,19 @@ type pkgEncoding struct {
 	StringResourceEncodings map[string]string `json:"stringResourceEncodings"`
 }
 
-// readEncodingFromZip peeks at the in-zip manifest for the encoding fields,
-// without extracting anything. It mirrors readWebcomponentsFromZip, and like
-// it uses a partial decode so an unknown or newer manifest field cannot make
-// the read fail.
+// readEncodingFromZip peeks into the archive for the encoding facts, without
+// extracting anything. It mirrors readWebcomponentsFromZip, and like it uses a
+// partial decode so an unknown or newer field cannot make the read fail.
+//
+// The facts ship in fglpkg-encoding.json (see manifest.EncodingFilename). The
+// manifest is read as a fallback because fglpkg 4.2.10 before this change put
+// them there, and because an author's own declared fields reach the sidecar an
+// Artifactory repository serves. Both files decode into the same struct, so
+// the fallback is the same read against a different name.
+//
+// When the side file exists it decides on its own: a package carrying both is
+// one packed by the version that wrote them in the manifest and repacked
+// since, and the dedicated file is the newer statement.
 func readEncodingFromZip(zipPath string) (pkgEncoding, error) {
 	var enc pkgEncoding
 	r, err := zip.OpenReader(zipPath)
@@ -40,23 +49,33 @@ func readEncodingFromZip(zipPath string) (pkgEncoding, error) {
 		return enc, err
 	}
 	defer r.Close()
+	var side, inManifest *zip.File
 	for _, f := range r.File {
-		if filepath.ToSlash(f.Name) != manifest.Filename {
-			continue
+		switch filepath.ToSlash(f.Name) {
+		case manifest.EncodingFilename:
+			side = f
+		case manifest.Filename:
+			inManifest = f
 		}
-		rc, err := f.Open()
-		if err != nil {
-			return enc, err
-		}
-		data, err := io.ReadAll(rc)
-		rc.Close()
-		if err != nil {
-			return enc, err
-		}
-		if err := json.Unmarshal(data, &enc); err != nil {
-			return enc, fmt.Errorf("manifest in zip is not valid JSON: %w", err)
-		}
+	}
+	src, what := side, manifest.EncodingFilename
+	if src == nil {
+		src, what = inManifest, manifest.Filename
+	}
+	if src == nil {
 		return enc, nil
+	}
+	rc, err := src.Open()
+	if err != nil {
+		return enc, err
+	}
+	data, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return enc, err
+	}
+	if err := json.Unmarshal(data, &enc); err != nil {
+		return enc, fmt.Errorf("%s in zip is not valid JSON: %w", what, err)
 	}
 	return enc, nil
 }
@@ -80,7 +99,9 @@ func readEncodingFromZip(zipPath string) (pkgEncoding, error) {
 func (i *Installer) checkEncoding(zipPath, pkgName string) error {
 	enc, err := readEncodingFromZip(zipPath)
 	if err != nil {
-		return fmt.Errorf("cannot read manifest from zip: %w", err)
+		// Not "manifest": the facts may come from either file, and the inner
+		// error names the one that could not be read.
+		return fmt.Errorf("cannot read the package's encoding facts: %w", err)
 	}
 	pkgCharset := strings.TrimSpace(enc.CharacterEncoding)
 	pkgLength := strings.ToUpper(strings.TrimSpace(enc.LengthSemantics))

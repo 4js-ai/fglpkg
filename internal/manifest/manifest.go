@@ -24,6 +24,22 @@ var componentTypeName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
 
 const Filename = "fglpkg.json"
 
+// EncodingFilename names the file inside a packed archive that carries the
+// package's character-encoding facts: characterEncoding, lengthSemantics and
+// stringResourceEncodings (GIS-285).
+//
+// They live BESIDE the shipped manifest rather than in it because fglpkg
+// <= 4.2.9 loads an installed package's manifest strictly and refuses a field
+// it does not know. A manifest carrying them makes an older client fail to
+// build the merged FGLLDPATH root, and with it `docs`, `run`, `list` and the
+// chmod of a package's bin scripts — for EVERY package packed by 4.2.10, not
+// only the ones that need the facts. An extra file in the archive is ignored
+// by a client that knows nothing about it.
+//
+// The author still declares these in their own fglpkg.json; only what ships
+// moves.
+const EncodingFilename = "fglpkg-encoding.json"
+
 // Manifest represents the fglpkg.json file for a package or project.
 type Manifest struct {
 	// Schema is the optional JSON Schema URL editors use for autocomplete

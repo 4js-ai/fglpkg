@@ -96,7 +96,7 @@ func TestInfoFetchDescribesAVersionWithNoBuildForThisGenero(t *testing.T) {
 	t.Setenv("FGLPKG_GENERO_VERSION", "4.01.12")
 	rs := provider.NewRepositorySet([]provider.Provider{provider.NewGeneroProvider(config.GIName)}, nil, nil)
 
-	info, err := infoFetch(rs, "fglunit", "1.0.1")
+	info, err := infoFetch(rs, "fglunit", "1.0.1", false)
 	if err != nil {
 		t.Fatalf("info must describe fglunit@1.0.1 on Genero 4: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestInfoFetchDescribesAVersionWithNoBuildForThisGenero(t *testing.T) {
 	}
 
 	// Where the runtime does have a build, that is the one described.
-	info, err = infoFetch(rs, "fglunit", "1.0.0")
+	info, err = infoFetch(rs, "fglunit", "1.0.0", false)
 	if err != nil {
 		t.Fatalf("infoFetch fglunit@1.0.0: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestInfoFetchDescribesAVersionWithNoBuildForThisGenero(t *testing.T) {
 	}
 
 	// Only the no-build case falls back; anything else is still an error.
-	if _, err := infoFetch(rs, "fglunit", "9.9.9"); err == nil {
+	if _, err := infoFetch(rs, "fglunit", "9.9.9", false); err == nil {
 		t.Error("infoFetch of a nonexistent version must still fail")
 	}
 }

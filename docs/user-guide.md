@@ -2326,6 +2326,8 @@ Following that is what `pack` can prove: with the sources staged beside the arti
 
 Two things will cost you the proof, and `pack` says which on stderr: a non-ASCII `&include` that the source pulls in, and a source left newer than the module it was supposed to produce. Recompile, or declare `characterEncoding` yourself.
 
+You declare these fields in your own `fglpkg.json`, and `pack` ships them in a file of their own inside the archive, `fglpkg-encoding.json`, next to the shipped manifest. That is so an older fglpkg can still read your package: fglpkg 4.2.9 and earlier refuse a manifest field they do not know, and refusing it would cost them `docs`, `run`, the version in `list` and the merged `FGLLDPATH` root. A package that proves nothing ships no such file. One thing to know if you declare any of the three: your own project then needs fglpkg 4.2.10 or later to work on, because a project's own manifest is always read strictly. People who install your package are not affected.
+
 ### Length semantics
 
 `lengthSemantics` (`"char"` or `"byte"`) declares the `FGL_LENGTH_SEMANTICS` a consumer must use. Unlike the encoding it cannot be derived — it is a property of your code's behaviour, not its bytes. A loop over `getCharAt`, or a sorting routine, can produce nonsense under the wrong setting while the bytes look identical.
