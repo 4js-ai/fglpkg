@@ -46,23 +46,33 @@ jobs:
           if [ -n "$MACOS_NOTARY_API_KEY_JSON" ]; then echo "notary=true" >> "$GITHUB_OUTPUT"; else echo "notary=false" >> "$GITHUB_OUTPUT"; fi
           if [ -n "$FGLPKG_RELEASE_SIGNING_SEED" ]; then echo "release_sign=true" >> "$GITHUB_OUTPUT"; else echo "release_sign=false" >> "$GITHUB_OUTPUT"; fi
 
+      # rcodesign is pinned to one version AND to the SHA-256 of the exact
+      # archive, because the next two steps hand this downloaded binary the
+      # Developer ID certificate and the App Store Connect notary key. Resolving
+      # "latest" let whatever upstream published next — including a release
+      # nobody here had looked at — sign on our behalf.
+      #
+      # 0.29.0 is the version that signed v4.2.10; the digest was taken from that
+      # archive and matches the .sha256 upstream publishes beside it. The two
+      # values move together: bump the version and the digest in one commit, or
+      # the download fails closed.
       - name: Install rcodesign
         if: steps.signing.outputs.cert == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RCODESIGN_VERSION: "0.29.0"
+          RCODESIGN_SHA256: "dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002"
         run: |
-          # TODO(hardening): pin the rcodesign version (and verify its checksum)
-          # before this pipeline signs with the production 4Js Developer ID.
-          url=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
-            https://api.github.com/repos/indygreg/apple-platform-rs/releases/latest \
-            | grep -oE 'https://[^"]+apple-codesign-[^"]+x86_64-unknown-linux-musl\.tar\.gz' | head -1)
-          test -n "$url" || { echo "could not resolve rcodesign download URL"; exit 1; }
+          archive="apple-codesign-${RCODESIGN_VERSION}-x86_64-unknown-linux-musl"
+          url="https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign/${RCODESIGN_VERSION}/${archive}.tar.gz"
           echo "Installing rcodesign from $url"
+          curl -fsSL -o rcodesign.tar.gz "$url"
+          echo "${RCODESIGN_SHA256}  rcodesign.tar.gz" | sha256sum -c -
           mkdir -p /tmp/rcodesign
-          curl -fsSL "$url" | tar xz -C /tmp/rcodesign
-          bin=$(find /tmp/rcodesign -type f -name rcodesign | head -1)
-          test -n "$bin" || { echo "rcodesign binary not found in archive"; exit 1; }
-          sudo mv "$bin" /usr/local/bin/rcodesign
+          tar xzf rcodesign.tar.gz -C /tmp/rcodesign
+          # The archive lays out <name>/rcodesign, so address it rather than
+          # searching: a `find ... | head -1` would take whatever it met first.
+          sudo mv "/tmp/rcodesign/${archive}/rcodesign" /usr/local/bin/rcodesign
+          rm -f rcodesign.tar.gz
           rcodesign --version
 
       - name: Sign macOS binaries (Developer ID + hardened runtime)
@@ -74,12 +84,25 @@ jobs:
           echo "$MACOS_CERT_P12" | base64 -d > cert.p12
           printf '%s' "$MACOS_CERT_PASSWORD" > cert.pw
           for b in bin/fglpkg-darwin-arm64 bin/fglpkg-darwin-amd64; do
+            # --binary-identifier is set explicitly because the two binaries
+            # disagree without it: Go's linker ad-hoc-signs darwin/arm64 with the
+            # identifier "a.out" whatever -o says, and rcodesign keeps an
+            # identifier that is already there. v4.2.10 therefore shipped arm64
+            # as "a.out" and amd64 as "fglpkg-darwin-amd64" — one of them a name
+            # shared with every other re-signed Go arm64 binary.
             rcodesign sign \
               --p12-file cert.p12 --p12-password-file cert.pw \
+              --binary-identifier fglpkg \
               --for-notarization \
               "$b"
           done
           rm -f cert.p12 cert.pw
+          # Logged, not gated: the sign-off reads these to confirm the identity
+          # and identifier that actually went out.
+          for b in bin/fglpkg-darwin-arm64 bin/fglpkg-darwin-amd64; do
+            echo "── $b"
+            rcodesign print-signature-info "$b" | grep -E 'identifier|team' | head -20 || true
+          done
 
       - name: Notarize macOS binaries
         if: steps.signing.outputs.notary == 'true'
